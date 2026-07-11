@@ -27,7 +27,10 @@ jobs:
           pyinstaller --onefile --console --name dedupe_pic dedupe_pic.py
 
       - name: Smoke test
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
+          chcp 65001
           dist\dedupe_pic.exe --help
 
       - name: Upload artifact
