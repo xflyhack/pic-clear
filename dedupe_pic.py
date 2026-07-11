@@ -119,8 +119,14 @@ def build_index(
     items: list[Item] = []
     failed: list[Path] = []
     count = 0
+    current_dir: str | None = None
     t0 = time.time()
     for p in iter_files(root, extensions):
+        # 进入新目录时打印一次，便于观察进度
+        parent = str(p.parent)
+        if parent != current_dir:
+            current_dir = parent
+            print(f"  [dir] {current_dir}", flush=True)
         count += 1
         try:
             st = p.stat()
@@ -136,7 +142,7 @@ def build_index(
             elapsed = time.time() - t0
             rate = count / elapsed if elapsed > 0 else 0
             print(
-                f"  ...已扫描 {count} 个文件，成功 {len(items)}，"
+                f"  ...累计已扫 {count} 个文件，成功 {len(items)}，"
                 f"失败 {len(failed)}，速率 {rate:.1f} 文件/秒",
                 flush=True,
             )
