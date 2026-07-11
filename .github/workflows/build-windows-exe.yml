@@ -16,22 +16,36 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install runtime deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build single-file exe
+      - name: Install export-only deps (for yolov8n.onnx)
         run: |
-          pyinstaller --onefile --console --name dedupe_pic dedupe_pic.py
+          pip install ultralytics onnx onnxslim
 
-      - name: Smoke test
+      - name: Export yolov8n.onnx
+        run: |
+          curl -L -o yolov8n.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt
+          python -c "from ultralytics import YOLO; YOLO('yolov8n.pt').export(format='onnx', imgsz=640, opset=12, simplify=True, dynamic=False)"
+          dir yolov8n.onnx
+
+      - name: Build single-file exe (with embedded model)
+        run: |
+          pyinstaller --onefile --console --name dedupe_pic --add-data "yolov8n.onnx;." --add-data "detector.py;." --hidden-import onnxruntime --hidden-import detector dedupe_pic.py
+
+      - name: Smoke test (help)
         env:
           PYTHONIOENCODING: utf-8
         run: |
           chcp 65001
           dist\dedupe_pic.exe --help
+
+      - name: Show exe size
+        run: |
+          dir dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

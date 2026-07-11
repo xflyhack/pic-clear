@@ -8,4 +8,9 @@ dist/
 *.spec
 dedupe_report.csv
 dedupe_failed.csv
+dedupe_failed*.csv
 .DS_Store
+
+# 模型文件不进 git，由 CI 现场下载/导出
+yolov8n.pt
+yolov8n.onnx
