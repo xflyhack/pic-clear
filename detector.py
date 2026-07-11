@@ -38,6 +38,82 @@ DEFAULT_PROTECT_CLASSES = frozenset({
     "person", "bicycle", "car", "motorcycle", "bus", "train", "truck",
 })
 
+# 用于"前后帧车变化"判定：认为下面这些类别属于"车辆"
+VEHICLE_CLASSES = frozenset({
+    "bicycle", "car", "motorcycle", "bus", "train", "truck",
+})
+
+
+def _iou(box_a: tuple[float, float, float, float],
+         box_b: tuple[float, float, float, float]) -> float:
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _center(box: tuple[float, float, float, float]) -> tuple[float, float]:
+    x1, y1, x2, y2 = box
+    return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+
+def vehicle_changed(
+    prev_boxes: list[tuple[float, float, float, float]],
+    curr_boxes: list[tuple[float, float, float, float]],
+    image_size: tuple[int, int],
+    motion_threshold: float = 0.05,
+    iou_threshold: float = 0.5,
+) -> tuple[bool, str]:
+    """
+    判定两帧之间车辆是否发生"变化"，命中任一即视为变化：
+      1) 车数不同（含 0 vs N）
+      2) 车数相同，但贪心 IoU 匹配后：
+         - 有车无法匹配到 IoU >= iou_threshold 的对应车 → 变化
+         - 或某辆车中心位移 > motion_threshold * max(W, H) → 变化
+    返回 (是否变化, 原因描述)。image_size = (W, H)，来自 curr 帧。
+    """
+    n_prev, n_curr = len(prev_boxes), len(curr_boxes)
+    if n_prev != n_curr:
+        return True, f"count_changed({n_prev}->{n_curr})"
+    if n_curr == 0:
+        return False, "no_vehicle"
+
+    w, h = image_size
+    move_limit = motion_threshold * max(w, h)
+
+    # 贪心 IoU 匹配：对每个 curr，从 prev 里挑 IoU 最大的未占用者
+    used = [False] * n_prev
+    for cb in curr_boxes:
+        best_iou = -1.0
+        best_j = -1
+        for j, pb in enumerate(prev_boxes):
+            if used[j]:
+                continue
+            iou = _iou(cb, pb)
+            if iou > best_iou:
+                best_iou = iou
+                best_j = j
+        if best_j < 0 or best_iou < iou_threshold:
+            return True, f"iou_low({best_iou:.2f})"
+        used[best_j] = True
+        cx, cy = _center(cb)
+        px, py = _center(prev_boxes[best_j])
+        dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
+        if dist > move_limit:
+            return True, f"moved({dist:.1f}px>{move_limit:.1f}px)"
+
+    return False, "same"
+
+
 
 @dataclass
 class Detection:
@@ -192,6 +268,23 @@ class YoloDetector:
         dets = self.detect(image_path)
         hits = [d for d in dets if d.class_name in protect]
         return (len(hits) > 0, hits)
+
+    def detect_full(
+        self, image_path: str | Path, protect: set[str]
+    ) -> tuple[bool, list[Detection], list[Detection], tuple[int, int] | None]:
+        """
+        一次调用返回全部信息，避免主脚本对同一张图重复推理：
+          (是否含保护类别, 保护命中列表, 车辆命中列表, 图像尺寸 (W,H))
+        """
+        try:
+            with Image.open(image_path) as im:
+                size = im.size
+        except Exception:
+            size = None
+        dets = self.detect(image_path)
+        hits = [d for d in dets if d.class_name in protect]
+        vehicles = [d for d in dets if d.class_name in VEHICLE_CLASSES]
+        return (len(hits) > 0, hits, vehicles, size)
 
 
 def resolve_model_path(user_path: str | None) -> Path | None:

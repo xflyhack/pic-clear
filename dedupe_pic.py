@@ -100,6 +100,11 @@ class Item:
     is_protected: bool = False
     detected_classes: tuple[str, ...] = ()
     max_conf: float = 0.0
+    # 运动检测相关
+    vehicle_boxes: tuple[tuple[float, float, float, float], ...] = ()
+    image_size: tuple[int, int] | None = None
+    motion_protected: bool = False   # 相邻帧车变化 → True
+    motion_reason: str = ""          # 变化原因描述（写入 CSV）
 
 
 def iter_files(root: Path, extensions: set[str] | None) -> Iterable[Path]:
@@ -151,10 +156,11 @@ def build_index(
         item = Item(p, st.st_size, st.st_mtime, h)
         if detector is not None and protect_classes:
             try:
-                protected, hits = detector.has_protected(p, protect_classes)
+                protected, hits, vehicles, size = detector.detect_full(
+                    p, protect_classes
+                )
             except Exception as e:
-                # 单张检测失败不影响整体，只记录
-                protected, hits = False, []
+                protected, hits, vehicles, size = False, [], [], None
                 print(f"  [warn] 检测失败 {p}: {e}", flush=True)
             if protected:
                 item.is_protected = True
@@ -163,6 +169,9 @@ def build_index(
                 )
                 item.max_conf = max((d.confidence for d in hits), default=0.0)
                 protect_hits += 1
+            # 车框和尺寸留给后续"相邻帧车变化"判定使用
+            item.vehicle_boxes = tuple(d.box_xyxy for d in vehicles)
+            item.image_size = size
         items.append(item)
 
         if count % log_every == 0:
@@ -221,6 +230,57 @@ def cluster(items: list[Item], threshold: int) -> list[list[Item]]:
     return [g for g in groups.values() if len(g) >= 2]
 
 
+# ------------------------ 相邻帧车辆变化标记 ---------------------------------
+
+def mark_motion_changes(
+    items: list[Item],
+    motion_threshold: float,
+    iou_threshold: float = 0.5,
+) -> int:
+    """
+    在同一目录内按文件名字典序排序，逐对比较相邻帧车辆状态；
+    若发生变化，则将两帧都标记 motion_protected=True。
+    返回被标记的图片总数。
+    """
+    try:
+        from detector import vehicle_changed  # type: ignore
+    except ImportError:
+        from importlib import import_module
+        vehicle_changed = import_module("detector").vehicle_changed  # type: ignore
+
+    # 按 parent 目录分组
+    by_dir: dict[str, list[Item]] = {}
+    for it in items:
+        by_dir.setdefault(str(it.path.parent), []).append(it)
+
+    marked = 0
+    for dir_path, seq in by_dir.items():
+        if len(seq) < 2:
+            continue
+        # 按文件名字典序
+        seq.sort(key=lambda x: x.path.name)
+        for i in range(1, len(seq)):
+            prev, curr = seq[i - 1], seq[i]
+            # 尺寸缺失就跳过（一般不会）
+            size = curr.image_size or prev.image_size
+            if size is None:
+                continue
+            changed, reason = vehicle_changed(
+                list(prev.vehicle_boxes),
+                list(curr.vehicle_boxes),
+                size,
+                motion_threshold=motion_threshold,
+                iou_threshold=iou_threshold,
+            )
+            if changed:
+                for it in (prev, curr):
+                    if not it.motion_protected:
+                        it.motion_protected = True
+                        it.motion_reason = reason
+                        marked += 1
+    return marked
+
+
 # --------------------------- 选择保留 ---------------------------------------
 
 def pick_keeper(group: list[Item], strategy: str) -> Item:
@@ -233,19 +293,20 @@ def pick_keeper(group: list[Item], strategy: str) -> Item:
     raise ValueError(f"未知策略: {strategy}")
 
 
+def _needs_keep(x: Item) -> bool:
+    """任一保护信号命中即强制保留：含保护类别 或 前后帧车辆变化。"""
+    return x.is_protected or x.motion_protected
+
+
 def decide_actions(group: list[Item], strategy: str) -> dict[int, str]:
     """
-    决定组内每个 item 的 action：KEEP / DELETE。
-    规则（用户需求：宁多不少）：
-      - 组内所有 is_protected=True 的 item → 全部 KEEP
-      - 剩下的 item 中按 strategy 选一张 KEEP，其余 DELETE
-      - 特殊：如果整组都是 protected，全部 KEEP，不删除
-      - 特殊：如果整组都不 protected，走原策略
-    返回 id(item) -> action 的字典
+    组内每个 item 的 action 决定：
+      - 触发任一保护信号（含保护类别 / 相邻帧车变化）→ 全部 KEEP
+      - 其余未保护的图，按 strategy 选一张 KEEP，其余 DELETE
     """
     actions: dict[int, str] = {}
-    protected = [x for x in group if x.is_protected]
-    unprotected = [x for x in group if not x.is_protected]
+    protected = [x for x in group if _needs_keep(x)]
+    unprotected = [x for x in group if not _needs_keep(x)]
 
     for x in protected:
         actions[id(x)] = "KEEP"
@@ -276,6 +337,7 @@ def write_report(
             [
                 "group_id", "action", "path", "size_bytes", "mtime",
                 "phash_hex", "is_protected", "detected_classes", "max_conf",
+                "motion_protected", "motion_reason",
             ]
         )
         for gid, group in enumerate(groups, 1):
@@ -299,6 +361,8 @@ def write_report(
                         "yes" if item.is_protected else "no",
                         "|".join(item.detected_classes),
                         f"{item.max_conf:.3f}" if item.max_conf else "",
+                        "yes" if item.motion_protected else "no",
+                        item.motion_reason,
                     ]
                 )
     if failed:
@@ -415,6 +479,16 @@ def parse_args() -> argparse.Namespace:
         help="目标检测置信度阈值（0~1，越大越严格）。默认: %(default)s",
     )
     p.add_argument(
+        "--motion-threshold",
+        type=float,
+        default=0.05,
+        help=(
+            "同目录相邻帧车辆运动阈值（相对 max(W,H) 的比例，0=最灵敏）。"
+            "任一车中心位移超过该比例，或 IoU 匹配失败，均视为发生变化。"
+            "默认: %(default)s"
+        ),
+    )
+    p.add_argument(
         "--trash-dir",
         type=Path,
         default=None,
@@ -448,6 +522,8 @@ def main() -> int:
     print(f"  相似阈值 : {args.threshold} (Hamming 距离)")
     print(f"  保留策略 : {args.strategy}")
     print(f"  目标检测 : {'关闭' if args.no_protect else '启用（YOLOv8n）'}")
+    if not args.no_protect:
+        print(f"  运动阈值 : {args.motion_threshold} (同目录相邻帧车变化)")
     print(f"  执行删除 : {'是' if args.apply else '否 (dry-run)'}")
     if args.apply:
         if args.hard_delete or args.trash_dir is None:
@@ -508,6 +584,13 @@ def main() -> int:
         f"[扫描完成] 有效图片 {len(items)}，失败/跳过 {len(failed)}，"
         f"耗时 {time.time() - t0:.1f}s"
     )
+
+    if detector is not None and items:
+        m = mark_motion_changes(items, motion_threshold=args.motion_threshold)
+        print(
+            f"[运动] 同目录相邻帧车辆变化：标记保护 {m} 张"
+            f"（motion_threshold={args.motion_threshold}）"
+        )
 
     if not items:
         print("[结束] 没有可处理的图片。")

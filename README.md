@@ -19,10 +19,14 @@
 
 - **去重**：每张图算 dHash（64-bit 差分感知哈希），组内两两 Hamming 距离 ≤ threshold 视为"接近相同"，用 Union-Find 聚类
 - **保护**：默认对每张图跑 YOLOv8n ONNX 推理，检测到 COCO 里的 `person / bicycle / car / motorcycle / bus / train / truck` 就打上"受保护"标签
+- **同目录相邻帧车变化保护**：在同一目录内，按文件名字典序视作"帧序列"，
+  逐对比较相邻两帧的车辆状态。命中任一即打上"运动保护"标签：
+  - 车数变化（如 2 辆 → 3 辆，或 1 辆 → 0 辆）
+  - 车框贪心匹配 IoU < 0.5（无法一一对应）
+  - 任一车中心位移 > `--motion-threshold` × max(W, H) 像素
 - **决策**：
-  - 组内**所有受保护图 → 全部 KEEP**
-  - 组内非保护图 → 按 `--strategy` 挑一张 KEEP，其余 DELETE
-  - 组内全都受保护 → 全组不删
+  - 组内任何图触发保护（含保护类别 或 相邻帧车变化）→ **全部 KEEP**
+  - 组内全部未保护 → 按 `--strategy` 挑一张 KEEP，其余 DELETE
 
 ## 使用步骤
 
@@ -62,6 +66,8 @@ dedupe_pic.exe D:\pic-clear\actions\runs\29158386313 --threshold 3
 | `is_protected` | `yes` = 检测到保护类别 |
 | `detected_classes` | 命中的类别（如 `person\|car`）|
 | `max_conf` | 最高置信度 |
+| `motion_protected` | `yes` = 同目录相邻帧车辆变化，被保护 |
+| `motion_reason` | 变化原因：`count_changed(1->2)` / `moved(80px>54px)` / `iou_low(0.3)` |
 
 用 Excel 打开 CSV 抽查几组，确认无误。
 
@@ -102,6 +108,9 @@ dedupe_pic.exe <根目录> [选项]
                            默认: person,bicycle,car,motorcycle,bus,train,truck
                            可选 COCO 80 类中任意组合，如追加 airplane,boat 等
   --conf FLOAT             置信度阈值，默认 0.35（越大越严格，漏检风险变高）
+  --motion-threshold F     同目录相邻帧车运动阈值（占 max(W,H) 的比例），默认 0.05
+                           越小越灵敏（车抖动一下就当变化），越大越钝
+                           推荐：0.02~0.05 车辆序列 / 0.10 电影胶片式大幅移动
 
 删除相关（不加 --apply 一律 dry-run）：
   --apply                  真正执行删除
