@@ -107,6 +107,89 @@ class Item:
     motion_reason: str = ""          # 变化原因描述（写入 CSV）
 
 
+def count_files(root: Path, extensions: set[str] | None) -> int:
+    """预扫一遍统计总文件数；不解码，只走 os.walk，速度很快。"""
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            if extensions:
+                dot = name.rfind(".")
+                if dot < 0:
+                    continue
+                if name[dot + 1:].lower() in extensions:
+                    total += 1
+            else:
+                total += 1
+    return total
+
+
+def _fmt_eta(seconds: float) -> str:
+    if seconds < 0 or seconds != seconds:  # NaN
+        return "?"
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds/60:.1f}m"
+    return f"{seconds/3600:.1f}h"
+
+
+class ProgressReporter:
+    """按时间节流的进度打印器，支持 done/total、速率、ETA。
+
+    触发打印条件（任一即触发）：
+      - 距上次打印超过 min_interval 秒
+      - 累计处理了 min_count_step 张（保证快机器也有心跳）
+      - force=True
+    """
+
+    def __init__(
+        self,
+        total: int,
+        prefix: str = "",
+        min_interval: float = 3.0,
+        min_count_step: int = 200,
+    ) -> None:
+        self.total = total
+        self.prefix = prefix
+        self.min_interval = min_interval
+        self.min_count_step = max(1, min_count_step)
+        self.start = time.time()
+        self.last_print = 0.0
+        self.last_done = 0
+        self.done = 0
+
+    def update(self, done: int, extra: str = "", force: bool = False) -> None:
+        self.done = done
+        now = time.time()
+        by_time = (now - self.last_print) >= self.min_interval
+        by_count = (done - self.last_done) >= self.min_count_step
+        if not (force or by_time or by_count):
+            return
+        self.last_print = now
+        self.last_done = done
+        elapsed = now - self.start
+        rate = done / elapsed if elapsed > 0 else 0.0
+        remain = (self.total - done) / rate if rate > 0 else float("nan")
+        pct = 100.0 * done / self.total if self.total else 0.0
+        msg = (
+            f"{self.prefix} {done}/{self.total} ({pct:.1f}%)  "
+            f"速率 {rate:.1f}/s  已用 {_fmt_eta(elapsed)}  剩余 ~{_fmt_eta(remain)}"
+        )
+        if extra:
+            msg += f"  {extra}"
+        print(msg, flush=True)
+
+    def finish(self, extra: str = "") -> None:
+        elapsed = time.time() - self.start
+        rate = self.done / elapsed if elapsed > 0 else 0.0
+        print(
+            f"{self.prefix} 完成 {self.done}/{self.total}  "
+            f"平均 {rate:.1f}/s  总耗时 {_fmt_eta(elapsed)}"
+            + (f"  {extra}" if extra else ""),
+            flush=True,
+        )
+
+
 def iter_files(root: Path, extensions: set[str] | None) -> Iterable[Path]:
     """
     递归遍历 root。如果 extensions 为空，则返回所有文件（靠 Pillow 判定是否图片）。
@@ -127,16 +210,29 @@ def build_index(
     extensions: set[str] | None,
     detector=None,
     protect_classes: set[str] | None = None,
-    log_every: int = 200,
+    total: int | None = None,
+    progress_interval: float = 5.0,
 ) -> tuple[list[Item], list[Path]]:
     """扫描 root 下所有匹配图片，计算 dHash；如果提供了 detector，
-    还会跑目标检测并在 Item 上打上 is_protected 标记。"""
+    还会跑目标检测并在 Item 上打上 is_protected 标记。
+
+    total: 预扫得到的总文件数；用于计算百分比 / ETA。
+    progress_interval: 进度打印的最小时间间隔（秒）。
+    """
     items: list[Item] = []
     failed: list[Path] = []
     count = 0
     current_dir: str | None = None
     protect_hits = 0
-    t0 = time.time()
+
+    stage = "扫描+检测" if detector is not None else "扫描"
+    reporter = ProgressReporter(
+        total or 0,
+        prefix=f"  [{stage}]",
+        min_interval=progress_interval,
+        min_count_step=50,
+    )
+
     for p in iter_files(root, extensions):
         parent = str(p.parent)
         if parent != current_dir:
@@ -147,10 +243,12 @@ def build_index(
             st = p.stat()
         except OSError:
             failed.append(p)
+            reporter.update(count)
             continue
         h = dhash(p)
         if h is None:
             failed.append(p)
+            reporter.update(count)
             continue
 
         item = Item(p, st.st_size, st.st_mtime, h)
@@ -169,24 +267,18 @@ def build_index(
                 )
                 item.max_conf = max((d.confidence for d in hits), default=0.0)
                 protect_hits += 1
-            # 车框和尺寸留给后续"相邻帧车变化"判定使用
             item.vehicle_boxes = tuple(d.box_xyxy for d in vehicles)
             item.image_size = size
         items.append(item)
 
-        if count % log_every == 0:
-            elapsed = time.time() - t0
-            rate = count / elapsed if elapsed > 0 else 0
-            extra = (
-                f"，受保护 {protect_hits}" if detector is not None else ""
-            )
-            print(
-                f"  ...累计已扫 {count} 个文件，成功 {len(items)}，"
-                f"失败 {len(failed)}{extra}，速率 {rate:.1f} 文件/秒",
-                flush=True,
-            )
-    if detector is not None:
-        print(f"[检测] 共 {protect_hits} 张图片被判定为受保护类别")
+        extra = (
+            f"受保护 {protect_hits}" if detector is not None else ""
+        )
+        reporter.update(count, extra=extra, force=(count == 1))
+
+    reporter.finish(
+        extra=(f"受保护 {protect_hits}") if detector is not None else ""
+    )
     return items, failed
 
 
@@ -212,17 +304,16 @@ def cluster(items: list[Item], threshold: int) -> list[list[Item]]:
             parent[ra] = rb
 
     print(f"[聚类] 开始两两比较，共 {n} 个哈希，阈值 <= {threshold}", flush=True)
-    t0 = time.time()
+    reporter = ProgressReporter(
+        n, prefix="  [聚类]", min_interval=5.0, min_count_step=500,
+    )
     for i in range(n):
         hi = items[i].phash
         for j in range(i + 1, n):
             if hamming(hi, items[j].phash) <= threshold:
                 union(i, j)
-        if (i + 1) % 500 == 0:
-            print(
-                f"  ...已比较 {i + 1}/{n}，耗时 {time.time() - t0:.1f}s",
-                flush=True,
-            )
+        reporter.update(i + 1, force=(i == 0))
+    reporter.finish()
 
     groups: dict[int, list[Item]] = {}
     for idx in range(n):
@@ -567,6 +658,8 @@ def main() -> int:
         }
         print(f"[检测] 加载模型: {model_path}")
         print(f"[检测] 保护类别: {sorted(protect_set)}  conf>={args.conf}")
+        _t = time.time()
+        print("[检测] 正在初始化 ONNX Runtime，这可能需要几秒...", flush=True)
         try:
             detector = _det_mod.YoloDetector(
                 str(model_path), conf_thres=args.conf
@@ -574,15 +667,28 @@ def main() -> int:
         except Exception as e:
             print(f"[FATAL] 初始化检测器失败: {e}", file=sys.stderr)
             return 2
+        print(f"[检测] 模型就绪，耗时 {time.time()-_t:.1f}s", flush=True)
+
+    print("[预扫] 正在统计文件总数...", flush=True)
+    _t_pre = time.time()
+    total = count_files(args.root, extensions)
+    print(
+        f"[预扫] 共发现 {total} 个待处理文件，耗时 {time.time()-_t_pre:.1f}s",
+        flush=True,
+    )
+    if total == 0:
+        print("[结束] 没有可处理的文件。")
+        return 0
 
     t0 = time.time()
     items, failed = build_index(
         args.root, extensions,
         detector=detector, protect_classes=protect_set,
+        total=total,
     )
     print(
         f"[扫描完成] 有效图片 {len(items)}，失败/跳过 {len(failed)}，"
-        f"耗时 {time.time() - t0:.1f}s"
+        f"耗时 {_fmt_eta(time.time() - t0)}"
     )
 
     if detector is not None and items:
