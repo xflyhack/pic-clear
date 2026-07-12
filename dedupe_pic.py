@@ -299,13 +299,25 @@ def build_index(
             except Exception as e:
                 protected, hits, vehicles, size = False, [], [], None
                 print(f"  [warn] 检测失败 {p}: {e}", flush=True)
-            if protected:
+            # 保护口径（默认规则）：
+            #   有 person             -> 硬保护 (is_protected=True)
+            #   只有车类，没有 person -> 不硬保护，交给"相邻帧车运动"判定
+            #                            （动了就 motion_protected=True 保留，
+            #                              没动就参与相似度去重被删）
+            has_person = any(d.class_name == "person" for d in hits)
+            if has_person:
                 item.is_protected = True
                 item.detected_classes = tuple(
                     sorted({d.class_name for d in hits})
                 )
                 item.max_conf = max((d.confidence for d in hits), default=0.0)
                 protect_hits += 1
+            elif hits:
+                # 只有车类命中：记录类别方便 CSV 查看，但不设 is_protected
+                item.detected_classes = tuple(
+                    sorted({d.class_name for d in hits})
+                )
+                item.max_conf = max((d.confidence for d in hits), default=0.0)
             item.vehicle_boxes = tuple(d.box_xyxy for d in vehicles)
             item.image_size = size
         items.append(item)
@@ -606,7 +618,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--protect",
         default="person,bicycle,car,motorcycle,bus,train,truck",
-        help="要保护的 COCO 类别（逗号分隔）。默认: %(default)s",
+        help=(
+            "要检测的 COCO 类别（逗号分隔）。默认: %(default)s。 "
+            "注意：其中 person 是硬保护，命中即保留；其余车类只有在"
+            "相邻帧位置发生变化时才会被 motion 保护，否则参与相似度去重。"
+        ),
     )
     p.add_argument(
         "--conf",
@@ -709,6 +725,7 @@ def main() -> int:
     print(f"  保留策略 : {args.strategy}")
     print(f"  目标检测 : {'关闭' if args.no_protect else '启用（YOLOv8n）'}")
     if not args.no_protect:
+        print(f"  保护规则 : 有 person -> 硬保护；只有车类 -> 动了才保护")
         print(f"  运动阈值 : {args.motion_threshold} (同目录相邻帧车变化)")
     print(f"  执行删除 : {'是' if args.apply else '否 (dry-run)'}")
     if args.apply:
