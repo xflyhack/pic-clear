@@ -50,6 +50,10 @@ jobs:
             --add-data "yolov8n.onnx;." ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import onnxruntime ^
+            --hidden-import PIL ^
+            --hidden-import PIL.Image ^
+            --hidden-import PIL.ImageFile ^
+            --hidden-import numpy ^
             --hidden-import json ^
             --hidden-import base64 ^
             --hidden-import hashlib ^
