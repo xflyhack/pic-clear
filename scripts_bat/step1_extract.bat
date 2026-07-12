@@ -71,7 +71,7 @@ echo   sjbz 根目录 ： %SRC_ROOT%
 echo ------------------------------------------------------------
 echo.
 
-REM ---- Step B: 列出 sjbz_root 下的一级子目录，让用户选 ----
+REM ---- Step B: 列出 sjbz_root 下一级子目录，让用户选 ----
 set "SUB_COUNT=0"
 for /d %%D in ("%SRC_ROOT%\*") do (
     set /a SUB_COUNT+=1
@@ -87,7 +87,7 @@ if "%SUB_COUNT%"=="0" (
 
 echo [子目录] %SRC_ROOT% 下的一级子目录（共 %SUB_COUNT% 个）：
 for /l %%i in (1,1,%SUB_COUNT%) do (
-    echo    [%%i] !SUB_%%i!
+    call echo    [%%i] %%SUB_%%i%%
 )
 echo.
 echo 输入方式（可组合）：
@@ -97,53 +97,58 @@ echo    - 全部：                  all
 echo.
 set /p "SEL=请输入你要处理的子目录: "
 if not defined SEL ( echo 未输入，退出。 & pause & exit /b 2 )
-
-REM ---- 解析选择，写入 SELECTED[1..N] ----
 set "SELECTED_COUNT=0"
 
-REM 全部
+REM all 快捷路径
 if /I "!SEL!"=="all" (
     for /l %%i in (1,1,%SUB_COUNT%) do (
         set /a SELECTED_COUNT+=1
-        set "SELECTED[!SELECTED_COUNT!]=!SUB_%%i!"
+        call set "NAME=%%SUB_%%i%%"
+        call set "SELECTED[!SELECTED_COUNT!]=%%NAME%%"
     )
     goto :SUB_DONE
 )
 
-REM 逗号分隔 -> 空格分隔（for %%t 遍历）
+REM 逗号分隔 -> 空格分隔，逐个 token 走子过程
 set "TOKENS=!SEL:,= !"
-for %%T in (!TOKENS!) do (
-    set "TOK=%%T"
-    REM 判断是否是区间 a-b
-    echo !TOK! | findstr /r "^[0-9][0-9]*-[0-9][0-9]*$" >nul && (
-        for /f "tokens=1,2 delims=-" %%a in ("!TOK!") do (
-            set "A=%%a"
-            set "B=%%b"
-            for /l %%k in (!A!,1,!B!) do (
-                if %%k GEQ 1 if %%k LEQ %SUB_COUNT% (
-                    set /a SELECTED_COUNT+=1
-                    call set "NAME=%%SUB_%%k%%"
-                    call set "SELECTED[!SELECTED_COUNT!]=%%NAME%%"
-                )
-            )
-        )
-    ) || (
-        REM 单个序号
-        echo !TOK! | findstr /r "^[0-9][0-9]*$" >nul && (
-            set "K=!TOK!"
-            if !K! GEQ 1 if !K! LEQ %SUB_COUNT% (
-                set /a SELECTED_COUNT+=1
-                call set "NAME=%%SUB_!K!%%"
-                call set "SELECTED[!SELECTED_COUNT!]=!NAME!"
-            )
-        )
-    )
-)
+for %%T in (!TOKENS!) do call :ADD_SEL "%%T"
 
 if "!SELECTED_COUNT!"=="0" (
     echo [错误] 输入 "!SEL!" 无法解析出有效子目录。
     pause & exit /b 2
 )
+
+goto :SUB_DONE
+
+
+REM ============ :ADD_SEL：处理一个 token（'2' 或 '1-3'）====================
+:ADD_SEL
+set "TOK=%~1"
+echo(!TOK!| findstr /r "^[0-9][0-9]*-[0-9][0-9]*$" >nul
+if not errorlevel 1 (
+    for /f "tokens=1,2 delims=-" %%a in ("!TOK!") do (
+        for /l %%k in (%%a,1,%%b) do call :ADD_ONE %%k
+    )
+    goto :EOF
+)
+echo(!TOK!| findstr /r "^[0-9][0-9]*$" >nul
+if not errorlevel 1 (
+    call :ADD_ONE !TOK!
+)
+goto :EOF
+
+
+REM ============ :ADD_ONE：把一个序号追加到 SELECTED[] =====================
+:ADD_ONE
+set "K=%~1"
+if %K% LSS 1 goto :EOF
+if %K% GTR %SUB_COUNT% goto :EOF
+set /a SELECTED_COUNT+=1
+REM 用 call 二次解析，让 %SUB_1% 这种间接变量能拿到值
+call set "NAME=%%SUB_%K%%%"
+call set "SELECTED[%SELECTED_COUNT%]=%%NAME%%"
+goto :EOF
+
 
 :SUB_DONE
 echo.
@@ -152,9 +157,7 @@ for /l %%i in (1,1,!SELECTED_COUNT!) do (
     call echo    - %%SELECTED[%%i]%%
 )
 echo.
-
-REM 建议关闭 QuickEdit
-echo [提示] 如果窗口卡住无输出，按一下 Enter 或 Esc 恢复。
+echo [提示] 如果窗口卡住看起来无输出，按一下 Enter 或 Esc 恢复。
 echo        建议永久关闭"快速编辑模式"：右键窗口标题 -^> 属性 -^> 编辑选项。
 echo.
 
@@ -194,7 +197,7 @@ echo   [%1/!SELECTED_COUNT!] 抽帧：!SUBNAME!
 echo   源  ： !SRC_DIR!
 echo   目标： !DST_DIR!
 echo ############################################################
-for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format HH:mm:ss"') do echo [%%t] START extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext .h265 ...
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format HH:mm:ss"') do echo [%%t] START extract_frames.exe
 extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext .h265
 set "RC=!ERRORLEVEL!"
 endlocal & exit /b %RC%
