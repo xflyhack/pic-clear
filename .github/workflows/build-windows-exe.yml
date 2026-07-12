@@ -79,11 +79,13 @@ jobs:
         run: |
           chcp 65001
           dist\dedupe_pic.exe D:\
-          if %ERRORLEVEL% NEQ 3 (
-            echo Unexpected exit code %ERRORLEVEL% ^(expected 3^)
-            exit /b 1
+          set RC=%ERRORLEVEL%
+          if "%RC%"=="3" (
+            echo Smoke test PASS: got expected exit code 3
+            exit /b 0
           )
-          echo Smoke test PASS: got expected exit code 3
+          echo Unexpected exit code %RC% ^(expected 3^)
+          exit /b 1
         shell: cmd
 
       - name: Show exe size
