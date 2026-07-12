@@ -28,6 +28,10 @@ set "THRESHOLD=3"
 set "INTERVAL=5"
 set "MOTION="
 set "RUN_ONCE=0"
+REM 当日累计剩余图片数超过该值就停止 watcher（不影响正在处理的目录）
+REM 改为 0 或不设置来禁用
+set "DAILY_REMAIN_LIMIT=80000"
+set "DAILY_LIMIT_HIT=0"
 
 :PARSE_ARGS
 if "%~1"=="" goto :PARSED
@@ -79,6 +83,10 @@ echo.
 set "TOTAL_PROCESSED=0"
 
 :LOOP
+if "%DAILY_LIMIT_HIT%"=="1" (
+    call :LOG_OK "已达当日剩余阈值 %DAILY_REMAIN_LIMIT%，watcher 停止（不影响正在处理的目录）"
+    endlocal & exit /b 0
+)
 set "FOUND_THIS_ROUND=0"
 
 for /f "delims=" %%M in ('dir /s /b /a-d "%WATCH_ROOT%\_done.marker" 2^>nul') do (
@@ -107,6 +115,7 @@ REM ====================================================================
 REM  :PROCESS_ONE  in: MARKER = <某目录>\_done.marker 的完整路径
 REM ====================================================================
 :PROCESS_ONE
+if "%DAILY_LIMIT_HIT%"=="1" goto :EOF
 setlocal EnableDelayedExpansion
 
 for %%F in ("!MARKER!") do set "TARGET_DIR=%%~dpF"
@@ -146,6 +155,7 @@ set "T2=%TIME:~0,8%"
 if "!RC!"=="0" (
     > "!TARGET_DIR!\_dedup_done.marker" echo done
     call :LOG_OK "!T2!  完成: !TARGET_DIR!"
+    call :DO_STATS "!TARGET_DIR!"
 ) else (
     > "!TARGET_DIR!\_dedup_failed.marker" echo rc=!RC!
     call :LOG_ERR "!T2!  dedupe 失败 rc=!RC!  目录: !TARGET_DIR!"
@@ -153,7 +163,37 @@ if "!RC!"=="0" (
     call :LOG_ERR "        排查后手工删除 _dedup_failed.marker 即可让下轮继续"
 )
 
-endlocal & set /a FOUND_THIS_ROUND+=1 & set /a TOTAL_PROCESSED+=1
+REM 把内部可能已置位的 DAILY_LIMIT_HIT 带出 setlocal 边界
+set "_HIT=!DAILY_LIMIT_HIT!"
+endlocal & set /a FOUND_THIS_ROUND+=1 & set /a TOTAL_PROCESSED+=1 & set "DAILY_LIMIT_HIT=%_HIT%"
+goto :EOF
+
+
+REM ====================================================================
+REM  :DO_STATS  <TARGET_DIR>
+REM  调 append_stats.bat 拿到"当日累计剩余"，超阈值就设 DAILY_LIMIT_HIT=1
+REM  用 tempfile 中转 stdout，避免嵌套 for/if + delayed expansion 的坑
+REM ====================================================================
+:DO_STATS
+REM 不再 setlocal，直接在调用者作用域修改 DAILY_LIMIT_HIT
+set "TDIR=%~1"
+set "STATS_BAT=%~dp0append_stats.bat"
+if not exist "!STATS_BAT!" (
+    call :LOG_WARN "append_stats.bat 不存在: !STATS_BAT!"
+    goto :EOF
+)
+set "STATS_TMP=%TEMP%\dedupe_stats_%RANDOM%_%RANDOM%.txt"
+call "!STATS_BAT!" "!TDIR!" > "!STATS_TMP!" 2>nul
+set "CUM_REMAIN="
+for /f "usebackq delims=" %%C in ("!STATS_TMP!") do set "CUM_REMAIN=%%C"
+del "!STATS_TMP!" 2>nul
+if not defined CUM_REMAIN (
+    call :LOG_WARN "append_stats.bat 无输出，跳过阈值判断"
+    goto :EOF
+)
+call :LOG_INFO "        当日累计剩余 !CUM_REMAIN! / 阈值 %DAILY_REMAIN_LIMIT%"
+if %DAILY_REMAIN_LIMIT% LEQ 0 goto :EOF
+if !CUM_REMAIN! GEQ %DAILY_REMAIN_LIMIT% set "DAILY_LIMIT_HIT=1"
 goto :EOF
 
 
