@@ -16,3 +16,6 @@ yolov8n.pt
 yolov8n.onnx
 license.lic
 dist_obf/
+
+# 临时打包/下发用的 zip
+*.zip

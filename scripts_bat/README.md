@@ -2,6 +2,9 @@
 
 给堡垒机 Windows 用的一键脚本。把两个 exe 放到系统 PATH（推荐 `C:\Windows\System32`），bat 自动定位 `Z:\sjbz_*` 源目录，让你**挑选要处理的子目录**，把结果写到 `Z:\切帧结果\` 下、层级完全对齐。
 
+> 想要**后台运行 + 关窗口不中断 + 集中日志**？请看 `docs/pipeline_exe.md`（`pipeline.exe`）。
+> 本目录下的 bat 保留，用于**前台交互 + 逐个 Y/N 确认删除**的场景。
+
 ## 前置准备（一次性）
 
 1. 把 `extract_frames.exe`、`dedupe_pic.exe`、`license.lic` 复制到 `C:\Windows\System32\`

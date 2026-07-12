@@ -1,0 +1,96 @@
+name: Build Pipeline EXE
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography>=41.0
+          pip install pyinstaller pyarmor
+
+      - name: Prepare build folder
+        run: |
+          mkdir build_pipeline
+          copy pipeline.py build_pipeline\
+          copy licensing.py build_pipeline\
+        shell: cmd
+
+      - name: Obfuscate with PyArmor
+        run: |
+          cd build_pipeline
+          pyarmor gen --output dist_obf pipeline.py licensing.py
+          dir dist_obf
+          copy /Y dist_obf\pipeline.py pipeline.py
+          copy /Y dist_obf\licensing.py licensing.py
+          cd ..
+        shell: cmd
+
+      - name: Build single-file exe
+        run: |
+          cd build_pipeline
+          pyinstaller --onefile --console --name pipeline ^
+            --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
+            --hidden-import json ^
+            --hidden-import base64 ^
+            --hidden-import hashlib ^
+            --hidden-import socket ^
+            --hidden-import subprocess ^
+            --hidden-import datetime ^
+            --hidden-import signal ^
+            --hidden-import ctypes ^
+            --hidden-import ctypes.wintypes ^
+            --hidden-import cryptography ^
+            --hidden-import cryptography.hazmat.primitives.asymmetric.padding ^
+            --hidden-import cryptography.hazmat.primitives.hashes ^
+            --hidden-import cryptography.hazmat.primitives.serialization ^
+            --hidden-import licensing ^
+            pipeline.py
+          cd ..
+        shell: cmd
+
+      - name: Smoke test (fingerprint should work without license)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          chcp 65001
+          build_pipeline\dist\pipeline.exe --fingerprint
+        shell: cmd
+
+      - name: Smoke test (no license → must exit 3)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          chcp 65001
+          build_pipeline\dist\pipeline.exe list
+          set RC=%ERRORLEVEL%
+          if "%RC%"=="3" (
+            echo Smoke test PASS: got expected exit code 3
+            exit /b 0
+          )
+          echo Unexpected exit code %RC% ^(expected 3^)
+          exit /b 1
+        shell: cmd
+
+      - name: Show exe size
+        run: dir build_pipeline\dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-windows-exe
+          path: build_pipeline/dist/pipeline.exe
+          if-no-files-found: error
