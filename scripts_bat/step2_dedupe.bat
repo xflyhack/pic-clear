@@ -1,35 +1,30 @@
-﻿@echo off
-chcp 65001 >nul
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
+>nul chcp 65001
+@echo off
 title %~n0
 
-REM ===========================================================
-REM  依赖：
-REM   - extract_frames.exe / dedupe_pic.exe 已放入 PATH
-REM     推荐放到 C:\Windows\System32
-REM   - 每个 exe 同目录下都要有 license.lic
-REM ===========================================================
+REM ============================================================
+REM  step2_dedupe.bat
+REM  只做去重：对 Z:\切帧结果\sjbz_YYYYMMDD\子目录 逐个 dry-run + 二次确认真删
+REM  依赖：dedupe_pic.exe 在 PATH (推荐 C:\Windows\System32)
+REM ============================================================
 
-REM ---- 数据盘盘符（默认 Z:）----
 set "DATA_DRIVE=Z:"
-
-REM ---- 输出根目录（数据盘上，就近落盘）----
 set "OUT_ROOT=%DATA_DRIVE%\切帧结果"
-
-REM ---- 源目录前缀（自动匹配，比如 sjbz_20260708）----
 set "DATA_PREFIX=sjbz_"
 
 echo ============================================================
-echo   自动化脚本
-echo   数据盘   ： %DATA_DRIVE%
-echo   输出根   ： %OUT_ROOT%
-echo   目录前缀 ： %DATA_PREFIX%*
+echo   step2_dedupe  只做去重
+echo ============================================================
+call :LOG_INFO "数据盘   : %DATA_DRIVE%"
+call :LOG_INFO "输出根   : %OUT_ROOT%"
+call :LOG_INFO "目录前缀 : %DATA_PREFIX%*"
 echo ============================================================
 echo.
 
 if not exist "%DATA_DRIVE%\" (
-    echo [错误] 数据盘 %DATA_DRIVE% 不存在，请先挂载或检查 net use。
+    call :LOG_ERR "数据盘 %DATA_DRIVE% 不存在，请先挂载或检查 net use"
     pause & exit /b 2
 )
 
@@ -44,35 +39,33 @@ for /d %%D in ("%DATA_DRIVE%\%DATA_PREFIX%*") do (
 )
 
 if "%MATCH_COUNT%"=="0" (
-    echo [提示] 在 %DATA_DRIVE%\ 下没有找到 %DATA_PREFIX%* 目录。
-    echo        请把源目录路径拖到本窗口，或手工输入，然后回车：
+    call :LOG_WARN "在 %DATA_DRIVE%\ 下没有找到 %DATA_PREFIX%* 目录"
+    call :LOG_INFO "请把源目录路径拖到本窗口，或手工输入，然后回车："
     set /p "SRC_ROOT=源目录: "
-    if not defined SRC_ROOT ( echo 未提供，退出。 & pause & exit /b 2 )
+    if not defined SRC_ROOT ( call :LOG_ERR "未提供，退出" & pause & exit /b 2 )
     for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
 ) else if "%MATCH_COUNT%"=="1" (
-    echo [自动] 唯一 sjbz 目录：!SRC_ROOT!
+    call :LOG_INFO "唯一 sjbz 目录: !SRC_ROOT!"
 ) else (
-    echo [选择] 找到多个 %DATA_PREFIX%* 目录：
+    call :LOG_INFO "找到多个 %DATA_PREFIX%* 目录，请选择："
     set "IDX=0"
     for /d %%D in ("%DATA_DRIVE%\%DATA_PREFIX%*") do (
         set /a IDX+=1
         set "ROOT_!IDX!=%%~fD"
-        echo    [!IDX!] %%~nxD
+        echo         [!IDX!] %%~nxD
     )
     echo.
     set /p "PICK=请输入编号: "
     call set "SRC_ROOT=%%ROOT_!PICK!%%"
-    if not defined SRC_ROOT ( echo 无效选择，退出。 & pause & exit /b 2 )
+    if not defined SRC_ROOT ( call :LOG_ERR "无效选择，退出" & pause & exit /b 2 )
     for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
 )
 
 echo.
-echo ------------------------------------------------------------
-echo   sjbz 根目录 ： %SRC_ROOT%
-echo ------------------------------------------------------------
+call :LOG_INFO "sjbz 根目录: %SRC_ROOT%"
 echo.
 
-REM ---- Step B: 列出 sjbz_root 下一级子目录，让用户选 ----
+REM ---- Step B: 选一级子目录 ----
 set "SUB_COUNT=0"
 for /d %%D in ("%SRC_ROOT%\*") do (
     set /a SUB_COUNT+=1
@@ -80,27 +73,26 @@ for /d %%D in ("%SRC_ROOT%\*") do (
 )
 
 if "%SUB_COUNT%"=="0" (
-    echo [提示] %SRC_ROOT% 下没有一级子目录，将直接对整个目录处理。
+    call :LOG_WARN "%SRC_ROOT% 下没有一级子目录，将直接对整个目录处理"
     set "SELECTED[1]=."
     set "SELECTED_COUNT=1"
     goto :SUB_DONE
 )
 
-echo [子目录] %SRC_ROOT% 下的一级子目录（共 %SUB_COUNT% 个）：
+call :LOG_INFO "%SRC_ROOT% 下一级子目录 (共 %SUB_COUNT% 个):"
 for /l %%i in (1,1,%SUB_COUNT%) do (
-    call echo    [%%i] %%SUB_%%i%%
+    call echo         [%%i] %%SUB_%%i%%
 )
 echo.
-echo 输入方式（可组合）：
-echo    - 序号列表（逗号分隔）：  1,2
-echo    - 序号区间：              1-3
-echo    - 全部：                  all
+call :LOG_INFO "输入方式（可组合）："
+call :LOG_INFO "  - 序号列表 (逗号分隔) : 1,2"
+call :LOG_INFO "  - 序号区间             : 1-3"
+call :LOG_INFO "  - 全部                 : all"
 echo.
 set /p "SEL=请输入你要处理的子目录: "
-if not defined SEL ( echo 未输入，退出。 & pause & exit /b 2 )
+if not defined SEL ( call :LOG_ERR "未输入，退出" & pause & exit /b 2 )
 set "SELECTED_COUNT=0"
 
-REM all 快捷路径
 if /I "!SEL!"=="all" (
     for /l %%i in (1,1,%SUB_COUNT%) do (
         set /a SELECTED_COUNT+=1
@@ -110,19 +102,16 @@ if /I "!SEL!"=="all" (
     goto :SUB_DONE
 )
 
-REM 逗号分隔 -> 空格分隔，逐个 token 走子过程
 set "TOKENS=!SEL:,= !"
 for %%T in (!TOKENS!) do call :ADD_SEL "%%T"
 
 if "!SELECTED_COUNT!"=="0" (
-    echo [错误] 输入 "!SEL!" 无法解析出有效子目录。
+    call :LOG_ERR "输入 \"!SEL!\" 无法解析出有效子目录"
     pause & exit /b 2
 )
 
 goto :SUB_DONE
 
-
-REM ============ :ADD_SEL：处理一个 token（'2' 或 '1-3'）====================
 :ADD_SEL
 set "TOK=%~1"
 echo(!TOK!| findstr /r "^[0-9][0-9]*-[0-9][0-9]*$" >nul
@@ -138,14 +127,11 @@ if not errorlevel 1 (
 )
 goto :EOF
 
-
-REM ============ :ADD_ONE：把一个序号追加到 SELECTED[] =====================
 :ADD_ONE
 set "K=%~1"
 if %K% LSS 1 goto :EOF
 if %K% GTR %SUB_COUNT% goto :EOF
 set /a SELECTED_COUNT+=1
-REM 用 call 二次解析，让 %SUB_1% 这种间接变量能拿到值
 call set "NAME=%%SUB_%K%%%"
 call set "SELECTED[%SELECTED_COUNT%]=%%NAME%%"
 goto :EOF
@@ -153,20 +139,26 @@ goto :EOF
 
 :SUB_DONE
 echo.
-echo [已选] 共 !SELECTED_COUNT! 个子目录，将依次处理：
+call :LOG_INFO "已选 !SELECTED_COUNT! 个子目录，将依次去重:"
 for /l %%i in (1,1,!SELECTED_COUNT!) do (
-    call echo    - %%SELECTED[%%i]%%
+    call echo         - %%SELECTED[%%i]%%
 )
 echo.
-echo [提示] 如果窗口卡住看起来无输出，按一下 Enter 或 Esc 恢复。
-echo        建议永久关闭"快速编辑模式"：右键窗口标题 -^> 属性 -^> 编辑选项。
+call :LOG_INFO "提示: 若窗口看似卡住无输出，按一下 Enter 或 Esc 恢复"
+call :LOG_INFO "      建议永久关闭快速编辑模式: 右键窗口标题 -^> 属性 -^> 编辑选项"
 echo.
 
-where dedupe_pic.exe >nul 2>nul || (
-    echo [错误] 找不到 dedupe_pic.exe。 & pause & exit /b 3
+where dedupe_pic.exe >nul 2>nul
+if errorlevel 1 (
+    call :LOG_ERR "找不到 dedupe_pic.exe"
+    pause & exit /b 3
 )
 
-for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TS=%%t"
+REM 用 cmd 内置变量拼时间戳，不再 spawn powershell
+set "TS_D=%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%"
+set "TS_T=%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
+set "TS_T=%TS_T: =0%"
+set "TS=%TS_D%_%TS_T%"
 
 set "OVERALL_RC=0"
 for /l %%i in (1,1,!SELECTED_COUNT!) do (
@@ -177,7 +169,11 @@ for /l %%i in (1,1,!SELECTED_COUNT!) do (
 
 echo.
 echo ============================================================
-echo   去重完毕，总退出码：%OVERALL_RC%
+if "%OVERALL_RC%"=="0" (
+    call :LOG_OK "全部子目录去重完成"
+) else (
+    call :LOG_ERR "去重完成，但至少 1 个子目录出错，请翻窗口日志"
+)
 echo ============================================================
 pause
 endlocal
@@ -196,32 +192,61 @@ if "!SUBNAME!"=="." (
 
 set "TARGET_DIR=!DST_DIR!"
 if not exist "!TARGET_DIR!\" (
-    echo [提示] 抽帧输出目录不存在，改用源目录 !SRC_DIR!
+    call :LOG_WARN "抽帧输出目录不存在，改用源目录: !SRC_DIR!"
     set "TARGET_DIR=!SRC_DIR!"
 )
 
 echo.
-echo ############################################################
-echo   [%1/!SELECTED_COUNT!] 去重：!SUBNAME!
-echo   目标：!TARGET_DIR!
-echo ############################################################
+call :LOG_STEP "(%1/!SELECTED_COUNT!) 去重: !SUBNAME!"
+call :LOG_INFO "  目标 : !TARGET_DIR!"
 
 set "REPORT_CSV=!DST_DIR!\dedupe_report_%TS%.csv"
 set "TRASH_DIR=!DST_DIR!\_trash_%TS%"
 
-echo --- dry-run ---
-for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format HH:mm:ss"') do echo [%%t] START dedupe_pic.exe (dry-run)
+set "T=%TIME:~0,8%"
+call :LOG_INFO "  %T%  开始 dry-run"
 dedupe_pic.exe "!TARGET_DIR!" --threshold 3 --report "!REPORT_CSV!"
-if errorlevel 1 ( endlocal & exit /b 1 )
+if errorlevel 1 (
+    call :LOG_ERR "  dry-run 失败: !SUBNAME!"
+    endlocal & exit /b 1
+)
 
 echo.
-choice /C YN /M "子目录 !SUBNAME! 确认真删？"
+choice /C YN /M "子目录 !SUBNAME! 确认真删"
 if errorlevel 2 (
-    echo [跳过] !SUBNAME!
+    call :LOG_INFO "  跳过: !SUBNAME!"
     endlocal & exit /b 0
 )
 
-for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format HH:mm:ss"') do echo [%%t] START dedupe_pic.exe --apply
+set "T=%TIME:~0,8%"
+call :LOG_INFO "  %T%  开始真删 (软删到 !TRASH_DIR!)"
 dedupe_pic.exe "!TARGET_DIR!" --threshold 3 --apply --trash-dir "!TRASH_DIR!" --report "!REPORT_CSV!"
 set "RC=!ERRORLEVEL!"
+
+set "T=%TIME:~0,8%"
+if "!RC!"=="0" (
+    call :LOG_OK "  %T%  (%1/!SELECTED_COUNT!) 完成: !SUBNAME!"
+) else (
+    call :LOG_ERR "  %T%  (%1/!SELECTED_COUNT!) 真删失败: !SUBNAME!  rc=!RC!"
+)
 endlocal & exit /b %RC%
+
+
+REM ====================================================================
+REM  日志子过程
+REM ====================================================================
+:LOG_INFO
+echo [INFO ] %~1
+goto :EOF
+:LOG_OK
+echo [ OK  ] %~1
+goto :EOF
+:LOG_WARN
+echo [WARN ] %~1
+goto :EOF
+:LOG_ERR
+echo [ERROR] %~1
+goto :EOF
+:LOG_STEP
+echo [STEP ] %~1
+goto :EOF
