@@ -1,4 +1,7 @@
-Pillow>=10.0.0
-numpy>=1.24
-onnxruntime>=1.16
-cryptography>=41.0
+# 依赖锁版本，避免 CI 每次抓最新版导致堡垒机上静默回归
+# 特别是 onnxruntime：新版本会要求更新的 VC++ Runtime，
+# 老 Windows Server 会 "DLL load failed while importing onnxruntime_pybind11_state"
+Pillow>=10.0.0,<12
+numpy>=1.24,<2
+onnxruntime==1.19.2
+cryptography>=41.0,<44
