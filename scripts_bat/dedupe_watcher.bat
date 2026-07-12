@@ -1,5 +1,6 @@
 ﻿@echo off
 chcp 65001 >nul
+@echo off
 setlocal EnableExtensions EnableDelayedExpansion
 title dedupe_watcher
 
@@ -73,12 +74,14 @@ echo.
 set "TOTAL_PROCESSED=0"
 
 :LOOP
+@echo off
 set "FOUND_THIS_ROUND=0"
 
 REM 找所有 _done.marker
 for /f "delims=" %%M in ('dir /s /b /a-d "%WATCH_ROOT%\_done.marker" 2^>nul') do (
     set "MARKER=%%M"
     call :PROCESS_ONE
+@echo off
 )
 
 if "!FOUND_THIS_ROUND!"=="0" (
@@ -104,6 +107,7 @@ REM  in:  MARKER = <某目录>\_done.marker 的完整路径
 REM ====================================================================
 :PROCESS_ONE
 setlocal EnableDelayedExpansion
+@echo off
 
 REM 取 marker 所在目录 = 视频输出目录
 for %%F in ("!MARKER!") do set "TARGET_DIR=%%~dpF"
@@ -112,6 +116,11 @@ if "!TARGET_DIR:~-1!"=="\" set "TARGET_DIR=!TARGET_DIR:~0,-1!"
 
 REM 已经去过重了就跳过
 if exist "!TARGET_DIR!\_dedup_done.marker" (
+    endlocal & goto :EOF
+)
+
+REM 上次失败过就跳过，避免死循环重试
+if exist "!TARGET_DIR!\_dedup_failed.marker" (
     endlocal & goto :EOF
 )
 
@@ -141,6 +150,9 @@ if "!RC!"=="0" (
     for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format HH:mm:ss"') do echo [%%t] [OK] !TARGET_DIR!
 ) else (
     echo [错误] dedupe rc=!RC!  目录：!TARGET_DIR!
+    echo rc=!RC! ^> "!TARGET_DIR!\_dedup_failed.marker"
+    echo         已写入 _dedup_failed.marker，本次运行不再重试此目录。
+    echo         排查后手工删除该 marker 即可让下次继续。
 )
 
 endlocal & set /a FOUND_THIS_ROUND+=1 & set /a TOTAL_PROCESSED+=1

@@ -590,6 +590,12 @@ def parse_args() -> argparse.Namespace:
         help="关闭目标检测保护，回到纯 dHash 去重（速度更快）。",
     )
     p.add_argument(
+        "--allow-no-detector",
+        action="store_true",
+        help="检测器初始化失败时降级到纯 dHash（默认失败即退出）。"
+             "适用于 Windows 缺 VC++ Runtime 的堡垒机场景。",
+    )
+    p.add_argument(
         "--model",
         default=None,
         help=(
@@ -754,9 +760,22 @@ def main() -> int:
                 str(model_path), conf_thres=args.conf
             )
         except Exception as e:
-            print(f"[FATAL] 初始化检测器失败: {e}", file=sys.stderr)
-            return 2
+            print(f"[警告] 初始化检测器失败: {e}", file=sys.stderr)
+            print("[警告] 常见原因：Windows Server 缺少 VC++ Redistributable 2019+")
+            print("       下载并安装： https://aka.ms/vs/17/release/vc_redist.x64.exe")
+            if args.allow_no_detector:
+                print("[降级] --allow-no-detector 已生效，改用纯 dHash 模式（无人/车保护）")
+                print("       ⚠ 请注意：不会保护含人/车的图片，仅按外观相似度去重！")
+                detector = None
+                protect_set = set()
+            else:
+                print("       想跳过检测继续跑：加 --allow-no-detector 或 --no-protect")
+                return 2
         print(f"[检测] 模型就绪，耗时 {time.time()-_t:.1f}s", flush=True)
+
+    if detector is None and not args.no_protect and not args.allow_no_detector:
+        # 上面已经 return 了，这里只是防御性再判一下
+        pass
 
     print("[预扫] 正在统计文件总数...", flush=True)
     _t_pre = time.time()

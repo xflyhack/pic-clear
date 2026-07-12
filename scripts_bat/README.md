@@ -106,3 +106,29 @@ dedupe_watcher.bat "Z:\切帧结果\sjbz_xxx"      # 只监听指定目录
 dedupe_watcher.bat "Z:\切帧结果" /apply         # 真删模式
 dedupe_watcher.bat "Z:\切帧结果" /once          # 扫一轮就退，不循环
 ```
+
+## 排查：dedupe_pic 报 "DLL load failed" / "初始化检测器失败"
+
+**现象**：`dedupe_pic.exe` 一启动就打印：
+```
+[FATAL] 初始化检测器失败: DLL load failed while importing onnxruntime_pybind11_state: 动态链接库(DLL)初始化例程失败。
+```
+
+**原因**：`onnxruntime` 需要 **Microsoft Visual C++ Redistributable 2019+**（`vc_redist.x64.exe`）。堡垒机 Windows Server 上通常没装。
+
+**解决方案（三选一）**：
+
+1. **装 VC++ Runtime**（推荐，一劳永逸）
+   - 下载：https://aka.ms/vs/17/release/vc_redist.x64.exe
+   - 上传到堡垒机双击装完，重启 cmd 即可
+
+2. **降级到纯 dHash 模式**（快速跑通，但**没有人/车保护**）
+   ```
+   dedupe_pic.exe <目录> --threshold 3 --allow-no-detector --apply --trash-dir ...
+   ```
+   或改用 `--no-protect`（一样是纯 dHash）
+   ⚠ **风险**：含有人/车/电车的图片可能被误删。仅在能人工复核报告时使用。
+
+3. **让 watcher 跳过失败目录**（自动降级失败重试）
+   `dedupe_watcher.bat` v2 遇到 rc≠0 时会写 `_dedup_failed.marker`，
+   下次运行**不再重试此目录**。排查完手工删掉该 marker 就恢复。
