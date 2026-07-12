@@ -1,0 +1,94 @@
+name: Build Extract Frames EXE
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography>=41.0
+          pip install pyinstaller pyarmor
+
+      - name: Download ffmpeg (static build for Windows)
+        # BtbN 提供的 gpl 静态编译版：解压后 bin/ffmpeg.exe 直接可用
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_dl
+          # 找到 ffmpeg.exe 拷到当前目录
+          $ff = Get-ChildItem -Recurse ffmpeg_dl -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $ff.FullName -Destination ffmpeg.exe
+          Get-Item ffmpeg.exe | Select-Object Name, Length
+        shell: pwsh
+
+      - name: Prepare build folder
+        # 把要打包的 .py 复制到独立目录，避免和 dedupe_pic 的 workflow 互相污染
+        run: |
+          mkdir build_extract
+          copy extract_frames.py build_extract\
+          copy licensing.py build_extract\
+        shell: cmd
+
+      - name: Obfuscate with PyArmor
+        run: |
+          cd build_extract
+          pyarmor gen --output dist_obf extract_frames.py licensing.py
+          dir dist_obf
+          copy /Y dist_obf\extract_frames.py extract_frames.py
+          copy /Y dist_obf\licensing.py licensing.py
+          cd ..
+        shell: cmd
+
+      - name: Build single-file exe (embed ffmpeg + pyarmor runtime)
+        run: |
+          cd build_extract
+          pyinstaller --onefile --console --name extract_frames ^
+            --add-binary "..\ffmpeg.exe;." ^
+            --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
+            --hidden-import cryptography ^
+            --hidden-import cryptography.hazmat.primitives.asymmetric.padding ^
+            --hidden-import cryptography.hazmat.primitives.hashes ^
+            --hidden-import cryptography.hazmat.primitives.serialization ^
+            --hidden-import licensing ^
+            extract_frames.py
+          cd ..
+        shell: cmd
+
+      - name: Smoke test (fingerprint subcommand should work without license)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          chcp 65001
+          build_extract\dist\extract_frames.exe --fingerprint
+        shell: cmd
+
+      - name: Smoke test (no license → should exit 3)
+        env:
+          PYTHONIOENCODING: utf-8
+        continue-on-error: true
+        run: |
+          chcp 65001
+          build_extract\dist\extract_frames.exe D:\ D:\out 2>&1
+        shell: cmd
+
+      - name: Show exe size
+        run: dir build_extract\dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extract_frames-windows-exe
+          path: build_extract/dist/extract_frames.exe
+          if-no-files-found: error

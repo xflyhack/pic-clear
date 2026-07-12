@@ -1,5 +1,29 @@
 # pic-clear
 
+## 工具集（两个独立 exe）
+
+本仓库产出**两个独立可执行程序**，可单独使用，也可串起来当 pipeline：
+
+| exe | 作用 | 大概体积 |
+|---|---|---|
+| **`extract_frames.exe`** | 递归扫描视频目录，把 `.h265` 视频按 1 帧/秒抽成 JPEG，输出镜像目录 | ~95 MB（含 ffmpeg）|
+| **`dedupe_pic.exe`** | 对图片目录做近似去重（dHash）+ YOLO 保护（人/车）+ 前后帧车运动保护 | ~200 MB（含 yolov8n）|
+
+**典型 pipeline**：
+```
+h265 视频目录 
+    │  extract_frames.exe
+    ▼
+镜像目录 + 抽好的 JPEG 帧
+    │  dedupe_pic.exe
+    ▼
+去重后仅保留有价值的关键帧
+```
+
+两个 exe 共用**同一份 `license.lic`**（同一台机器只需申请一次授权，两个 exe 都能用）。
+
+---
+
 在**离线、无 Python 环境**的 Windows（例如堡垒机里的跳板机）里，扫描目录、找出**接近相同**的图片并删除。**默认会用 YOLOv8n 识别图片内容，含"人 / 车 / 电车 / 公交 / 卡车 / 自行车 / 摩托车"的图片一律保留，绝不删除。**
 
 ## 场景
@@ -55,6 +79,67 @@ dedupe_pic.exe --fingerprint
 1. 环境变量 `DEDUPE_LICENSE=D:\path	o\license.lic`（最高优先级）
 2. exe 同目录 `license.lic`
 3. 找不到则报错
+
+---
+
+## `extract_frames.exe` 使用（视频抽帧）
+
+递归扫描一个视频目录，把每个 `.h265` 视频按 fps 抽成 JPEG，**输出目录结构完全镜像输入目录**，视频文件本身变成一个"同名子目录"存放抽出的帧。
+
+### 硬规则
+
+- 任何名叫 **`VLM`** 的目录（含所有子孙）**整棵子树跳过**（大小写不敏感）
+- 只处理 `.h265`（可用 `--ext` 加其他扩展名如 `h265,hevc,mp4`）
+
+### 示例
+
+假设有：
+```
+D:\videos\
+├── 1a\2a\3a\4a\6a\video1.h265
+├── 1a\2a\3a\4a\7a\VLM\skip_me.h265   ← VLM 下，会被跳过
+└── 1\2\3\4\5\video2.h265
+```
+
+运行：
+```cmd
+extract_frames.exe D:\videos D:\frames --fps 1
+```
+
+得到：
+```
+D:\frames\
+├── 1a\2a\3a\4a\6a\video1\frame_000001.jpg
+│                              \frame_000002.jpg
+│                              ...
+└── 1\2\3\4\5\video2\frame_000001.jpg
+                            ...
+```
+
+### 常用参数
+
+```
+extract_frames.exe <SRC_ROOT> <DST_ROOT> [选项]
+
+  --fps FLOAT              每秒抽多少帧，默认 1.0
+  --ext EXT                扫描扩展名（逗号分隔），默认 h265
+  --skip-dir NAME          要跳过的目录名（逗号分隔），默认 VLM
+  --quality INT            JPEG 质量 1-100，默认 90
+  --no-skip-existing       不跳过已抽好帧的视频（默认会跳过，重跑友好）
+  --dry-run                只列出计划，不真抽
+  --ffmpeg PATH            ffmpeg.exe 路径（默认自动查找 exe 同目录）
+  --fingerprint            打印本机指纹后退出（申请授权用）
+```
+
+### 跟 dedupe_pic.exe 串起来
+
+```cmd
+:: 1) 抽帧
+extract_frames.exe D:\videos D:\frames --fps 1
+
+:: 2) 去重（每个视频子目录独立聚类，跨视频也会全局去重）
+dedupe_pic.exe D:\frames --threshold 3
+```
 
 ---
 
