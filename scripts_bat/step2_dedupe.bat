@@ -201,7 +201,6 @@ call :LOG_STEP "(%1/!SELECTED_COUNT!) 去重: !SUBNAME!"
 call :LOG_INFO "  目标 : !TARGET_DIR!"
 
 set "REPORT_CSV=!DST_DIR!\dedupe_report_%TS%.csv"
-set "TRASH_DIR=!DST_DIR!\_trash_%TS%"
 
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  开始 dry-run"
@@ -219,8 +218,8 @@ if errorlevel 2 (
 )
 
 set "T=%TIME:~0,8%"
-call :LOG_INFO "  %T%  开始真删 (软删到 !TRASH_DIR!)"
-dedupe_pic.exe "!TARGET_DIR!" --threshold 3 --apply --trash-dir "!TRASH_DIR!" --report "!REPORT_CSV!"
+call :LOG_INFO "  %T%  开始真删 (永久删除，不落回收站)"
+dedupe_pic.exe "!TARGET_DIR!" --threshold 3 --apply --hard-delete --report "!REPORT_CSV!"
 set "RC=!ERRORLEVEL!"
 
 set "T=%TIME:~0,8%"

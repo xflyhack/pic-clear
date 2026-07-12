@@ -202,7 +202,7 @@ if not exist "!WATCHER_BAT!" (
 call :LOG_INFO "启动后台窗口 : !WATCHER_BAT!"
 call :LOG_INFO "监听目录     : !WATCH_TARGET!"
 start "dedupe_watcher" cmd /k ""!WATCHER_BAT!" "!WATCH_TARGET!" /apply /motion %MOTION_THRESHOLD%"
-call :LOG_INFO "监听窗口已弹出 (真删模式，重复图会被移到 _trash 目录)"
+call :LOG_INFO "监听窗口已弹出 (真删模式，重复图会被永久删除，不落回收站)"
 call :LOG_INFO "如需 dry-run 观察，可另开: dedupe_watcher.bat \"!WATCH_TARGET!\""
 echo.
 
@@ -265,7 +265,6 @@ if "%USE_WATCHER%"=="1" (
 )
 
 set "REPORT_CSV=!DST_DIR!\dedupe_report_%TS%.csv"
-set "TRASH_DIR=!DST_DIR!\_trash_%TS%"
 
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  去重 dry-run 开始"
@@ -284,8 +283,8 @@ if !CHOICE_RC! EQU 2 (
 )
 
 set "T=%TIME:~0,8%"
-call :LOG_INFO "  %T%  真删开始 (软删到 !TRASH_DIR!)"
-dedupe_pic.exe "!DST_DIR!" --threshold 3 --apply --trash-dir "!TRASH_DIR!" --report "!REPORT_CSV!"
+call :LOG_INFO "  %T%  真删开始 (永久删除，不落回收站)"
+dedupe_pic.exe "!DST_DIR!" --threshold 3 --apply --hard-delete --report "!REPORT_CSV!"
 if errorlevel 1 (
     set "T=%TIME:~0,8%"
     call :LOG_ERR "  %T%  真删失败: !SUBNAME!"

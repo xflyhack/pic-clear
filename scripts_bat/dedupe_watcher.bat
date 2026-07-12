@@ -125,11 +125,11 @@ call :LOG_STEP "!T!  发现待处理: !TARGET_DIR!"
 set "REPORT_CSV=!TARGET_DIR!\dedupe_report.csv"
 
 if "%APPLY%"=="1" (
-    set "TRASH_DIR=!TARGET_DIR!\_trash"
+    REM 直接永久删除，不落 _trash（避免堡垒机上又要清理一遍）
     if defined MOTION (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --motion-threshold %MOTION% --apply --trash-dir "!TRASH_DIR!" --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --motion-threshold %MOTION% --apply --hard-delete --report "!REPORT_CSV!"
     ) else (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --apply --trash-dir "!TRASH_DIR!" --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --apply --hard-delete --report "!REPORT_CSV!"
     )
 ) else (
     if defined MOTION (
