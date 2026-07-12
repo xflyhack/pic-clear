@@ -171,6 +171,44 @@ where dedupe_pic.exe >nul 2>nul || (
 
 for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TS=%%t"
 
+REM ---- 询问是否同时启动 dedupe_watcher 后台窗口 ----
+echo.
+echo ------------------------------------------------------------
+echo   小提示：抽帧和去重可以并行跑，磁盘不攒垃圾
+echo   建议同时启动一个"去重监听窗口"（dedupe_watcher）
+echo     - 它会持续扫描 %%OUT_ROOT%%，看到 _done.marker 就立刻去重
+echo     - 抽帧下一个视频时，上一个正在被清理，磁盘占用最小
+echo ------------------------------------------------------------
+choice /C YN /M "现在启动一个去重监听后台窗口 (Y=启动 dry-run / N=不启动)"
+set "USE_WATCHER=0"
+if errorlevel 2 goto :SKIP_WATCHER
+set "USE_WATCHER=1"
+
+set "WATCH_TARGET=%OUT_ROOT%\%SRC_ROOT_NAME%"
+if not exist "!WATCH_TARGET!" mkdir "!WATCH_TARGET!" 2>nul
+
+REM 找到 dedupe_watcher.bat：优先本 bat 同目录，其次 PATH
+set "WATCHER_BAT=%~dp0dedupe_watcher.bat"
+if not exist "!WATCHER_BAT!" (
+    for %%W in (dedupe_watcher.bat) do set "WATCHER_BAT=%%~$PATH:W"
+)
+if not defined WATCHER_BAT (
+    echo [警告] 找不到 dedupe_watcher.bat，跳过监听窗口。
+    goto :SKIP_WATCHER
+)
+if not exist "!WATCHER_BAT!" (
+    echo [警告] dedupe_watcher.bat 不存在：!WATCHER_BAT!
+    goto :SKIP_WATCHER
+)
+
+echo [启动] 后台窗口：dedupe_watcher.bat "!WATCH_TARGET!"
+start "dedupe_watcher" cmd /k ""!WATCHER_BAT!" "!WATCH_TARGET!""
+echo [提示] 监听窗口已弹出（dry-run 模式）。想真删请在监听窗口关闭后
+echo        另开一个：dedupe_watcher.bat "!WATCH_TARGET!" /apply
+echo.
+
+:SKIP_WATCHER
+
 set "OVERALL_RC=0"
 set "IDX=0"
 
@@ -220,6 +258,12 @@ extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext .h265
 if errorlevel 1 (
     echo [错误] 抽帧失败：!SUBNAME!
     endlocal & exit /b 1
+)
+
+REM 如果开了 dedupe_watcher，后续去重交给它，本进程只管抽帧
+if "%USE_WATCHER%"=="1" (
+    echo [OK] !SUBNAME! 抽帧完成，去重已交给 dedupe_watcher 后台窗口处理。
+    endlocal & exit /b 0
 )
 
 echo.

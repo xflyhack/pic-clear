@@ -5,6 +5,9 @@
 > 想要**后台运行 + 关窗口不中断 + 集中日志**？请看 `docs/pipeline_exe.md`（`pipeline.exe`）。
 > 本目录下的 bat 保留，用于**前台交互 + 逐个 Y/N 确认删除**的场景。
 
+> 想要**抽帧和去重同时跑、磁盘不攒垃圾**？跑 `run_all.bat` 时选"启动去重监听窗口"，
+> 会自动 `start` 一个 `dedupe_watcher.bat` 后台窗口，看到 `_done.marker` 就去重。
+
 ## 前置准备（一次性）
 
 1. 把 `extract_frames.exe`、`dedupe_pic.exe`、`license.lic` 复制到 `C:\Windows\System32\`
@@ -71,3 +74,35 @@ set "DATA_PREFIX=sjbz_"
 - **license.lic 报错**：license 必须和 exe 同目录
 - **改抽帧参数**：改 bat 里 `extract_frames.exe ... --fps 1 --ext .h265`
 - **改相似阈值**：改 `--threshold 3`，值越小越严格
+
+## 边抽边删（dedupe_watcher）
+
+**背景**：默认 `run_all.bat` 会先把一个子目录**所有视频**都抽完，再统一去重。
+子目录很大时，中间态会占很多磁盘。
+
+**推荐做法**：让**抽帧**和**去重**并行跑，抽完一个视频立即清理：
+
+1. 双击 `run_all.bat`，正常选源目录、子目录
+2. 在 "现在启动一个去重监听后台窗口 (Y/N)" 时选 **Y**
+3. 会自动弹出一个新的 cmd 窗口，标题是 `dedupe_watcher`
+4. `run_all.bat` 只负责抽帧；`dedupe_watcher` 后台循环扫描，看到 `_done.marker` 就去重
+
+**监听窗口原理**：
+- 每次 `extract_frames.exe` 抽完一个视频，会在输出目录写一个 `_done.marker`
+- `dedupe_watcher.bat` 每 5 秒扫一次输出根目录，找有 `_done.marker` 但没 `_dedup_done.marker` 的目录
+- 对每个这样的目录跑 `dedupe_pic.exe`，成功后写 `_dedup_done.marker`
+- 抽帧全部完成后，`run_all.bat` 结束；监听窗口继续扫，把剩下的清理完，然后进入空转等待
+- 你觉得没事干了，就在监听窗口按 **Ctrl+C** 退出
+
+**默认是 dry-run**（只出 CSV 报告，不真删）。检查报告后想真删：
+- 关掉当前监听窗口
+- 手工再开一个：`dedupe_watcher.bat "Z:\切帧结果\sjbz_20260708" /apply`
+- 也可以加 `/threshold 3`（相似阈值）、`/interval 3`（扫描间隔秒）、`/once`（扫一遍就退）
+
+**手工单独跑 watcher**（不通过 run_all）：
+```
+dedupe_watcher.bat                              # 监听默认 Z:\切帧结果，dry-run
+dedupe_watcher.bat "Z:\切帧结果\sjbz_xxx"      # 只监听指定目录
+dedupe_watcher.bat "Z:\切帧结果" /apply         # 真删模式
+dedupe_watcher.bat "Z:\切帧结果" /once          # 扫一轮就退，不循环
+```
