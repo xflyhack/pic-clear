@@ -13,6 +13,11 @@ REM ============================================================
 set "DATA_DRIVE=Z:"
 set "OUT_ROOT=%DATA_DRIVE%\切帧结果"
 set "DATA_PREFIX=sjbz_"
+REM 车运动保护阈值：越大越严格（车必须挪得越明显才算动，删得越多）
+REM   0.05 = exe 默认，只要肉眼几乎看不出的抖动就算动
+REM   0.12 = 目前 bat 默认，车得挪超过画面 12%%（宽或高）才算动
+REM   0.20 = 更严格，几乎必须开走才算动
+set "MOTION_THRESHOLD=0.12"
 
 echo ============================================================
 echo   run_all  一站式抽帧 + 去重
@@ -196,7 +201,7 @@ if not exist "!WATCHER_BAT!" (
 
 call :LOG_INFO "启动后台窗口 : !WATCHER_BAT!"
 call :LOG_INFO "监听目录     : !WATCH_TARGET!"
-start "dedupe_watcher" cmd /k ""!WATCHER_BAT!" "!WATCH_TARGET!" /apply"
+start "dedupe_watcher" cmd /k ""!WATCHER_BAT!" "!WATCH_TARGET!" /apply /motion %MOTION_THRESHOLD%"
 call :LOG_INFO "监听窗口已弹出 (真删模式，重复图会被移到 _trash 目录)"
 call :LOG_INFO "如需 dry-run 观察，可另开: dedupe_watcher.bat \"!WATCH_TARGET!\""
 echo.

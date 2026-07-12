@@ -18,6 +18,7 @@ REM    第 1 个位置参数 = 监听根目录（可选，默认 Z:\切帧结果
 REM    /apply           = 真删（默认 dry-run）
 REM    /threshold N     = 相似阈值，默认 3
 REM    /interval N      = 扫描间隔秒，默认 5
+REM    /motion N        = 相邻帧车运动阈值（越大越严格，默认由 exe 决定 0.05）
 REM    /once            = 扫一遍就退出（否则死循环）
 REM ============================================================
 
@@ -25,6 +26,7 @@ set "WATCH_ROOT="
 set "APPLY=0"
 set "THRESHOLD=3"
 set "INTERVAL=5"
+set "MOTION="
 set "RUN_ONCE=0"
 
 :PARSE_ARGS
@@ -35,6 +37,7 @@ if /I "%~1"=="/once"      ( set "RUN_ONCE=1" & shift & goto :PARSE_ARGS )
 if /I "%~1"=="--once"     ( set "RUN_ONCE=1" & shift & goto :PARSE_ARGS )
 if /I "%~1"=="/threshold" ( set "THRESHOLD=%~2" & shift & shift & goto :PARSE_ARGS )
 if /I "%~1"=="/interval"  ( set "INTERVAL=%~2"  & shift & shift & goto :PARSE_ARGS )
+if /I "%~1"=="/motion"    ( set "MOTION=%~2"    & shift & shift & goto :PARSE_ARGS )
 if not defined WATCH_ROOT set "WATCH_ROOT=%~1"
 shift
 goto :PARSE_ARGS
@@ -123,9 +126,17 @@ set "REPORT_CSV=!TARGET_DIR!\dedupe_report.csv"
 
 if "%APPLY%"=="1" (
     set "TRASH_DIR=!TARGET_DIR!\_trash"
-    dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --apply --trash-dir "!TRASH_DIR!" --report "!REPORT_CSV!"
+    if defined MOTION (
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --motion-threshold %MOTION% --apply --trash-dir "!TRASH_DIR!" --report "!REPORT_CSV!"
+    ) else (
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --apply --trash-dir "!TRASH_DIR!" --report "!REPORT_CSV!"
+    )
 ) else (
-    dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --report "!REPORT_CSV!"
+    if defined MOTION (
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --motion-threshold %MOTION% --report "!REPORT_CSV!"
+    ) else (
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --report "!REPORT_CSV!"
+    )
 )
 set "RC=!ERRORLEVEL!"
 
