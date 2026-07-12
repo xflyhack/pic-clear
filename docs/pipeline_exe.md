@@ -56,11 +56,19 @@ pipeline.exe status <job_id>      # 看指定任务
 `status` 会打印每个子目录的 stage：
 - `pending`      未开始
 - `extracting`   抽帧中
-- `dedup_dryrun` 去重预览中
-- `dedup_apply`  真删中（`--apply` 才会有）
-- `done`         完成
+- `done`         抽帧完成（去重可能还在后台跑）
 - `failed`       失败（看 `note` 字段）
 - `skipped`      跳过
+
+以及**视频级的实时计数**：
+- `抽帧=N`   已抽完的视频数（有 `_done.marker`）
+- `去重=M`   已去重的视频数（有 `_dedup_done.marker`）
+
+**并行工作原理**（v2 版本起）：
+- 主线程串行调用 `extract_frames.exe`，它内部把每个视频抽完后写 `_done.marker`
+- Watcher 线程循环扫描（每 3 秒），发现 `_done.marker` 但没 `_dedup_done.marker` 的目录 → 立刻跑 `dedupe_pic.exe`，成功后写 `_dedup_done.marker`
+- 抽帧和去重天然并行，视频粒度即抽即删，磁盘占用最小
+- 断点：`_done.marker` / `_dedup_done.marker` 就是断点，再跑一次自动跳过已完成的
 
 ### 看日志
 

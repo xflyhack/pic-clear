@@ -179,12 +179,15 @@ def resolve_self_exe() -> str:
 @dataclass
 class SubStatus:
     name: str
-    stage: str = "pending"        # pending / extracting / dedup_dryrun / dedup_apply / done / failed / skipped
+    stage: str = "pending"        # pending / extracting / done / failed / skipped
     started_at: str | None = None
     ended_at: str | None = None
     extract_rc: int | None = None
     dedup_rc: int | None = None
     note: str = ""
+    # marker 驱动模式下的视频级进度
+    videos_extracted: int = 0     # 已抽完（有 _done.marker）
+    videos_deduped: int = 0       # 已去重（有 _dedup_done.marker）
 
 
 @dataclass
@@ -449,11 +452,19 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
 # ------------------------------- worker ------------------------------------
 
+_pipeline_log_lock = None
+
+
 def _pipeline_log(job_dir: Path, msg: str) -> None:
+    global _pipeline_log_lock
+    if _pipeline_log_lock is None:
+        import threading
+        _pipeline_log_lock = threading.Lock()
     line = f"[{_now_iso()}] {msg}"
-    print(line, flush=True)
-    with (job_dir / "pipeline.log").open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    with _pipeline_log_lock:
+        print(line, flush=True)
+        with (job_dir / "pipeline.log").open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
 
 def cmd_worker(args: argparse.Namespace) -> int:
@@ -490,25 +501,130 @@ def cmd_worker(args: argparse.Namespace) -> int:
     reports_dir = job_dir / "reports"
     reports_dir.mkdir(exist_ok=True)
 
-    overall_rc = 0
+    # ------------------------------------------------------------
+    # 新版：marker 驱动的并行编排
+    # ------------------------------------------------------------
+    # 主线程负责抽帧（对每个子目录串行调 extract_frames.exe，
+    # 该 exe 内部自己遍历视频，每抽完一个视频写 _done.marker）
+    #
+    # watcher 线程负责去重：循环扫描每个子目录下所有 _done.marker，
+    # 找到未处理的视频输出目录就跑 dedupe_pic.exe，成功后写 _dedup_done.marker
+    #
+    # 两者天然并行，磁盘占用最小，视频粒度即抽即删。
+    # ------------------------------------------------------------
+    import threading
+
+    out_root_manifest = Path(manifest["out_root"])
+    # 各子目录的目标目录，watcher 只在这些目录里扫，避免误伤
+    sub_dsts: list[Path] = []
+    for sub in subs:
+        if sub == ".":
+            sub_dsts.append(out_root_manifest / src_root.name)
+        else:
+            sub_dsts.append(out_root_manifest / src_root.name / sub)
+    for d in sub_dsts:
+        d.mkdir(parents=True, exist_ok=True)
+
+    status_lock = threading.Lock()
+    stop_watcher = threading.Event()
+    producer_done = threading.Event()
+    overall_rc = {"value": 0}
+
+    def save_status_locked():
+        with status_lock:
+            _save_status(job_dir, status)
+
+    # ---- watcher 线程 ----
+    def watcher_loop():
+        _pipeline_log(job_dir, "[watcher] 启动，开始扫描 _done.marker")
+        while not stop_watcher.is_set():
+            any_work = False
+            for i, sub_dst in enumerate(sub_dsts):
+                if not sub_dst.is_dir():
+                    continue
+                # 递归找所有 _done.marker
+                try:
+                    markers = list(sub_dst.rglob("_done.marker"))
+                except Exception as e:
+                    _pipeline_log(job_dir, f"[watcher] rglob 失败 {sub_dst}: {e}")
+                    continue
+                for m in markers:
+                    target = m.parent
+                    dedup_marker = target / "_dedup_done.marker"
+                    running_marker = target / "_dedup_running.marker"
+                    if dedup_marker.exists() or running_marker.exists():
+                        continue
+                    # 标记开始
+                    try:
+                        running_marker.write_text("running", encoding="utf-8")
+                    except Exception:
+                        continue
+                    any_work = True
+                    _pipeline_log(job_dir, f"[watcher] 去重 {target}")
+                    report_csv = target / "dedupe_report.csv"
+                    if apply_delete:
+                        trash_dir = target / "_trash"
+                        cmd = [dedupe_exe, str(target),
+                               "--threshold", str(threshold),
+                               "--apply", "--trash-dir", str(trash_dir),
+                               "--report", str(report_csv)]
+                    else:
+                        cmd = [dedupe_exe, str(target),
+                               "--threshold", str(threshold),
+                               "--report", str(report_csv)]
+                    rc = _run_child(cmd, job_dir)
+                    try:
+                        running_marker.unlink()
+                    except Exception:
+                        pass
+                    if rc == 0:
+                        try:
+                            dedup_marker.write_text("done", encoding="utf-8")
+                        except Exception:
+                            pass
+                        # 更新对应子目录的视频计数
+                        with status_lock:
+                            status.subs[i].videos_deduped += 1
+                        _pipeline_log(job_dir, f"[watcher] [OK] {target}")
+                    else:
+                        _pipeline_log(job_dir, f"[watcher] [FAIL rc={rc}] {target}")
+                        overall_rc["value"] = 1
+                    save_status_locked()
+                    if stop_watcher.is_set():
+                        return
+
+            # 更新 videos_extracted 计数（不管 watcher 有没有活干都更新）
+            with status_lock:
+                for i, sub_dst in enumerate(sub_dsts):
+                    try:
+                        cnt = sum(1 for _ in sub_dst.rglob("_done.marker"))
+                        status.subs[i].videos_extracted = cnt
+                    except Exception:
+                        pass
+            save_status_locked()
+
+            # 停止条件：producer 完成 且 本轮没干活
+            if producer_done.is_set() and not any_work:
+                _pipeline_log(job_dir, "[watcher] 生产者已完成且无剩余任务，退出")
+                return
+            time.sleep(3.0)
+
+    watcher_thread = threading.Thread(target=watcher_loop, name="dedupe-watcher", daemon=False)
+    watcher_thread.start()
+
+    # ---- 主线程（生产者）：串行对每个子目录跑抽帧 ----
     for i, sub in enumerate(subs, 1):
         sub_status = status.subs[i - 1]
         status.current_sub_idx = i
-        status.last_message = f"处理子目录 [{i}/{len(subs)}] {sub}"
+        status.last_message = f"抽帧子目录 [{i}/{len(subs)}] {sub}"
         sub_status.stage = "extracting"
         sub_status.started_at = _now_iso()
-        _save_status(job_dir, status)
+        save_status_locked()
         _pipeline_log(job_dir, status.last_message)
 
-        if sub == ".":
-            sub_src = src_root
-            sub_dst = Path(manifest["out_root"]) / src_root.name
-        else:
-            sub_src = src_root / sub
-            sub_dst = Path(manifest["out_root"]) / src_root.name / sub
-        sub_dst.mkdir(parents=True, exist_ok=True)
+        sub_src = src_root if sub == "." else src_root / sub
+        sub_dst = sub_dsts[i - 1]
 
-        # --- 抽帧 ---
         rc = _run_child(
             [extract_exe, str(sub_src), str(sub_dst),
              "--fps", str(fps), "--ext", ext],
@@ -519,69 +635,57 @@ def cmd_worker(args: argparse.Namespace) -> int:
             sub_status.stage = "failed"
             sub_status.note = f"抽帧失败 rc={rc}"
             sub_status.ended_at = _now_iso()
-            overall_rc = 1
-            _save_status(job_dir, status)
+            overall_rc["value"] = 1
+            save_status_locked()
             _pipeline_log(job_dir, f"[FAIL] {sub} 抽帧失败 rc={rc}")
             continue
 
-        # --- 去重 dry-run ---
-        sub_status.stage = "dedup_dryrun"
-        _save_status(job_dir, status)
-        report_csv = reports_dir / f"{sub}_report.csv"
-        rc = _run_child(
-            [dedupe_exe, str(sub_dst), "--threshold", str(threshold),
-             "--report", str(report_csv)],
-            job_dir,
-        )
-        sub_status.dedup_rc = rc
-        if rc != 0:
-            sub_status.stage = "failed"
-            sub_status.note = f"dedup dry-run 失败 rc={rc}"
-            sub_status.ended_at = _now_iso()
-            overall_rc = 1
-            _save_status(job_dir, status)
-            _pipeline_log(job_dir, f"[FAIL] {sub} dedup dry-run 失败 rc={rc}")
-            continue
-
-        # --- 真删（可选） ---
-        if apply_delete:
-            sub_status.stage = "dedup_apply"
-            _save_status(job_dir, status)
-            trash_dir = sub_dst / f"_trash_{manifest['job_id']}"
-            rc = _run_child(
-                [dedupe_exe, str(sub_dst), "--threshold", str(threshold),
-                 "--apply", "--trash-dir", str(trash_dir),
-                 "--report", str(report_csv)],
-                job_dir,
-            )
-            sub_status.dedup_rc = rc
-            if rc != 0:
-                sub_status.stage = "failed"
-                sub_status.note = f"dedup apply 失败 rc={rc}"
-                sub_status.ended_at = _now_iso()
-                overall_rc = 1
-                _save_status(job_dir, status)
-                _pipeline_log(job_dir, f"[FAIL] {sub} dedup apply 失败 rc={rc}")
-                continue
-
         sub_status.stage = "done"
         sub_status.ended_at = _now_iso()
-        _save_status(job_dir, status)
-        _pipeline_log(job_dir, f"[OK] 子目录 {sub} 完成")
+        save_status_locked()
+        _pipeline_log(job_dir, f"[OK] 子目录 {sub} 抽帧完成，去重由 watcher 处理")
 
-    status.state = "done" if overall_rc == 0 else "failed"
+    # 通知 watcher：所有抽帧完成，处理完剩余任务后退出
+    producer_done.set()
+    status.last_message = "抽帧完成，等待 watcher 去重剩余任务..."
+    save_status_locked()
+    _pipeline_log(job_dir, "[主线程] 抽帧完成，等待 watcher...")
+
+    watcher_thread.join()
+
+    status.state = "done" if overall_rc["value"] == 0 else "failed"
     status.ended_at = _now_iso()
-    status.last_message = "全部完成" if overall_rc == 0 else "部分失败，见各子目录状态"
-    _save_status(job_dir, status)
-    _pipeline_log(job_dir, f"worker 结束，overall_rc={overall_rc}")
-    return overall_rc
+    status.last_message = "全部完成" if overall_rc["value"] == 0 else "部分失败，见 pipeline.log"
+    save_status_locked()
+    _pipeline_log(job_dir, f"worker 结束，overall_rc={overall_rc['value']}")
+    return overall_rc["value"]
+
+
+_child_log_counter = 0
+_child_log_lock = None  # 延迟初始化
 
 
 def _run_child(cmd: list[str], job_dir: Path) -> int:
-    """把子进程 stdout+stderr 追加写到 job_dir/worker.log；返回 exit code。"""
+    """启动子进程，stdout+stderr 写到 job_dir/children/<seq>_<name>.log；
+    完成后把该 log 追加到 job_dir/worker.log。这样多线程并发调用时，
+    每个子进程有独立的 fd，避免 macOS/Windows 上并发写同一个日志文件的坑。"""
+    global _child_log_counter, _child_log_lock
+    if _child_log_lock is None:
+        import threading
+        _child_log_lock = threading.Lock()
+
     _pipeline_log(job_dir, "$ " + " ".join(_shq(c) for c in cmd))
+
+    children_dir = job_dir / "children"
+    children_dir.mkdir(exist_ok=True)
+    with _child_log_lock:
+        _child_log_counter += 1
+        seq = _child_log_counter
+    exe_name = Path(cmd[0]).name
+    child_log = children_dir / f"{seq:04d}_{exe_name}.log"
+
     try:
-        with (job_dir / "worker.log").open("ab") as logf:
+        with child_log.open("wb") as logf:
             proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
@@ -589,10 +693,21 @@ def _run_child(cmd: list[str], job_dir: Path) -> int:
                 stderr=subprocess.STDOUT,
                 cwd=str(job_dir),
             )
-            return proc.wait()
+            rc = proc.wait()
     except FileNotFoundError as e:
         _pipeline_log(job_dir, f"[ERROR] 子进程启动失败: {e}")
         return 127
+
+    # 追加到 worker.log（用锁串行化，只在这里合并）
+    try:
+        with _child_log_lock:
+            with (job_dir / "worker.log").open("ab") as merged:
+                merged.write(f"\n===== [{seq:04d}] {exe_name}  rc={rc} =====\n".encode("utf-8"))
+                merged.write(child_log.read_bytes())
+    except Exception as e:
+        _pipeline_log(job_dir, f"[WARN] 日志合并失败: {e}")
+
+    return rc
 
 
 def _shq(s: str) -> str:
@@ -668,8 +783,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  子目录进度 ({st.current_sub_idx}/{st.total_subs})：")
     for i, s in enumerate(st.subs, 1):
         marker = "*" if i == st.current_sub_idx and st.state == "running" else " "
-        print(f"   {marker}[{i}] {s.name:<20} stage={s.stage:<14} "
-              f"extract_rc={s.extract_rc}  dedup_rc={s.dedup_rc}  {s.note}")
+        print(f"   {marker}[{i}] {s.name:<20} stage={s.stage:<10} "
+              f"抽帧={s.videos_extracted}  去重={s.videos_deduped}  "
+              f"extract_rc={s.extract_rc}  {s.note}")
     print("=" * 60)
     return 0
 
