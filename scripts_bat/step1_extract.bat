@@ -194,6 +194,7 @@ echo   [%1/!SELECTED_COUNT!] 抽帧：!SUBNAME!
 echo   源  ： !SRC_DIR!
 echo   目标： !DST_DIR!
 echo ############################################################
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format HH:mm:ss"') do echo [%%t] START extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext .h265 ...
 extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext .h265
 set "RC=!ERRORLEVEL!"
 endlocal & exit /b %RC%

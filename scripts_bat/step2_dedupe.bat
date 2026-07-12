@@ -207,6 +207,7 @@ set "REPORT_CSV=!DST_DIR!\dedupe_report_%TS%.csv"
 set "TRASH_DIR=!DST_DIR!\_trash_%TS%"
 
 echo --- dry-run ---
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format HH:mm:ss"') do echo [%%t] START dedupe_pic.exe "!TARGET_DIR!" --threshold 3 --report "!REPORT_CSV!" ...
 dedupe_pic.exe "!TARGET_DIR!" --threshold 3 --report "!REPORT_CSV!"
 if errorlevel 1 ( endlocal & exit /b 1 )
 
@@ -216,6 +217,8 @@ if errorlevel 2 (
     echo [跳过] !SUBNAME!
     endlocal & exit /b 0
 )
+
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format HH:mm:ss"') do echo [%%t] START dedupe_pic.exe "!TARGET_DIR!" --threshold 3 --apply --trash-dir "!TRASH_DI ...
 
 dedupe_pic.exe "!TARGET_DIR!" --threshold 3 --apply --trash-dir "!TRASH_DIR!" --report "!REPORT_CSV!"
 set "RC=!ERRORLEVEL!"

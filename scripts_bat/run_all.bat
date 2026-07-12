@@ -214,6 +214,7 @@ echo ############################################################
 REM --- 1) 抽帧 ---
 echo.
 echo --- 抽帧 ---
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format HH:mm:ss"') do echo [%%t] START extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext .h265 ...
 extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext .h265
 if errorlevel 1 (
     echo [错误] 抽帧失败：!SUBNAME!
@@ -225,6 +226,7 @@ echo.
 echo --- 去重 dry-run ---
 set "REPORT_CSV=!DST_DIR!\dedupe_report_%TS%.csv"
 set "TRASH_DIR=!DST_DIR!\_trash_%TS%"
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format HH:mm:ss"') do echo [%%t] START dedupe_pic.exe "!DST_DIR!" --threshold 3 --report "!REPORT_CSV!" ...
 dedupe_pic.exe "!DST_DIR!" --threshold 3 --report "!REPORT_CSV!"
 if errorlevel 1 (
     echo [错误] dry-run 失败：!SUBNAME!
@@ -244,6 +246,7 @@ if !CHOICE_RC! EQU 3 set "AUTO_APPLY_ALL=1"
 
 echo.
 echo --- 真删除 (软删到 !TRASH_DIR!) ---
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format HH:mm:ss"') do echo [%%t] START dedupe_pic.exe "!DST_DIR!" --threshold 3 --apply --trash-dir "!TRASH_DIR!" ...
 dedupe_pic.exe "!DST_DIR!" --threshold 3 --apply --trash-dir "!TRASH_DIR!" --report "!REPORT_CSV!"
 if errorlevel 1 (
     echo [错误] 真删失败：!SUBNAME!

@@ -184,10 +184,19 @@ def extract_one(
     对一个视频执行抽帧。返回 (是否成功, 生成的帧数量, 错误/说明信息)。
     """
     out_dir = task.out_dir
-    if skip_existing and out_dir.is_dir():
+    marker = out_dir / "_done.marker"
+    if skip_existing and marker.is_file():
         existing = list(out_dir.glob("frame_*.jpg"))
-        if existing:
-            return True, len(existing), f"跳过（已存在 {len(existing)} 帧）"
+        return True, len(existing), f"跳过（已完成，marker 存在，{len(existing)} 帧）"
+    if skip_existing and out_dir.is_dir():
+        # 存在半成品目录（有 frame_ 文件但没 marker）→ 判为上次未完成，清空重抽
+        stale = list(out_dir.glob("frame_*.jpg"))
+        if stale:
+            for f in stale:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_pattern = str(out_dir / "frame_%06d.jpg")
@@ -233,6 +242,10 @@ def extract_one(
         return False, 0, f"ffmpeg 返回 {proc.returncode}: {err}"
 
     frames = sorted(out_dir.glob("frame_*.jpg"))
+    try:
+        marker.write_text("done", encoding="utf-8")
+    except Exception:
+        pass
     return True, len(frames), "OK"
 
 
@@ -265,7 +278,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--no-skip-existing", action="store_true",
-        help="不跳过已抽好帧的视频（默认跳过重跑友好）",
+        help="不跳过已完成的视频，全部重抽（默认：目录里有 _done.marker 才算完成，跳过；半成品会自动清空重抽）",
     )
     p.add_argument(
         "--dry-run", action="store_true",
@@ -407,6 +420,7 @@ def main() -> int:
         )
         print(f"    → {task.out_dir}", flush=True)
 
+        print("    ...抽帧中，请稍候（ffmpeg 静默运行，视频越长等得越久）", flush=True)
         ok, n, msg = extract_one(
             task, ffmpeg, args.fps, args.quality,
             skip_existing=not args.no_skip_existing,
