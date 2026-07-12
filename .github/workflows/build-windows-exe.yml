@@ -56,6 +56,8 @@ jobs:
             --hidden-import socket ^
             --hidden-import subprocess ^
             --hidden-import datetime ^
+            --hidden-import ctypes ^
+            --hidden-import ctypes.wintypes ^
             --hidden-import cryptography ^
             --hidden-import cryptography.hazmat.primitives.asymmetric.padding ^
             --hidden-import cryptography.hazmat.primitives.hashes ^

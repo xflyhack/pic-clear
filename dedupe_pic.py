@@ -60,6 +60,45 @@ def _force_utf8_stdio() -> None:
 _force_utf8_stdio()
 
 
+def _disable_windows_quickedit() -> None:
+    """关闭 Windows 控制台的"快速编辑模式"。
+
+    Windows cmd/控制台默认启用 QuickEdit：用户在窗口里点一下鼠标就会进入
+    选择/暂停状态，所有 stdout 写入都会阻塞，直到按回车/Esc 才继续。
+    这会导致程序看起来"卡死"，实际是被终端挂起。这里在启动时主动把它关掉。
+    非 Windows 或拿不到控制台句柄时静默跳过。"""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        STD_INPUT_HANDLE = -10
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        ENABLE_QUICK_EDIT_MODE = 0x0040
+        ENABLE_INSERT_MODE = 0x0020
+        ENABLE_MOUSE_INPUT = 0x0010
+
+        handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        if not handle or handle == wintypes.HANDLE(-1).value:
+            return
+        mode = wintypes.DWORD()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return
+        new_mode = mode.value
+        new_mode |= ENABLE_EXTENDED_FLAGS
+        new_mode &= ~ENABLE_QUICK_EDIT_MODE
+        new_mode &= ~ENABLE_MOUSE_INPUT
+        new_mode &= ~ENABLE_INSERT_MODE
+        kernel32.SetConsoleMode(handle, new_mode)
+    except Exception:
+        pass
+
+
+_disable_windows_quickedit()
+
+
 # ----------------------------- dHash ---------------------------------------
 
 def dhash(image_path: Path, hash_size: int = 8) -> int | None:
