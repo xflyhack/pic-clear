@@ -57,6 +57,12 @@ jobs:
           pyinstaller --onefile --console --name extract_frames ^
             --add-binary "..\ffmpeg.exe;." ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
+            --hidden-import json ^
+            --hidden-import base64 ^
+            --hidden-import hashlib ^
+            --hidden-import socket ^
+            --hidden-import subprocess ^
+            --hidden-import datetime ^
             --hidden-import cryptography ^
             --hidden-import cryptography.hazmat.primitives.asymmetric.padding ^
             --hidden-import cryptography.hazmat.primitives.hashes ^
