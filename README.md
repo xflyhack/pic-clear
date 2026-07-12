@@ -28,6 +28,36 @@
   - 组内任何图触发保护（含保护类别 或 相邻帧车变化）→ **全部 KEEP**
   - 组内全部未保护 → 按 `--strategy` 挑一张 KEEP，其余 DELETE
 
+## 授权
+
+exe **必须搭配 license.lic 才能运行**。授权采用 **RSA-2048 签名 + 机器指纹（主板序列号+磁盘序列号+主机名）** 绑定，一台机一份。
+
+### 首次使用流程
+
+1. **拿到 exe**，双击运行任意命令（如 `dedupe_pic.exe --fingerprint`）
+2. 程序输出**本机指纹**，形如：
+   ```
+   [授权] 本机指纹: A1B2-C3D4-E5F6-7890
+   ```
+3. **把这行指纹发给作者**（微信/邮件均可）
+4. 作者用私钥签发 `license.lic`，回给你
+5. 把 `license.lic` 放到 `dedupe_pic.exe` **同目录**，重新运行即可
+
+### 单独查看指纹
+
+```cmd
+dedupe_pic.exe --fingerprint
+```
+只打印 16 位指纹后立刻退出，不会尝试跑任何业务逻辑，不需要 license。
+
+### license 位置查找顺序
+
+1. 环境变量 `DEDUPE_LICENSE=D:\path	o\license.lic`（最高优先级）
+2. exe 同目录 `license.lic`
+3. 找不到则报错
+
+---
+
 ## 使用步骤
 
 ### 1. 拿到 exe

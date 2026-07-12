@@ -593,7 +593,57 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _check_license_or_die() -> None:
+    """授权校验：不通过则打印指纹和错误信息后退出。"""
+    try:
+        from licensing import get_fingerprint, verify_license
+    except ImportError as e:
+        print(f"[FATAL] 无法加载 licensing 模块: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    # 优先级：环境变量 DEDUPE_LICENSE > exe 同目录 > 当前工作目录
+    # - PyInstaller onefile 打包后 sys.frozen=True，sys.executable 指向 exe 本体
+    # - 未打包（开发模式）用 cwd，方便本地测试
+    env_lic = os.environ.get("DEDUPE_LICENSE")
+    if env_lic:
+        license_path = Path(env_lic).expanduser().resolve()
+    elif getattr(sys, "frozen", False):
+        license_path = Path(sys.executable).resolve().parent / "license.lic"
+    else:
+        license_path = Path.cwd() / "license.lic"
+
+    ok, msg = verify_license(license_path)
+    if ok:
+        print(f"[授权] {msg}", flush=True)
+        return
+
+    fp = get_fingerprint()
+    print("=" * 60)
+    print("[授权] 程序未获得有效授权，无法运行。")
+    print(f"[授权] 原因: {msg}")
+    print(f"[授权] license 期望位置: {license_path}")
+    print()
+    print(f"[授权] 本机指纹: {fp}")
+    print("[授权] 请将上面这行指纹发给作者，获取 license.lic，")
+    print("       并放到 dedupe_pic.exe 同目录后重新运行。")
+    print("=" * 60)
+    sys.exit(3)
+
+
 def main() -> int:
+    # 先做 pre-flight 授权检查（早于任何业务逻辑）
+    if "--fingerprint" in sys.argv:
+        # 方便用户单独查指纹，不做任何其他事
+        try:
+            from licensing import get_fingerprint
+            print(get_fingerprint())
+        except Exception as e:
+            print(f"[ERROR] 无法计算指纹: {e}", file=sys.stderr)
+            return 2
+        return 0
+
+    _check_license_or_die()
+
     args = parse_args()
 
     if not args.root.exists():
