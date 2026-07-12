@@ -74,13 +74,17 @@ jobs:
           build_extract\dist\extract_frames.exe --fingerprint
         shell: cmd
 
-      - name: Smoke test (no license → should exit 3)
+      - name: Smoke test (no license → must exit 3)
         env:
           PYTHONIOENCODING: utf-8
-        continue-on-error: true
         run: |
           chcp 65001
-          build_extract\dist\extract_frames.exe D:\ D:\out 2>&1
+          build_extract\dist\extract_frames.exe D:\ D:\out
+          if %ERRORLEVEL% NEQ 3 (
+            echo Unexpected exit code %ERRORLEVEL% ^(expected 3^)
+            exit /b 1
+          )
+          echo Smoke test PASS: got expected exit code 3
         shell: cmd
 
       - name: Show exe size

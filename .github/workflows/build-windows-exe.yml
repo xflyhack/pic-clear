@@ -66,13 +66,19 @@ jobs:
           chcp 65001
           dist\dedupe_pic.exe --fingerprint
 
-      - name: Smoke test (no license → should exit 3 with fingerprint)
+      - name: Smoke test (no license → must exit 3)
         env:
           PYTHONIOENCODING: utf-8
-        continue-on-error: true
+        # 期望退出码就是 3（授权失败）。任何其它退出码都视为异常并让 step 变红。
         run: |
           chcp 65001
-          dist\dedupe_pic.exe D:\ 2>&1 || echo "expected non-zero exit"
+          dist\dedupe_pic.exe D:\
+          if %ERRORLEVEL% NEQ 3 (
+            echo Unexpected exit code %ERRORLEVEL% ^(expected 3^)
+            exit /b 1
+          )
+          echo Smoke test PASS: got expected exit code 3
+        shell: cmd
 
       - name: Show exe size
         run: dir dist
