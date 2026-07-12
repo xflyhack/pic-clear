@@ -6,14 +6,14 @@ title %~n0
 REM ===========================================================
 REM  依赖：
 REM   - extract_frames.exe / dedupe_pic.exe 已放入 PATH
-REM     推荐放到 C:\Windows\System32（系统 PATH 自带）
-REM   - 每个 exe 同目录下都要有 license.lic（否则 System32 里也行）
+REM     推荐放到 C:\Windows\System32
+REM   - 每个 exe 同目录下都要有 license.lic
 REM ===========================================================
 
 REM ---- 数据盘盘符（默认 Z:）----
 set "DATA_DRIVE=Z:"
 
-REM ---- 输出根目录（在数据盘上，就近落盘）----
+REM ---- 输出根目录（数据盘上，就近落盘）----
 set "OUT_ROOT=%DATA_DRIVE%\切帧结果"
 
 REM ---- 源目录前缀（自动匹配，比如 sjbz_20260708）----
@@ -32,64 +32,168 @@ if not exist "%DATA_DRIVE%\" (
     pause & exit /b 2
 )
 
-REM ---- 自动找 sjbz_* 顶层目录 ----
-set "SRC_DIR="
-set "SRC_NAME="
+REM ---- Step A: 选 sjbz_* 顶层目录 ----
+set "SRC_ROOT="
+set "SRC_ROOT_NAME="
 set "MATCH_COUNT=0"
 for /d %%D in ("%DATA_DRIVE%\%DATA_PREFIX%*") do (
     set /a MATCH_COUNT+=1
-    set "SRC_DIR=%%~fD"
-    set "SRC_NAME=%%~nxD"
+    set "SRC_ROOT=%%~fD"
+    set "SRC_ROOT_NAME=%%~nxD"
 )
 
 if "%MATCH_COUNT%"=="0" (
     echo [提示] 在 %DATA_DRIVE%\ 下没有找到 %DATA_PREFIX%* 目录。
     echo        请把源目录路径拖到本窗口，或手工输入，然后回车：
-    set /p "SRC_DIR=源目录: "
-    if not defined SRC_DIR ( echo 未提供源目录，退出。 & pause & exit /b 2 )
-    for %%X in ("!SRC_DIR!") do set "SRC_NAME=%%~nxX"
+    set /p "SRC_ROOT=源目录: "
+    if not defined SRC_ROOT ( echo 未提供，退出。 & pause & exit /b 2 )
+    for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
 ) else if "%MATCH_COUNT%"=="1" (
-    echo [自动] 唯一匹配：!SRC_DIR!
+    echo [自动] 唯一 sjbz 目录：!SRC_ROOT!
 ) else (
-    echo [选择] 找到多个源目录：
+    echo [选择] 找到多个 %DATA_PREFIX%* 目录：
     set "IDX=0"
     for /d %%D in ("%DATA_DRIVE%\%DATA_PREFIX%*") do (
         set /a IDX+=1
-        set "OPT_!IDX!=%%~fD"
+        set "ROOT_!IDX!=%%~fD"
         echo    [!IDX!] %%~nxD
     )
     echo.
     set /p "PICK=请输入编号: "
-    call set "SRC_DIR=%%OPT_!PICK!%%"
-    if not defined SRC_DIR ( echo 无效选择，退出。 & pause & exit /b 2 )
-    for %%X in ("!SRC_DIR!") do set "SRC_NAME=%%~nxX"
+    call set "SRC_ROOT=%%ROOT_!PICK!%%"
+    if not defined SRC_ROOT ( echo 无效选择，退出。 & pause & exit /b 2 )
+    for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
 )
 
-set "DST_DIR=%OUT_ROOT%\%SRC_NAME%"
-if not exist "%DST_DIR%" mkdir "%DST_DIR%" 2>nul
+echo.
+echo ------------------------------------------------------------
+echo   sjbz 根目录 ： %SRC_ROOT%
+echo ------------------------------------------------------------
+echo.
 
+REM ---- Step B: 列出 sjbz_root 下的一级子目录，让用户选 ----
+set "SUB_COUNT=0"
+for /d %%D in ("%SRC_ROOT%\*") do (
+    set /a SUB_COUNT+=1
+    set "SUB_!SUB_COUNT!=%%~nxD"
+)
+
+if "%SUB_COUNT%"=="0" (
+    echo [提示] %SRC_ROOT% 下没有一级子目录，将直接对整个目录处理。
+    set "SELECTED[1]=."
+    set "SELECTED_COUNT=1"
+    goto :SUB_DONE
+)
+
+echo [子目录] %SRC_ROOT% 下的一级子目录（共 %SUB_COUNT% 个）：
+for /l %%i in (1,1,%SUB_COUNT%) do (
+    echo    [%%i] !SUB_%%i!
+)
 echo.
-echo ------------------------------------------------------------
-echo   源目录   ： %SRC_DIR%
-echo   输出目录 ： %DST_DIR%
-echo ------------------------------------------------------------
+echo 输入方式（可组合）：
+echo    - 序号列表（逗号分隔）：  1,2
+echo    - 序号区间：              1-3
+echo    - 全部：                  all
 echo.
-echo [提示] 如果窗口卡住看起来无输出，按一下 Enter 或 Esc 恢复。
+set /p "SEL=请输入你要处理的子目录: "
+if not defined SEL ( echo 未输入，退出。 & pause & exit /b 2 )
+
+REM ---- 解析选择，写入 SELECTED[1..N] ----
+set "SELECTED_COUNT=0"
+
+REM 全部
+if /I "!SEL!"=="all" (
+    for /l %%i in (1,1,%SUB_COUNT%) do (
+        set /a SELECTED_COUNT+=1
+        set "SELECTED[!SELECTED_COUNT!]=!SUB_%%i!"
+    )
+    goto :SUB_DONE
+)
+
+REM 逗号分隔 -> 空格分隔（for %%t 遍历）
+set "TOKENS=!SEL:,= !"
+for %%T in (!TOKENS!) do (
+    set "TOK=%%T"
+    REM 判断是否是区间 a-b
+    echo !TOK! | findstr /r "^[0-9][0-9]*-[0-9][0-9]*$" >nul && (
+        for /f "tokens=1,2 delims=-" %%a in ("!TOK!") do (
+            set "A=%%a"
+            set "B=%%b"
+            for /l %%k in (!A!,1,!B!) do (
+                if %%k GEQ 1 if %%k LEQ %SUB_COUNT% (
+                    set /a SELECTED_COUNT+=1
+                    call set "NAME=%%SUB_%%k%%"
+                    call set "SELECTED[!SELECTED_COUNT!]=%%NAME%%"
+                )
+            )
+        )
+    ) || (
+        REM 单个序号
+        echo !TOK! | findstr /r "^[0-9][0-9]*$" >nul && (
+            set "K=!TOK!"
+            if !K! GEQ 1 if !K! LEQ %SUB_COUNT% (
+                set /a SELECTED_COUNT+=1
+                call set "NAME=%%SUB_!K!%%"
+                call set "SELECTED[!SELECTED_COUNT!]=!NAME!"
+            )
+        )
+    )
+)
+
+if "!SELECTED_COUNT!"=="0" (
+    echo [错误] 输入 "!SEL!" 无法解析出有效子目录。
+    pause & exit /b 2
+)
+
+:SUB_DONE
+echo.
+echo [已选] 共 !SELECTED_COUNT! 个子目录，将依次处理：
+for /l %%i in (1,1,!SELECTED_COUNT!) do (
+    call echo    - %%SELECTED[%%i]%%
+)
+echo.
+
+REM 建议关闭 QuickEdit
+echo [提示] 如果窗口卡住无输出，按一下 Enter 或 Esc 恢复。
 echo        建议永久关闭"快速编辑模式"：右键窗口标题 -^> 属性 -^> 编辑选项。
 echo.
 
-echo ============================================================
-echo   仅执行：抽帧
-echo ============================================================
 where extract_frames.exe >nul 2>nul || (
-    echo [错误] 找不到 extract_frames.exe。
-    pause & exit /b 3
+    echo [错误] 找不到 extract_frames.exe。 & pause & exit /b 3
 )
 
-extract_frames.exe "%SRC_DIR%" "%DST_DIR%" --fps 1 --ext .h265
-set "RC=%ERRORLEVEL%"
+set "OVERALL_RC=0"
+for /l %%i in (1,1,!SELECTED_COUNT!) do (
+    call set "SUBNAME=%%SELECTED[%%i]%%"
+    call :DO_EXTRACT %%i
+    if errorlevel 1 set "OVERALL_RC=1"
+)
+
 echo.
-echo 退出码：%RC%
+echo ============================================================
+echo   抽帧完毕，总退出码：%OVERALL_RC%
+echo ============================================================
 pause
 endlocal
-exit /b %RC%
+exit /b %OVERALL_RC%
+
+
+:DO_EXTRACT
+setlocal EnableDelayedExpansion
+if "!SUBNAME!"=="." (
+    set "SRC_DIR=%SRC_ROOT%"
+    set "DST_DIR=%OUT_ROOT%\%SRC_ROOT_NAME%"
+) else (
+    set "SRC_DIR=%SRC_ROOT%\!SUBNAME!"
+    set "DST_DIR=%OUT_ROOT%\%SRC_ROOT_NAME%\!SUBNAME!"
+)
+if not exist "!DST_DIR!" mkdir "!DST_DIR!" 2>nul
+echo.
+echo ############################################################
+echo   [%1/!SELECTED_COUNT!] 抽帧：!SUBNAME!
+echo   源  ： !SRC_DIR!
+echo   目标： !DST_DIR!
+echo ############################################################
+extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext .h265
+set "RC=!ERRORLEVEL!"
+endlocal & exit /b %RC%
