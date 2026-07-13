@@ -29,12 +29,14 @@ pipeline.py —— 图片流水线编排器
 from __future__ import annotations
 
 import argparse
+import csv
 import io
 import json
 import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -131,6 +133,65 @@ def _check_license_or_die() -> None:
     print("[授权] 请把这行指纹发给作者，获取 license.lic 后放到 pipeline.exe 同目录。")
     print("=" * 60)
     sys.exit(3)
+
+
+# --------------------- Windows 后台托管加固 --------------------------------
+
+# 单实例锁的互斥体句柄，保持进程存活期间存在
+_single_instance_handle = None
+
+
+def _suppress_windows_error_dialogs() -> None:
+    """屏蔽 Windows 崩溃对话框：worker 后台跑时不弹窗打断，
+    避免有人误关或 GUI 弹框把后台进程 hang 住。"""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        SEM_FAILCRITICALERRORS = 0x0001
+        SEM_NOGPFAULTERRORBOX = 0x0002
+        SEM_NOOPENFILEERRORBOX = 0x8000
+        ctypes.windll.kernel32.SetErrorMode(
+            SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+        )
+    except Exception:
+        pass
+
+
+def _acquire_single_instance_lock(name: str) -> bool:
+    """尝试拿全局命名互斥体，拿到返回 True，已被占用返回 False。
+    进程退出时 handle 会被自动释放。"""
+    global _single_instance_handle
+    if os.name != "nt":
+        # 非 Windows：用文件锁兜底
+        try:
+            import tempfile, fcntl  # type: ignore
+            lock_path = Path(tempfile.gettempdir()) / f"{name}.lock"
+            fh = open(lock_path, "w")
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _single_instance_handle = fh
+            return True
+        except Exception:
+            return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        ERROR_ALREADY_EXISTS = 183
+        kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        # 用 Local\ 而不是 Global\，避免 Session 0 权限问题
+        handle = kernel32.CreateMutexW(None, True, f"Local\\{name}")
+        if not handle:
+            return False
+        err = kernel32.GetLastError()
+        if err == ERROR_ALREADY_EXISTS:
+            kernel32.CloseHandle(handle)
+            return False
+        _single_instance_handle = handle
+        return True
+    except Exception:
+        return False
 
 
 # ------------------------------- 默认路径 -----------------------------------
@@ -383,6 +444,9 @@ def cmd_submit(args: argparse.Namespace) -> int:
         "fps": args.fps,
         "ext": args.ext,
         "apply_delete": args.apply,
+        "hard_delete": args.hard_delete,
+        "motion_threshold": args.motion_threshold,
+        "daily_remain_limit": args.daily_remain_limit,
     }
     (job_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -467,6 +531,88 @@ def _pipeline_log(job_dir: Path, msg: str) -> None:
             f.write(line + "\n")
 
 
+# 集中统计：每个刚去重完的目录追加一行，返回当日累计 remain
+# CSV 位置：Z:\data_source\YYYYMMDD\machine_id_{COMPUTERNAME}.csv
+# 每机每天一份文件，多机器天然无锁写
+_IMG_EXT = {".jpg", ".jpeg", ".png"}
+_stats_lock = None
+
+
+def _append_stats(target_dir: Path, data_drive: str = "Z:") -> int:
+    """给一个刚 dedupe 完的目录写统计，返回当日累计 remain。
+    出错返回 -1（表示不参与阈值判断）。"""
+    global _stats_lock
+    if _stats_lock is None:
+        import threading
+        _stats_lock = threading.Lock()
+
+    report = target_dir / "dedupe_report.csv"
+    if not report.is_file():
+        return -1
+
+    # 数图片总数（不递归，一个视频对应一个目录）
+    total = 0
+    try:
+        for entry in target_dir.iterdir():
+            if entry.is_file() and entry.suffix.lower() in _IMG_EXT:
+                total += 1
+    except Exception:
+        return -1
+
+    # 数 DELETE 行（csv 表头之后每行第 2 列是 action）
+    deleted = 0
+    try:
+        import csv as _csv
+        with report.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = _csv.reader(f)
+            header = next(reader, None)  # 跳过表头
+            for row in reader:
+                if len(row) >= 2 and row[1] == "DELETE":
+                    deleted += 1
+    except Exception:
+        return -1
+
+    remain = max(total - deleted, 0)
+    today = datetime.now().strftime("%Y%m%d")
+    machine = os.environ.get("COMPUTERNAME") or socket.gethostname() or "unknown"
+    stats_dir = Path(f"{data_drive}\\data_source\\{today}")
+    stats_csv = stats_dir / f"machine_id_{machine}.csv"
+
+    # 加进程内锁，避免同一 worker 里多线程同时写自己那份 CSV
+    with _stats_lock:
+        try:
+            stats_dir.mkdir(parents=True, exist_ok=True)
+            new_file = not stats_csv.exists()
+            with stats_csv.open("a", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f)
+                if new_file:
+                    w.writerow(["folder_name", "total", "deleted", "remain",
+                                "abs_path", "timestamp"])
+                w.writerow([
+                    target_dir.name,
+                    total,
+                    deleted,
+                    remain,
+                    str(target_dir),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                ])
+            # 读回累计 remain
+            cum = 0
+            with stats_csv.open("r", encoding="utf-8-sig", newline="") as f:
+                reader = csv.reader(f)
+                next(reader, None)  # 表头
+                for row in reader:
+                    if len(row) >= 4:
+                        try:
+                            cum += int(row[3])
+                        except ValueError:
+                            pass
+            return cum
+        except Exception as e:
+            print(f"[append_stats] 写入失败: {e}", file=sys.stderr)
+            return -1
+
+
 def cmd_worker(args: argparse.Namespace) -> int:
     """[内部] detach 后台执行体。"""
     out_root = Path(args.out_root).resolve()
@@ -494,6 +640,10 @@ def cmd_worker(args: argparse.Namespace) -> int:
     fps = manifest["fps"]
     ext = manifest["ext"]
     apply_delete = manifest["apply_delete"]
+    # 新增字段：老 manifest 没有时用兼容默认值
+    hard_delete = bool(manifest.get("hard_delete", False))
+    motion_threshold = float(manifest.get("motion_threshold", 0.12))
+    daily_remain_limit = int(manifest.get("daily_remain_limit", 80000))
 
     extract_exe = resolve_worker_exe("extract_frames")
     dedupe_exe = resolve_worker_exe("dedupe_pic")
@@ -529,6 +679,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
     stop_watcher = threading.Event()
     producer_done = threading.Event()
     overall_rc = {"value": 0}
+    daily_limit_hit = {"value": False}
 
     def save_status_locked():
         with status_lock:
@@ -562,16 +713,16 @@ def cmd_worker(args: argparse.Namespace) -> int:
                     any_work = True
                     _pipeline_log(job_dir, f"[watcher] 去重 {target}")
                     report_csv = target / "dedupe_report.csv"
+                    cmd = [dedupe_exe, str(target),
+                           "--threshold", str(threshold),
+                           "--motion-threshold", str(motion_threshold),
+                           "--report", str(report_csv)]
                     if apply_delete:
-                        trash_dir = target / "_trash"
-                        cmd = [dedupe_exe, str(target),
-                               "--threshold", str(threshold),
-                               "--apply", "--trash-dir", str(trash_dir),
-                               "--report", str(report_csv)]
-                    else:
-                        cmd = [dedupe_exe, str(target),
-                               "--threshold", str(threshold),
-                               "--report", str(report_csv)]
+                        cmd.append("--apply")
+                        if hard_delete:
+                            cmd.append("--hard-delete")
+                        else:
+                            cmd.extend(["--trash-dir", str(target / "_trash")])
                     rc = _run_child(cmd, job_dir)
                     try:
                         running_marker.unlink()
@@ -586,6 +737,28 @@ def cmd_worker(args: argparse.Namespace) -> int:
                         with status_lock:
                             status.subs[i].videos_deduped += 1
                         _pipeline_log(job_dir, f"[watcher] [OK] {target}")
+                        # 追加统计，判日限
+                        try:
+                            cum = _append_stats(target, data_drive=args.data_drive or "Z:")
+                        except Exception as e:
+                            cum = -1
+                            _pipeline_log(job_dir, f"[watcher] 统计失败: {e}")
+                        if cum >= 0:
+                            _pipeline_log(job_dir,
+                                f"[watcher] 当日累计剩余 {cum} / 阈值 {daily_remain_limit}")
+                            if daily_remain_limit > 0 and cum >= daily_remain_limit:
+                                _pipeline_log(job_dir,
+                                    f"[watcher] 已达当日剩余阈值 {daily_remain_limit}，"
+                                    "停止 watcher + 抽帧")
+                                stop_watcher.set()
+                                daily_limit_hit["value"] = True
+                                # 记到 status 上，方便 pipeline.exe status 能看到
+                                with status_lock:
+                                    status.last_message = (
+                                        f"已达当日剩余阈值 {daily_remain_limit}，自动停止"
+                                    )
+                                save_status_locked()
+                                return
                     else:
                         _pipeline_log(job_dir, f"[watcher] [FAIL rc={rc}] {target}")
                         overall_rc["value"] = 1
@@ -614,6 +787,11 @@ def cmd_worker(args: argparse.Namespace) -> int:
 
     # ---- 主线程（生产者）：串行对每个子目录跑抽帧 ----
     for i, sub in enumerate(subs, 1):
+        # 每个子目录开始前检查日限：一旦命中，剩下的子目录不再抽
+        if daily_limit_hit["value"]:
+            _pipeline_log(job_dir,
+                f"[主线程] 已达日限，跳过剩余 {len(subs)-i+1} 个子目录的抽帧")
+            break
         sub_status = status.subs[i - 1]
         status.current_sub_idx = i
         status.last_message = f"抽帧子目录 [{i}/{len(subs)}] {sub}"
@@ -884,17 +1062,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     # submit
     sp = sub.add_parser("submit", parents=[common_out], help="提交新任务并后台运行")
-    sp.add_argument("--auto", action="store_true", help="无交互，必须配合 --src")
-    sp.add_argument("--src", default=None, help="源目录（--auto 模式必填）")
-    sp.add_argument("--subs", default=None,
+    sp.add_argument("--auto", action="store_true", help="无交互，必须配合 -s/--src")
+    sp.add_argument("-s", "--src", default=None, help="源目录（--auto 模式必填）")
+    sp.add_argument("-n", "--subs", default=None,
                     help="子目录选择：'1,2' / '1-3' / 'all' / 具体名字（--auto 模式）")
     sp.add_argument("--data-prefix", default=None,
                     help="源目录前缀（默认 sjbz_）")
-    sp.add_argument("--threshold", type=int, default=3, help="dedupe 阈值，默认 3")
+    sp.add_argument("-t", "--threshold", type=int, default=3,
+                    help="dedupe 相似阈值（Hamming 距离），默认 3")
     sp.add_argument("--fps", type=float, default=1.0, help="抽帧频率，默认 1.0")
     sp.add_argument("--ext", default=".h265", help="视频扩展名，默认 .h265")
-    sp.add_argument("--apply", action="store_true",
-                    help="真删（默认只 dry-run 出报告，需要人工再启动 apply）")
+    sp.add_argument("-y", "--apply", action="store_true",
+                    help="真删（默认只 dry-run 出报告）")
+    sp.add_argument("-H", "--hard-delete", action="store_true",
+                    help="真删时直接永久删除，不落 _trash 目录（默认落 _trash）")
+    sp.add_argument("-m", "--motion-threshold", type=float, default=0.12,
+                    help="车运动保护阈值，越大越严格。默认 0.12")
+    sp.add_argument("-L", "--daily-remain-limit", type=int, default=80000,
+                    help="当日累计剩余达此值 pipeline 自动停止（0=禁用）。默认 80000")
 
     # worker (internal)
     wp = sub.add_parser("worker", parents=[common_out], help="[内部] 后台执行体，不要手动调")
@@ -937,9 +1122,25 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
+    # 单实例：submit 和 worker 都要抢锁；查看类命令 (list/status/logs/stop) 不锁
     if args.cmd == "submit":
+        if not _acquire_single_instance_lock("pic-clear-pipeline-submit"):
+            print("=" * 60)
+            print("[ERROR] 已有一个 pipeline submit 正在跑，本次拒绝启动。")
+            print("        请等前一个跑完，或用 pipeline.exe list 查看当前任务。")
+            print("        （只锁 submit 阶段，后台 worker 一旦启动就会释放）")
+            print("=" * 60)
+            return 4
         return cmd_submit(args)
     elif args.cmd == "worker":
+        # worker 是 detach 后台进程：屏蔽崩溃对话框，避免有人手滑关掉
+        _suppress_windows_error_dialogs()
+        # 单实例：同 job_id 只能有一个 worker
+        lock_name = f"pic-clear-pipeline-worker-{args.job_id}"
+        if not _acquire_single_instance_lock(lock_name):
+            print(f"[ERROR] job_id={args.job_id} 已有 worker 在跑，本次拒绝启动。",
+                  file=sys.stderr)
+            return 4
         return cmd_worker(args)
     elif args.cmd == "list":
         return cmd_list(args)
