@@ -1,6 +1,7 @@
 ﻿@echo off
 setlocal EnableExtensions EnableDelayedExpansion
 >nul chcp 65001
+@echo off
 title hide_markers.bat
 
 REM ============================================================
