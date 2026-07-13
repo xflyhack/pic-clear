@@ -76,6 +76,50 @@ dedupe_pic.exe --fingerprint
 ```
 只打印 16 位指纹后立刻退出，不会尝试跑任何业务逻辑，不需要 license。
 
+### 作者签发流程（本地生成 license.lic）
+
+**只有作者本地跑，`gen_license.py` 不会打包进 exe 分发。**
+
+**准备**：私钥（默认在 `~/.dedupe_pic_keys/private.pem`；仓库内也有一份 `secrets/private.pem`）+ 装了 `cryptography` 的 Python 环境。
+
+**推荐用仓库自带的 venv**（一次性安装：`python3 -m venv /tmp/pic_venv && /tmp/pic_venv/bin/pip install cryptography`）：
+
+```bash
+# 最简单：只给指纹，其他走默认（issued_to=user, expire=never, 私钥用 ~/.dedupe_pic_keys/private.pem）
+/tmp/pic_venv/bin/python gen_license.py E915-F232-792C-5B41
+
+# 常用：指定发放对象和输出文件名
+/tmp/pic_venv/bin/python gen_license.py E915-F232-792C-5B41 \
+    --issued-to xflyhack \
+    --output /tmp/E915-F232-792C-5B41.lic
+
+# 用仓库内的私钥（Mac 上没配 ~/.dedupe_pic_keys 时）
+/tmp/pic_venv/bin/python gen_license.py E915-F232-792C-5B41 \
+    --issued-to xflyhack \
+    --private-key secrets/private.pem \
+    --output /tmp/E915-F232-792C-5B41.lic
+
+# 设置到期日
+/tmp/pic_venv/bin/python gen_license.py E915-F232-792C-5B41 \
+    --issued-to lisi --expire 2027-12-31 \
+    --note "内测许可" --output lisi.lic
+```
+
+**参数速查**：
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `fingerprint`（位置） | 目标机器指纹 `XXXX-XXXX-XXXX-XXXX` | 必填 |
+| `--issued-to` | 发放给谁（记录用） | `user` |
+| `--expire` | `YYYY-MM-DD` 或 `never` | `never` |
+| `--note` | 备注 | 空 |
+| `--private-key` | 私钥路径 | `~/.dedupe_pic_keys/private.pem` |
+| `--output` | 输出文件名 | `license.lic` |
+
+**已签发指纹**在 `AGENTS.md` 里维护。
+
+---
+
 ### license 位置查找顺序
 
 1. 环境变量 `DEDUPE_LICENSE=D:\path	o\license.lic`（最高优先级）
