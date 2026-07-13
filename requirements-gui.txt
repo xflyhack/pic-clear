@@ -1,0 +1,4 @@
+# pipe_gui.exe 额外依赖（pipeline.exe 用的 requirements.txt 那些也要）
+pystray>=0.19.5
+Pillow>=10.0.0
+keyboard>=0.13.5

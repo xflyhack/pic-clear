@@ -8,6 +8,8 @@
 |---|---|---|
 | **`extract_frames.exe`** | 递归扫描视频目录，把 `.h265` 视频按 1 帧/秒抽成 JPEG，输出镜像目录 | ~95 MB（含 ffmpeg）|
 | **`dedupe_pic.exe`** | 对图片目录做近似去重（dHash）+ YOLO 保护（人/车）+ 前后帧车运动保护 | ~200 MB（含 yolov8n）|
+| **`pipeline.exe`** | 编排层：一键跑抽帧 + 去重，后台 detach，可查状态/停/看日志 | ~10-20 MB |
+| **`pipe_gui.exe`** | `pipeline.exe` 的图形前端，双击运行，托盘 + 快捷键，不习惯命令行的同事用 | ~15-25 MB |
 
 **典型 pipeline**：
 ```
