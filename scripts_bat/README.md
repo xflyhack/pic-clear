@@ -1,5 +1,9 @@
 # 自动化 bat 脚本
 
+> **给开发/AI 助手**：新写 bat 之前先看 [`../docs/bat_conventions.md`](../docs/bat_conventions.md)，
+> 里面记录了 UTF-8 BOM + CRLF + 双 `@echo off` 等踩坑约定。
+
+
 给堡垒机 Windows 用的一键脚本。把两个 exe 放到系统 PATH（推荐 `C:\Windows\System32`），bat 自动定位 `Z:\sjbz_*` 源目录，让你**挑选要处理的子目录**，把结果写到 `Z:\切帧结果\` 下、层级完全对齐。
 
 > 想要**后台运行 + 关窗口不中断 + 集中日志**？请看 `docs/pipeline_exe.md`（`pipeline.exe`）。
