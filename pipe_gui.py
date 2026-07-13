@@ -56,6 +56,17 @@ def _candidate_dirs() -> list[Path]:
     return dirs
 
 
+def _find_pipeline_exe() -> str | None:
+    """在 System32 / pipe_gui.exe 同目录 / PATH 里找 pipeline.exe。找不到返回 None。"""
+    import shutil
+    for d in _candidate_dirs():
+        cand = d / "pipeline.exe"
+        if cand.is_file():
+            return str(cand)
+    hit = shutil.which("pipeline.exe")
+    return hit
+
+
 def check_environment() -> tuple[bool, list[tuple[str, str, str]]]:
     """
     返回 (all_ok, rows)
@@ -113,7 +124,8 @@ def list_subdirs(root: Path) -> list[str]:
 # 状态查询：进程 + 最新 job
 # =========================================================================
 
-PROC_NAMES = ["pipeline.exe", "extract_frames.exe", "dedupe_pic.exe"]
+# pipe_gui.exe 也算进来：因为 pipe_gui 提交任务时 detach 出的 worker 就是自身副本
+PROC_NAMES = ["pipe_gui.exe", "pipeline.exe", "extract_frames.exe", "dedupe_pic.exe"]
 
 
 def query_processes() -> dict[str, dict]:
@@ -455,6 +467,13 @@ class PipeGUI:
             fingerprint=False,
         )
 
+        # 优先让 detach 出来的 worker 是 pipeline.exe，而不是 pipe_gui.exe 自身副本。
+        # 这样进程列表和状态浮层显示更干净，也避免自身副本被误当成 GUI 再次弹窗
+        # （虽然 _looks_like_cli() 已经兜住，但用 pipeline.exe 更符合直觉）。
+        pipeline_exe = _find_pipeline_exe()
+        if pipeline_exe:
+            os.environ["PIPELINE_WORKER_EXE_OVERRIDE"] = pipeline_exe
+
         # 在后台线程调 submit（内部会 detach worker，很快返回）
         def run_submit():
             try:
@@ -655,7 +674,36 @@ class PipeGUI:
 # 入口
 # =========================================================================
 
+# 会被识别为 pipeline CLI 的子命令；命中就绕开 GUI 直接把 argv 交给 pipeline.main()
+_PIPELINE_CLI_CMDS = {"submit", "worker", "list", "status", "logs", "stop"}
+
+
+def _looks_like_cli() -> bool:
+    """判断 argv 是不是 pipeline 的 CLI 调用（尤其是 detach 出来的 worker）。
+
+    典型场景：pipeline.cmd_submit() 里 detach 时会用 sys.executable 重新拉起自己，
+    命令行长成  pipe_gui.exe worker --job-id xxx --out-root xxx。
+    这时候不能进 GUI，要走 CLI，否则会：
+      1) 再弹一个 GUI 窗口（用户看到的问题一）
+      2) worker 根本没跑起来（用户看到的问题二）
+    """
+    if "--fingerprint" in sys.argv[1:]:
+        return True
+    for a in sys.argv[1:]:
+        if a.startswith("-"):
+            continue
+        # 第一个非选项 token 是子命令名
+        return a in _PIPELINE_CLI_CMDS
+    return False
+
+
 def main() -> int:
+    # ---- CLI 短路：命中 pipeline 子命令时，直接把控制权交给 pipeline.main() ----
+    # 这是修复"detach worker 又开 GUI"和"worker 未运行"两个问题的关键。
+    if _looks_like_cli():
+        return pipeline.main()
+
+    # ---- 正常 GUI 启动 ----
     # 授权检查（跟 pipeline 一样，如果签名过期直接报错）
     try:
         pipeline._check_license_or_die()

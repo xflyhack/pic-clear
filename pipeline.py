@@ -229,7 +229,15 @@ def resolve_worker_exe(name: str) -> str:
 
 
 def resolve_self_exe() -> str:
-    """自身 exe 路径，供 detach 时 spawn 新的 worker 进程。"""
+    """自身 exe 路径，供 detach 时 spawn 新的 worker 进程。
+
+    允许通过环境变量 PIPELINE_WORKER_EXE_OVERRIDE 指定一个替代 exe（例如 pipe_gui
+    调用 cmd_submit 时，希望 detach 出的 worker 是同目录/System32 里的 pipeline.exe
+    而不是 pipe_gui.exe 自身副本，以免进程列表里看不出是 pipeline 的 worker）。
+    """
+    override = os.environ.get("PIPELINE_WORKER_EXE_OVERRIDE")
+    if override and Path(override).is_file():
+        return override
     if getattr(sys, "frozen", False):
         return sys.executable
     return sys.executable + " " + str(Path(__file__).resolve())
