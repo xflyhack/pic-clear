@@ -242,6 +242,83 @@ def format_kb(kb: int) -> str:
 
 
 # =========================================================================
+# 一键杀死所有相关进程
+# =========================================================================
+
+# 会被清理的进程名（自己 pipe_gui.exe 只杀"其他实例"，当前实例排除）
+KILL_TARGETS = ["pipeline.exe", "extract_frames.exe", "dedupe_pic.exe", "pipe_gui.exe"]
+
+
+def kill_all_related(exclude_pids: list[int]) -> tuple[list[tuple[str, int, bool]], int]:
+    """按名字杀掉所有 KILL_TARGETS，跳过 exclude_pids 里的 PID。
+
+    返回 (results, killed_count)：
+      results: [(name, pid, ok), ...] 每个尝试过的进程
+      killed_count: 成功杀掉的进程数
+    """
+    results: list[tuple[str, int, bool]] = []
+    killed = 0
+    if os.name != "nt":
+        # 非 Windows 场景：kill -9
+        procs = query_processes()
+        for name, info in procs.items():
+            for pid in info["pids"]:
+                if pid in exclude_pids:
+                    continue
+                try:
+                    os.kill(pid, 9)
+                    results.append((name, pid, True))
+                    killed += 1
+                except Exception:
+                    results.append((name, pid, False))
+        return results, killed
+
+    # Windows：先查 PID 列表，逐个 taskkill /F /PID，跳过自己
+    procs = query_processes()
+    for name in KILL_TARGETS:
+        info = procs.get(name)
+        if not info or not info["running"]:
+            continue
+        for pid in info["pids"]:
+            if pid in exclude_pids:
+                continue
+            try:
+                rc = subprocess.call(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    creationflags=0x08000000,  # CREATE_NO_WINDOW
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                ok = (rc == 0)
+                results.append((name, pid, ok))
+                if ok:
+                    killed += 1
+            except Exception:
+                results.append((name, pid, False))
+    return results, killed
+
+
+def mark_latest_job_stopped(out_root: Path) -> str | None:
+    """把最新一个还在 running/pending 的 job 状态改成 stopped，返回 job_id。"""
+    st = find_latest_job(out_root)
+    if not st:
+        return None
+    if st.state not in ("pending", "running"):
+        return None
+    st.state = "stopped"
+    st.ended_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.last_message = "被『杀死所有进程』强制停止"
+    try:
+        # jobs 目录路径
+        job_dir = out_root / ".pipeline" / "jobs" / st.job_id
+        pipeline._save_status(job_dir, st)
+        return st.job_id
+    except Exception as e:
+        print(f"[WARN] 更新 status.json 失败: {e}", file=sys.stderr)
+        return None
+
+
+# =========================================================================
 # 主 GUI
 # =========================================================================
 
@@ -383,6 +460,7 @@ class PipeGUI:
         f_btn = ttk.Frame(self.root); f_btn.pack(fill="x", **pad)
         ttk.Button(f_btn, text="运行", command=self._on_run, width=14).pack(side="left", padx=4)
         ttk.Button(f_btn, text="停止当前任务", command=self._on_stop, width=14).pack(side="left", padx=4)
+        ttk.Button(f_btn, text="一键杀死所有", command=self._on_kill_all, width=14).pack(side="left", padx=4)
         ttk.Button(f_btn, text="查看状态", command=self.show_status_window, width=14).pack(side="left", padx=4)
         ttk.Button(f_btn, text="最小化到托盘", command=self.hide_to_tray, width=14).pack(side="left", padx=4)
         ttk.Button(f_btn, text="退出", command=self.quit_all, width=10).pack(side="right", padx=4)
@@ -660,6 +738,49 @@ class PipeGUI:
         except Exception as e:
             messagebox.showerror("停止失败", str(e))
 
+    def _on_kill_all(self):
+        """一键杀掉所有 pipeline/extract/dedupe/其他 pipe_gui 实例，跳过自己。"""
+        # 二次确认
+        target_list = "\n".join(f"    - {n}" for n in KILL_TARGETS)
+        if not messagebox.askyesno(
+            "确认一键清理",
+            "将强制杀掉以下所有正在运行的进程（当前 GUI 自己除外）：\n\n"
+            f"{target_list}\n\n"
+            "适用场景：bat 脚本残留、多次误启动、状态卡死。\n"
+            "任务会立刻中断，未处理完的图片保持原样，请确认？"):
+            return
+
+        my_pid = os.getpid()
+        try:
+            results, killed = kill_all_related(exclude_pids=[my_pid])
+        except Exception as e:
+            messagebox.showerror("失败", f"kill 失败: {e}")
+            return
+
+        # 顺手把最新 job 标记为 stopped，避免状态浮层里显示"僵尸 running"
+        marked = None
+        out = self._out_var.get().strip()
+        if out and Path(out).is_dir():
+            try:
+                marked = mark_latest_job_stopped(Path(out))
+            except Exception as e:
+                print(f"[WARN] mark_latest_job_stopped: {e}", file=sys.stderr)
+
+        # 汇报结果
+        if not results:
+            messagebox.showinfo("清理完成", "没有发现需要杀掉的相关进程。")
+            return
+        lines = [f"共尝试 {len(results)} 个，成功杀掉 {killed} 个：\n"]
+        for name, pid, ok in results:
+            mark = "√" if ok else "×"
+            lines.append(f"  [{mark}] {name}  PID {pid}")
+        if marked:
+            lines.append(f"\n已把任务 {marked} 状态改为 stopped。")
+        failed = len(results) - killed
+        if failed > 0:
+            lines.append(f"\n{failed} 个未能杀掉，可能需要管理员权限或已自行退出。")
+        messagebox.showinfo("清理完成", "\n".join(lines))
+
     # ---------- 托盘 ----------
 
     def hide_to_tray(self):
@@ -688,6 +809,7 @@ class PipeGUI:
             pystray.MenuItem("显示主窗口", lambda: self.root.after(0, self.show_main)),
             pystray.MenuItem("显示状态", lambda: self.root.after(0, self.show_status_window)),
             pystray.MenuItem("停止当前任务", lambda: self.root.after(0, self._on_stop)),
+            pystray.MenuItem("一键杀死所有", lambda: self.root.after(0, self._on_kill_all)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", lambda: self.root.after(0, self.quit_all)),
         )
