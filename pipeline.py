@@ -953,6 +953,14 @@ def _run_child(cmd: list[str], job_dir: Path) -> int:
     exe_name = Path(cmd[0]).name
     child_log = children_dir / f"{seq:04d}_{exe_name}.log"
 
+    # Windows 上禁止给子 exe 弹黑窗口：worker 本身无控制台，Popen 默认会给
+    # 每个子控制台程序分配新窗口。stdout/stderr 已重定向到 child_log 文件，
+    # exit code 走进程退出码，跟窗口无关，静默完全不影响统计。
+    creationflags = 0
+    if os.name == "nt":
+        CREATE_NO_WINDOW = 0x08000000
+        creationflags = CREATE_NO_WINDOW
+
     try:
         with child_log.open("wb") as logf:
             proc = subprocess.Popen(
@@ -961,6 +969,7 @@ def _run_child(cmd: list[str], job_dir: Path) -> int:
                 stdout=logf,
                 stderr=subprocess.STDOUT,
                 cwd=str(job_dir),
+                creationflags=creationflags,
             )
             rc = proc.wait()
     except FileNotFoundError as e:
