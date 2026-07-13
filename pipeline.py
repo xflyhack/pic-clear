@@ -326,21 +326,84 @@ def _process_alive(pid: int) -> bool:
 
 # ------------------------------- 交互选择 -----------------------------------
 
+def _list_available_drives() -> list[str]:
+    """Windows: 列出当前系统上能访问的所有盘符（'C:', 'D:', ...）。
+    非 Windows 返回空列表（走绝对路径分支）。"""
+    if os.name != "nt":
+        return []
+    drives: list[str] = []
+    try:
+        import ctypes
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+        for i in range(26):
+            if bitmask & (1 << i):
+                letter = chr(ord("A") + i)
+                drives.append(f"{letter}:")
+    except Exception:
+        pass
+    return drives
+
+
+def pick_drive(default_drive: str) -> str:
+    """交互选盘：如果默认盘存在就直接用；否则列出所有可用盘让用户选。"""
+    default_path = Path(f"{default_drive}\\")
+    if default_path.is_dir():
+        return default_drive
+    drives = _list_available_drives()
+    if not drives:
+        # 非 Windows 或拿不到盘符：让用户手输
+        raw = input(f"[提示] 数据盘 {default_drive} 不存在，请输入盘符或绝对路径: ").strip()
+        return raw or default_drive
+    print(f"[选择] 数据盘 {default_drive} 不存在，可用盘符：")
+    for i, d in enumerate(drives, 1):
+        print(f"    [{i}] {d}")
+    pick = input("请输入编号（默认 1）: ").strip() or "1"
+    try:
+        return drives[int(pick) - 1]
+    except (ValueError, IndexError):
+        print("[错误] 无效编号，退出。")
+        sys.exit(2)
+
+
 def interactive_pick(data_drive: str, data_prefix: str) -> tuple[Path, list[str]]:
-    """交互选择 sjbz 根目录 + 子目录列表。"""
+    """交互选择 数据盘 + sjbz 根目录 + 子目录列表。"""
+    # 先选盘（默认盘不存在时才让用户选，不打扰）
+    data_drive = pick_drive(data_drive)
     drive = Path(f"{data_drive}\\")
     if not drive.is_dir():
         print(f"[错误] 数据盘 {data_drive} 不存在。")
         sys.exit(2)
+    print(f"[数据盘] {data_drive}")
 
     # 找 sjbz_*
     candidates = sorted([p for p in drive.iterdir() if p.is_dir() and p.name.startswith(data_prefix)])
     if not candidates:
-        raw = input(f"[提示] 在 {data_drive}\\ 下没找到 {data_prefix}* 目录。\n请输入源目录: ").strip()
-        if not raw:
-            print("[错误] 未输入源目录。")
-            sys.exit(2)
-        src_root = Path(raw).resolve()
+        # 兜底：列出当前盘的所有一级目录让用户选，也允许手输绝对路径
+        top_dirs = sorted([p for p in drive.iterdir() if p.is_dir()])
+        if top_dirs:
+            print(f"[提示] 在 {data_drive}\\ 下没找到 {data_prefix}* 目录，可从以下顶层目录选择：")
+            for i, d in enumerate(top_dirs, 1):
+                print(f"    [{i}] {d.name}")
+            print("    [0] 手工输入其它路径")
+            raw = input("请输入编号（默认 0）: ").strip() or "0"
+            if raw == "0":
+                raw = input("请输入源目录（绝对路径）: ").strip()
+                if not raw:
+                    print("[错误] 未输入源目录。")
+                    sys.exit(2)
+                src_root = Path(raw).resolve()
+            else:
+                try:
+                    src_root = top_dirs[int(raw) - 1]
+                except (ValueError, IndexError):
+                    print("[错误] 无效编号，退出。")
+                    sys.exit(2)
+        else:
+            raw = input(f"[提示] {data_drive}\\ 下什么目录都没有，请输入源目录: ").strip()
+            if not raw:
+                print("[错误] 未输入源目录。")
+                sys.exit(2)
+            src_root = Path(raw).resolve()
     elif len(candidates) == 1:
         src_root = candidates[0]
         print(f"[自动] 唯一 sjbz 目录：{src_root}")
@@ -1071,7 +1134,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-t", "--threshold", type=int, default=3,
                     help="dedupe 相似阈值（Hamming 距离），默认 3")
     sp.add_argument("--fps", type=float, default=1.0, help="抽帧频率，默认 1.0")
-    sp.add_argument("--ext", default=".h265", help="视频扩展名，默认 .h265")
+    sp.add_argument("--ext", default=".h265,.mp4",
+                    help="视频扩展名（逗号分隔可多值）。默认 .h265,.mp4")
     sp.add_argument("-y", "--apply", action="store_true",
                     help="真删（默认只 dry-run 出报告）")
     sp.add_argument("-H", "--hard-delete", action="store_true",
