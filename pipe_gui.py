@@ -56,6 +56,42 @@ def _candidate_dirs() -> list[Path]:
     return dirs
 
 
+# =========================================================================
+# 配置持久化：记住上次的选择，下次打开自动填回来
+# =========================================================================
+
+import json
+
+
+def _config_path() -> Path:
+    r"""配置文件路径：%USERPROFILE%\.pic-clear\pipe_gui.json（跨用户/机器隔离）"""
+    home = Path(os.path.expanduser("~"))
+    return home / ".pic-clear" / "pipe_gui.json"
+
+
+def _load_config() -> dict:
+    """加载上次的配置。文件不存在 / 损坏 → 返回空 dict，走默认。"""
+    p = _config_path()
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_config(cfg: dict) -> None:
+    """保存配置。失败不抛异常（不能因为存配置失败影响主流程）。"""
+    try:
+        p = _config_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception as e:
+        print(f"[WARN] 保存配置失败: {e}", file=sys.stderr)
+
+
 def _find_pipeline_exe() -> str | None:
     """在 System32 / pipe_gui.exe 同目录 / PATH 里找 pipeline.exe。找不到返回 None。"""
     import shutil
@@ -241,9 +277,17 @@ class PipeGUI:
 
         self._sub_vars: list[tuple[str, tk.BooleanVar]] = []
 
+        # 加载上次的配置（如果有），下面填进各个 tk 变量
+        self._loaded_config = _load_config()
+
         self._build_ui()
         self._refresh_env()
-        self._auto_pick_drive()
+
+        # 有历史配置就用历史配置；否则走原自动逻辑（挑盘 + 猜 sjbz_*）
+        if self._loaded_config:
+            self._apply_loaded_config()
+        else:
+            self._auto_pick_drive()
 
     # ---------- UI 布局 ----------
 
@@ -342,6 +386,7 @@ class PipeGUI:
         ttk.Button(f_btn, text="查看状态", command=self.show_status_window, width=14).pack(side="left", padx=4)
         ttk.Button(f_btn, text="最小化到托盘", command=self.hide_to_tray, width=14).pack(side="left", padx=4)
         ttk.Button(f_btn, text="退出", command=self.quit_all, width=10).pack(side="right", padx=4)
+        ttk.Button(f_btn, text="重置配置", command=self._on_reset_config, width=10).pack(side="right", padx=4)
 
     # ---------- 环境检测 ----------
 
@@ -363,6 +408,79 @@ class PipeGUI:
     def _refresh_drives(self):
         self._drive_combo["values"] = list_drives()
         self._auto_pick_drive()
+
+    def _apply_loaded_config(self):
+        """把 _loaded_config 里的值填到各个 tk 变量。找不到的字段回落默认。"""
+        cfg = self._loaded_config or {}
+
+        # 数据盘：先看历史值是否还存在
+        drives = list_drives()
+        drv = cfg.get("data_drive")
+        if drv and drv in drives:
+            self._drive_var.set(drv)
+        elif "Z:" in drives:
+            self._drive_var.set("Z:")
+        elif drives:
+            self._drive_var.set(drives[0])
+
+        # 源目录：历史值仍存在就填
+        src = cfg.get("src", "")
+        if src and Path(src).is_dir():
+            self._src_var.set(src)
+
+        # 输出根：历史值就填（可以不存在，用户可能想创建）
+        out = cfg.get("out_root", "")
+        if out:
+            self._out_var.set(out)
+        elif self._drive_var.get():
+            self._out_var.set(str(pipeline.default_out_root(self._drive_var.get())))
+
+        # 各种阈值
+        if "threshold" in cfg:
+            try: self._threshold_var.set(int(cfg["threshold"]))
+            except Exception: pass
+        if "motion" in cfg:
+            try: self._motion_var.set(float(cfg["motion"]))
+            except Exception: pass
+        if "fps" in cfg:
+            try: self._fps_var.set(float(cfg["fps"]))
+            except Exception: pass
+
+        # 复选框
+        if "apply" in cfg:
+            self._apply_var.set(bool(cfg["apply"]))
+        if "hard_delete" in cfg:
+            self._hard_delete_var.set(bool(cfg["hard_delete"]))
+        if "minimize_to_tray" in cfg:
+            self._minimize_to_tray_var.set(bool(cfg["minimize_to_tray"]))
+
+        # 快捷键
+        if cfg.get("hotkey"):
+            self._hotkey_var.set(cfg["hotkey"])
+
+        # 源目录填好了就顺手扫一次子目录（并勾选上次选过的）
+        if src and Path(src).is_dir():
+            self._rescan_subs()
+            last_selected = set(cfg.get("selected_subs", []))
+            if last_selected:
+                for name, var in self._sub_vars:
+                    var.set(name in last_selected)
+
+    def _dump_current_config(self) -> dict:
+        """把当前表单状态收集成 dict，用于保存。"""
+        return {
+            "data_drive": self._drive_var.get(),
+            "src": self._src_var.get(),
+            "out_root": self._out_var.get(),
+            "threshold": int(self._threshold_var.get()),
+            "motion": float(self._motion_var.get()),
+            "fps": float(self._fps_var.get()),
+            "apply": bool(self._apply_var.get()),
+            "hard_delete": bool(self._hard_delete_var.get()),
+            "minimize_to_tray": bool(self._minimize_to_tray_var.get()),
+            "hotkey": self._hotkey_var.get(),
+            "selected_subs": [name for name, v in self._sub_vars if v.get()],
+        }
 
     def _auto_pick_drive(self):
         drives = list_drives()
@@ -448,6 +566,9 @@ class PipeGUI:
         if self._sub_vars and not selected:
             messagebox.showerror("参数错误", "至少勾选一个子目录"); return
 
+        # 先把当前选择存进配置，下次启动自动填回来
+        _save_config(self._dump_current_config())
+
         # 构造 argparse.Namespace 直接调 pipeline.cmd_submit
         args = argparse.Namespace(
             cmd="submit",
@@ -488,6 +609,37 @@ class PipeGUI:
                     "提交失败", f"{type(e).__name__}: {e}"))
 
         threading.Thread(target=run_submit, daemon=True).start()
+
+    def _on_reset_config(self):
+        """删除配置文件并重置表单为默认。"""
+        if not messagebox.askyesno("确认",
+                                    "确定要清空『记住上次选择』的配置吗？\n"
+                                    "会删除 %USERPROFILE%\\.pic-clear\\pipe_gui.json。"):
+            return
+        try:
+            cp = _config_path()
+            if cp.is_file():
+                cp.unlink()
+        except Exception as e:
+            messagebox.showerror("失败", f"删除配置失败: {e}")
+            return
+        # 重置表单
+        self._src_var.set("")
+        self._out_var.set("")
+        self._threshold_var.set(3)
+        self._motion_var.set(0.12)
+        self._fps_var.set(1.0)
+        self._apply_var.set(True)
+        self._hard_delete_var.set(True)
+        self._minimize_to_tray_var.set(True)
+        self._hotkey_var.set("ctrl+alt+p")
+        # 清空子目录列表
+        for w in self._subs_inner.winfo_children():
+            w.destroy()
+        self._sub_vars.clear()
+        # 重跑自动挑盘逻辑
+        self._auto_pick_drive()
+        messagebox.showinfo("已重置", "配置已清空，可以重新选择。")
 
     def _on_stop(self):
         out = self._out_var.get().strip()
