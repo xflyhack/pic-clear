@@ -366,6 +366,10 @@ class PipeGUI:
         else:
             self._auto_pick_drive()
 
+        # 启动主按钮的定期状态刷新（run <-> stop）
+        self._refresh_action_button()
+        self.root.after(5000, self._schedule_action_refresh)
+
     # ---------- UI 布局 ----------
 
     def _build_ui(self):
@@ -458,8 +462,10 @@ class PipeGUI:
 
         # 底部按钮
         f_btn = ttk.Frame(self.root); f_btn.pack(fill="x", **pad)
-        ttk.Button(f_btn, text="运行", command=self._on_run, width=14).pack(side="left", padx=4)
-        ttk.Button(f_btn, text="停止当前任务", command=self._on_stop, width=14).pack(side="left", padx=4)
+        # 主动作按钮：空闲=运行，有任务=停止（run_or_stop 会根据最新 job 状态动态切）
+        self._action_btn = ttk.Button(f_btn, text="▶ 运行", command=self._on_action_click, width=16)
+        self._action_btn.pack(side="left", padx=4)
+        self._action_state = "run"  # "run" | "stop"
         ttk.Button(f_btn, text="一键杀死所有", command=self._on_kill_all, width=14).pack(side="left", padx=4)
         ttk.Button(f_btn, text="查看状态", command=self.show_status_window, width=14).pack(side="left", padx=4)
         ttk.Button(f_btn, text="最小化到托盘", command=self.hide_to_tray, width=14).pack(side="left", padx=4)
@@ -629,6 +635,63 @@ class PipeGUI:
 
     # ---------- 运行/停止 ----------
 
+    def _on_action_click(self):
+        """主按钮点击：根据当前状态分发到 _on_run 或 _on_stop。"""
+        if self._action_state == "stop":
+            self._on_stop()
+        else:
+            self._on_run()
+
+    def _refresh_action_button(self):
+        """按最新 job 状态切换主按钮的文案和绑定动作。
+
+        - job 是 pending/running → 显示『■ 停止当前任务』
+        - 其他（done/failed/stopped/无任务） → 显示『▶ 运行』
+        """
+        try:
+            state = self._probe_running_state()
+        except Exception:
+            state = "run"
+        if state == "stop":
+            if self._action_state != "stop":
+                self._action_btn.configure(text="■ 停止当前任务")
+                self._action_state = "stop"
+        else:
+            if self._action_state != "run":
+                self._action_btn.configure(text="▶ 运行")
+                self._action_state = "run"
+
+    def _probe_running_state(self) -> str:
+        """判断是否有任务正在跑，返回 'stop' 或 'run'。"""
+        out = self._out_var.get().strip()
+        if not out:
+            return "run"
+        try:
+            root = Path(out)
+        except Exception:
+            return "run"
+        if not root.is_dir():
+            return "run"
+        st = find_latest_job(root)
+        if not st:
+            return "run"
+        # 状态为 pending/running 且 worker 还活着才算"在跑"
+        if st.state in ("pending", "running") and pipeline._process_alive(st.pid):
+            return "stop"
+        return "run"
+
+    def _schedule_action_refresh(self):
+        """每 5 秒轮询一次，自动切换按钮文案。"""
+        try:
+            self._refresh_action_button()
+        finally:
+            # 只要主窗口还在就继续轮询
+            try:
+                if self.root.winfo_exists():
+                    self.root.after(5000, self._schedule_action_refresh)
+            except Exception:
+                pass
+
     def _on_run(self):
         if not getattr(self, "_env_ok", False):
             if not messagebox.askyesno("环境缺失", "有必需文件缺失，仍然继续吗？"):
@@ -679,6 +742,7 @@ class PipeGUI:
                 rc = pipeline.cmd_submit(args)
                 self.root.after(0, lambda: messagebox.showinfo(
                     "已提交", f"任务已提交（rc={rc}）。可点『查看状态』查看进度。"))
+                self.root.after(0, self._refresh_action_button)
             except SystemExit as se:
                 self.root.after(0, lambda: messagebox.showerror(
                     "提交失败", f"pipeline 退出码 {se.code}"))
@@ -735,6 +799,7 @@ class PipeGUI:
         try:
             rc = pipeline.cmd_stop(args)
             messagebox.showinfo("已停止", f"rc={rc}")
+            self._refresh_action_button()
         except Exception as e:
             messagebox.showerror("停止失败", str(e))
 
@@ -769,6 +834,7 @@ class PipeGUI:
         # 汇报结果
         if not results:
             messagebox.showinfo("清理完成", "没有发现需要杀掉的相关进程。")
+            self._refresh_action_button()
             return
         lines = [f"共尝试 {len(results)} 个，成功杀掉 {killed} 个：\n"]
         for name, pid, ok in results:
@@ -780,6 +846,7 @@ class PipeGUI:
         if failed > 0:
             lines.append(f"\n{failed} 个未能杀掉，可能需要管理员权限或已自行退出。")
         messagebox.showinfo("清理完成", "\n".join(lines))
+        self._refresh_action_button()
 
     # ---------- 托盘 ----------
 
