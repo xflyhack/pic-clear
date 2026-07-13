@@ -345,18 +345,23 @@ def _list_available_drives() -> list[str]:
 
 
 def pick_drive(default_drive: str) -> str:
-    """交互选盘：如果默认盘存在就直接用；否则列出所有可用盘让用户选。"""
-    default_path = Path(f"{default_drive}\\")
-    if default_path.is_dir():
-        return default_drive
+    """交互选盘：每次都让用户选，避免固定 Z: 导致不灵活。
+    default_drive 只作为"推荐默认项"（用户直接回车就选它）。"""
     drives = _list_available_drives()
     if not drives:
         # 非 Windows 或拿不到盘符：让用户手输
-        raw = input(f"[提示] 数据盘 {default_drive} 不存在，请输入盘符或绝对路径: ").strip()
+        prompt = f"请输入盘符或绝对路径（默认 {default_drive}）: "
+        raw = input(prompt).strip()
         return raw or default_drive
-    print(f"[选择] 数据盘 {default_drive} 不存在，可用盘符：")
+    # 把默认盘放到第 1 位（如果存在），方便回车即选
+    default_upper = default_drive.rstrip("\\/").upper()
+    if default_upper in drives:
+        drives.remove(default_upper)
+        drives.insert(0, default_upper)
+    print("[选择] 请选择数据盘：")
     for i, d in enumerate(drives, 1):
-        print(f"    [{i}] {d}")
+        tag = "  (默认)" if i == 1 else ""
+        print(f"    [{i}] {d}{tag}")
     pick = input("请输入编号（默认 1）: ").strip() or "1"
     try:
         return drives[int(pick) - 1]
@@ -367,7 +372,7 @@ def pick_drive(default_drive: str) -> str:
 
 def interactive_pick(data_drive: str, data_prefix: str) -> tuple[Path, list[str]]:
     """交互选择 数据盘 + sjbz 根目录 + 子目录列表。"""
-    # 先选盘（默认盘不存在时才让用户选，不打扰）
+    # 每次都让用户选盘（避免固定 Z: 不灵活）
     data_drive = pick_drive(data_drive)
     drive = Path(f"{data_drive}\\")
     if not drive.is_dir():
