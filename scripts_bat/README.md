@@ -20,6 +20,14 @@
 3. 建议永久关闭 cmd 的"快速编辑模式"：
    右键 cmd 窗口标题栏 → 属性 → 编辑选项 → 取消勾选 **快速编辑模式**。
 
+## 只想看运行状态？
+
+双击 `check_status.bat`：
+- 每 5 秒刷新一次，展示 `pipeline.exe` / `extract_frames.exe` / `dedupe_pic.exe` 的进程状态（PID、内存）
+- 顺带展示 `Z:\切帧结果\.pipeline\jobs\` 下**最新一个任务**的进度（job_id、state、done/total、last_message）
+- 只读，**不做任何操作**；`Ctrl+C` 退出
+- 若 `OUT_ROOT` 不是默认 `Z:\切帧结果`，请打开 bat 改顶部的 `set "OUT_ROOT=..."`
+
 ## 使用流程
 
 双击任一 bat：
