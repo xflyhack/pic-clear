@@ -370,8 +370,9 @@ def pick_drive(default_drive: str) -> str:
         sys.exit(2)
 
 
-def interactive_pick(data_drive: str, data_prefix: str) -> tuple[Path, list[str]]:
-    """交互选择 数据盘 + sjbz 根目录 + 子目录列表。"""
+def interactive_pick(data_drive: str, data_prefix: str) -> tuple[Path, list[str], str]:
+    """交互选择 数据盘 + sjbz 根目录 + 子目录列表。
+    返回 (源目录, 子目录名列表, 最终选中的数据盘)。"""
     # 每次都让用户选盘（避免固定 Z: 不灵活）
     data_drive = pick_drive(data_drive)
     drive = Path(f"{data_drive}\\")
@@ -427,20 +428,24 @@ def interactive_pick(data_drive: str, data_prefix: str) -> tuple[Path, list[str]
     subs = sorted([p.name for p in src_root.iterdir() if p.is_dir()])
     if not subs:
         print(f"[提示] {src_root} 下没有一级子目录，将直接对整个目录处理。")
-        return src_root, ["."]
+        return src_root, ["."], data_drive
 
     print(f"\n[子目录] {src_root} 下的一级子目录（共 {len(subs)} 个）：")
+    print(f"    [0] 就选当前目录 {src_root}（不再往下钻）")
     for i, name in enumerate(subs, 1):
         print(f"    [{i}] {name}")
     print()
-    print("输入方式：序号列表 (1,2) / 区间 (1-3) / 全部 (all)")
+    print("输入方式：0 = 当前目录 / 序号列表 (1,2) / 区间 (1-3) / 全部 (all)")
     sel = input("请输入要处理的子目录: ").strip()
+    if sel == "0":
+        print(f"\n[已选] 当前目录 {src_root}\n")
+        return src_root, ["."], data_drive
     picked = parse_selection(sel, subs)
     if not picked:
         print(f"[错误] 输入 {sel!r} 无法解析。")
         sys.exit(2)
     print(f"\n[已选] {len(picked)} 个子目录：{', '.join(picked)}\n")
-    return src_root, picked
+    return src_root, picked, data_drive
 
 
 def parse_selection(sel: str, subs: list[str]) -> list[str]:
@@ -475,7 +480,6 @@ def parse_selection(sel: str, subs: list[str]) -> list[str]:
 def cmd_submit(args: argparse.Namespace) -> int:
     data_drive = args.data_drive or DEFAULT_DATA_DRIVE
     data_prefix = args.data_prefix or DEFAULT_DATA_PREFIX
-    out_root = Path(args.out_root) if args.out_root else default_out_root(data_drive)
 
     # --- 决定 src_root / subs ---
     if args.auto:
@@ -495,7 +499,26 @@ def cmd_submit(args: argparse.Namespace) -> int:
         else:
             subs = available_subs if available_subs else ["."]
     else:
-        src_root, subs = interactive_pick(data_drive, data_prefix)
+        # 交互模式会让用户选盘，返回值里带出真实选中的盘
+        src_root, subs, data_drive = interactive_pick(data_drive, data_prefix)
+
+    # --- 决定 out_root ---
+    # 优先 --out-root，其次交互问一下，最后回落到 data_drive\切帧结果
+    if args.out_root:
+        out_root = Path(args.out_root)
+    elif args.auto:
+        out_root = default_out_root(data_drive)
+    else:
+        default_out = default_out_root(data_drive)
+        print(f"\n[输出] 默认输出根目录: {default_out}")
+        raw = input("回车用默认，或输入自定义路径: ").strip()
+        out_root = Path(raw) if raw else default_out
+    # 检查输出根目录所在盘是否存在，避免走到后面 mkdir 才炸
+    if os.name == "nt":
+        anchor = Path(out_root).anchor  # 'D:\\' 之类
+        if anchor and not Path(anchor).is_dir():
+            print(f"[错误] 输出目录所在盘不存在: {anchor}", file=sys.stderr)
+            return 2
 
     # --- 建 job_id + 目录 ---
     job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
