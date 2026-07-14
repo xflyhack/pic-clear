@@ -4,18 +4,17 @@ setlocal EnableExtensions EnableDelayedExpansion
 title summary_stats - pic-clear
 
 REM ============================================================
-REM  summary_stats.bat   pic-clear 每日 CSV 汇总
+REM  summary_stats.bat   pic-clear CSV 汇总
 REM
 REM  流程：
 REM    Step 0  选盘符
 REM    Step 1  在盘上浏览/钻取，最终选定 stats root
-REM            stats root 期望结构： <root>\<YYYYMMDD>\machine_id_*.csv
-REM    Step 2  选日期(今天/指定 YYYYMMDD/全部)
-REM    Step 3  选粒度(全部/单目录精确/单目录及子孙)
-REM    Step 4  屏幕汇总 + 询问是否导出 CSV
+REM            会递归找 root 下所有 machine_id_*.csv 参与汇总
+REM    Step 2  选粒度(全部 / 单目录精确 / 单目录及子孙)
+REM    Step 3  屏幕汇总 + 询问是否导出 CSV
 REM
 REM  依赖：
-REM    powershell.exe(自带)
+REM    powershell.exe(Windows 自带)
 REM    同目录下 summary_stats_helper.ps1
 REM ============================================================
 
@@ -23,7 +22,7 @@ set "PS1_HELPER=%~dp0summary_stats_helper.ps1"
 if not exist "%PS1_HELPER%" goto :ERR_NO_HELPER
 
 echo ============================================================
-echo   pic-clear 每日统计汇总
+echo   pic-clear 统计汇总
 echo ============================================================
 echo.
 
@@ -65,12 +64,11 @@ for /f "usebackq delims=" %%L in ("%DRIVE_LIST_FILE%") do (
 del /q "%DRIVE_LIST_FILE%" 2>nul
 
 if not defined CUR_DIR (
-    echo   [错误] 无效编号：!DRIVE_CHOICE!
+    echo   [错误] 无效编号: !DRIVE_CHOICE!
     echo.
     goto :MENU_DRIVE
 )
 
-REM 去掉末尾反斜杠，方便后面拼接
 if "!CUR_DIR:~-1!"=="\" set "CUR_DIR=!CUR_DIR:~0,-1!"
 echo.
 echo [已选盘] !CUR_DIR!\
@@ -100,10 +98,10 @@ if "!SUB_IDX!"=="0" (
 
 echo.
 echo   [数字]  钻取到对应编号的子目录
-echo   [0]  就用当前目录作为 stats root
-echo   [U]  返回上一级
-echo   [D]  换盘符
-echo   [Q]  退出
+echo   [0]     就用当前目录作为 stats root
+echo   [U]     返回上一级
+echo   [D]     换盘符
+echo   [Q]     退出
 echo.
 
 set "BROWSE_CHOICE="
@@ -128,7 +126,6 @@ if "!BROWSE_CHOICE!"=="0" (
     goto :AFTER_ROOT
 )
 
-REM 数字：钻到对应子目录
 set "SUB_NAME="
 set "N=0"
 for /f "usebackq delims=" %%L in ("%SUB_LIST_FILE%") do (
@@ -138,7 +135,7 @@ for /f "usebackq delims=" %%L in ("%SUB_LIST_FILE%") do (
 del /q "%SUB_LIST_FILE%" 2>nul
 
 if not defined SUB_NAME (
-    echo   [错误] 无效编号：!BROWSE_CHOICE!
+    echo   [错误] 无效编号: !BROWSE_CHOICE!
     echo.
     goto :BROWSE_LOOP
 )
@@ -148,14 +145,10 @@ echo.
 goto :BROWSE_LOOP
 
 :BROWSE_UP
-REM 返回上一级
 for %%P in ("!CUR_DIR!") do set "PARENT=%%~dpP"
-REM %~dp 会给出带末尾反斜杠的父路径，去掉尾斜杠
 if "!PARENT:~-1!"=="\" set "PARENT=!PARENT:~0,-1!"
-REM 已经在盘根就退回选盘符
 if not defined PARENT goto :MENU_DRIVE
 if "!PARENT!"=="!CUR_DIR!" goto :MENU_DRIVE
-REM 如果 PARENT 只剩 X: 这种(长度 <= 2)，也允许
 set "CUR_DIR=!PARENT!"
 echo.
 goto :BROWSE_LOOP
@@ -166,65 +159,11 @@ echo [已选 stats root] !STATS_ROOT!
 echo.
 
 REM ============================================================
-REM  Step 2  选日期
-REM ============================================================
-:MENU_DATE
-echo [第二步] 统计日期范围
-echo   [1] 今天  (默认)
-echo   [2] 指定某天  (输入 YYYYMMDD)
-echo   [3] 全部日期  (所有历史)
-echo.
-set "DATE_CHOICE="
-set /p DATE_CHOICE="请选择 [1/2/3](默认 1): "
-if not defined DATE_CHOICE set "DATE_CHOICE=1"
-
-if "!DATE_CHOICE!"=="1" goto :DATE_TODAY
-if "!DATE_CHOICE!"=="2" goto :DATE_INPUT
-if "!DATE_CHOICE!"=="3" goto :DATE_ALL
-
-echo   [错误] 无效选项：!DATE_CHOICE!
-echo.
-goto :MENU_DATE
-
-:DATE_TODAY
-for /f %%d in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"') do set "DATE_VALUE=%%d"
-set "DATE_MODE=one"
-goto :AFTER_DATE
-
-:DATE_INPUT
-set "DATE_VALUE="
-set /p DATE_VALUE="请输入 YYYYMMDD (例 20260714): "
-set "DATE_MODE=one"
-goto :AFTER_DATE
-
-:DATE_ALL
-set "DATE_MODE=all"
-goto :AFTER_DATE
-
-:AFTER_DATE
-if not "!DATE_MODE!"=="one" goto :SHOW_DATE
-echo !DATE_VALUE!| findstr /R /C:"^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$" >nul
-if errorlevel 1 (
-    echo   [错误] 日期格式非法：!DATE_VALUE!，必须是 8 位数字 YYYYMMDD
-    echo.
-    goto :MENU_DATE
-)
-
-:SHOW_DATE
-echo.
-if "!DATE_MODE!"=="one" (
-    echo [日期] 单日汇总: !DATE_VALUE!
-) else (
-    echo [日期] 全部历史
-)
-
-REM ============================================================
-REM  Step 3  选粒度
+REM  Step 2  选粒度
 REM ============================================================
 :MENU_GRAN
-echo.
-echo [第三步] 统计粒度
-echo   [1] 全部  (所有机器所有目录)  (默认)
+echo [第二步] 统计粒度
+echo   [1] 全部  (递归 stats root 下所有 csv)  (默认)
 echo   [2] 单个目录  (精确匹配 abs_path)
 echo   [3] 目录及子孙  (前缀匹配 abs_path\...)
 echo.
@@ -239,7 +178,7 @@ if "!GRAN_CHOICE!"=="1" goto :GRAN_ALL
 if "!GRAN_CHOICE!"=="2" goto :GRAN_EXACT
 if "!GRAN_CHOICE!"=="3" goto :GRAN_PREFIX
 
-echo   [错误] 无效选项：!GRAN_CHOICE!
+echo   [错误] 无效选项: !GRAN_CHOICE!
 echo.
 goto :MENU_GRAN
 
@@ -286,7 +225,7 @@ echo ============================================================
 echo   汇总中，请稍候(PowerShell 处理中)...
 echo ============================================================
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1_HELPER%" -StatsRoot "!STATS_ROOT!" -DateMode "!DATE_MODE!" -DateValue "!DATE_VALUE!" -PathMode "!PATH_MODE!" -PathFilter "!PATH_FILTER!" -ExportCsv "0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1_HELPER%" -StatsRoot "!STATS_ROOT!" -PathMode "!PATH_MODE!" -PathFilter "!PATH_FILTER!" -ExportCsv "0"
 
 if errorlevel 1 (
     echo.
@@ -297,10 +236,10 @@ if errorlevel 1 (
 
 echo.
 set "EXPORT_CHOICE="
-set /p EXPORT_CHOICE="是否把上面的汇总导出成 CSV? [Y/N](默认 N): "
+set /p EXPORT_CHOICE="是否把汇总导出成 CSV? [Y/N](默认 N): "
 if /I "!EXPORT_CHOICE!"=="Y" (
     echo.
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1_HELPER%" -StatsRoot "!STATS_ROOT!" -DateMode "!DATE_MODE!" -DateValue "!DATE_VALUE!" -PathMode "!PATH_MODE!" -PathFilter "!PATH_FILTER!" -ExportCsv "1"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1_HELPER%" -StatsRoot "!STATS_ROOT!" -PathMode "!PATH_MODE!" -PathFilter "!PATH_FILTER!" -ExportCsv "1"
 )
 
 echo.
