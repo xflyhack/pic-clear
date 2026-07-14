@@ -38,14 +38,15 @@ if not exist "%REPORT%" (
 
 REM ---- 统计输出路径 ----
 set "STATS_ROOT=Z:\data_source"
-for /f "tokens=1-3 delims=/- " %%a in ("%DATE%") do (
-    set "YY=%%a"
-    set "MM=%%b"
-    set "DD=%%c"
+REM 关键：%DATE% 在中文 Windows 上可能包含"周一/星期日"这样的前缀，
+REM tokens 拆分会把星期名当成 YYYY，最终生成"周一0714"这种错目录。
+REM 用 PowerShell 拿日期，绕开 %DATE% 陷阱，输出永远是 8 位 yyyyMMdd。
+for /f %%d in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"') do set "TODAY=%%d"
+if not defined TODAY (
+    echo [append_stats] ERROR: 无法获取当前日期（PowerShell 可用吗？）
+    endlocal ^& exit /b 3
 )
-REM DATE 在中文 Win 输出可能是 "2026/07/12 星期日"，也可能是 "2026-07-12"
-REM 上面 delims 已经把 / - 空格 都当分隔符
-set "STATS_DIR=%STATS_ROOT%\%YY%%MM%%DD%"
+set "STATS_DIR=%STATS_ROOT%\%TODAY%"
 set "STATS_CSV=%STATS_DIR%\machine_id_%COMPUTERNAME%.csv"
 
 if not exist "%STATS_ROOT%\" mkdir "%STATS_ROOT%" 2>nul
@@ -82,9 +83,10 @@ REM 文件夹名 = TARGET_DIR 的最后一段
 for %%N in ("%TARGET_DIR%") do set "FOLDER_NAME=%%~nxN"
 
 REM 时间戳 (YYYY-MM-DD HH:MM:SS)
-set "T=%TIME:~0,8%"
-set "T=%T: =0%"
-set "TS=%YY%-%MM%-%DD% %T%"
+REM 上面把 %DATE% 的拆分提取删了，这里改用 PowerShell 拿完整时间戳。
+REM Get-Date -Format s 输出 ISO8601 ：2026-07-14T10:23:45，无空格最亲 for /f
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format s"') do set "TS_RAW=%%t"
+set "TS=!TS_RAW:T= !"
 
 REM ---- 追加一行 ----
 REM abs_path 里可能有逗号或空格，用双引号包起来
