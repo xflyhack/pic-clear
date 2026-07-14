@@ -1,0 +1,71 @@
+name: Create Release Notes
+
+# 打 tag（v*）时创建/更新 GitHub Release 的说明和标题。
+# 6 个 exe 会由各自的 build-*-exe workflow 在 tag 触发时附加到这个 release 上。
+#
+# 用法：
+#   git tag v0.1.2
+#   git push origin v0.1.2
+# 完成后所有编译 workflow 都会跑，产物挂到 https://github.com/<user>/<repo>/releases/tag/v0.1.2
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（例如 v0.1.2）'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update GitHub Release (draft=false, prerelease=false)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.value }}
+          name: "pic-clear ${{ steps.tag.outputs.value }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## pic-clear ${{ steps.tag.outputs.value }}
+
+            **一次下载全部 6 个 Windows exe。** 每个 exe 独立打包、独立运行。
+
+            | exe | 作用 | 大小 |
+            |---|---|---|
+            | `extract_frames.exe` | H265/MP4 抽帧（1 秒 1 帧，内嵌 ffmpeg） | ~95 MB |
+            | `dedupe_pic.exe` | 图片近似去重 + YOLO 人/车保护 + 前后帧车运动保护 | ~57 MB |
+            | `pipeline.exe` | 编排层：一键跑抽帧 + 去重，后台 detach | ~10-20 MB |
+            | `pipe_gui.exe` | pipeline 图形前端：Tab 布局 / 主窗实时进度 / 日志 tail / 托盘 / 快捷键 | ~15-25 MB |
+            | `summary_stats_gui.exe` | 每机每天统计汇总，磁盘选择 + 目录钻取 + 导 CSV | ~15-25 MB |
+            | `gen_license_gui.exe` | 图形版 license 签发工具（内置私钥），⚠ 作者用 | ~15-25 MB |
+
+            ---
+
+            ### 使用说明
+
+            - 首次使用需要 license：先跑一次 `dedupe_pic.exe --fingerprint` 拿指纹，
+              找作者用 `gen_license_gui.exe` 生成 `license.lic`，放到 exe 同目录
+            - 6 个 exe 共用同一份 `license.lic`
+            - 详细说明看仓库 [`README.md`](../../blob/main/README.md) 和 [`docs/`](../../tree/main/docs)
+
+            ### 自动生成的更新记录
+
+            （下面这段由 GitHub 自动生成，列出这次 tag 相比上一个 tag 的所有 commit）

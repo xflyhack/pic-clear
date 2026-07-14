@@ -3,7 +3,12 @@ name: Build Pipe GUI EXE
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   workflow_dispatch:
+
+
+permissions:
+  contents: write   # softprops/action-gh-release 需要写权限来创建/更新 Release
 
 jobs:
   build:
@@ -85,3 +90,10 @@ jobs:
           name: pipe-gui-windows-exe
           path: build_pipe_gui/dist/pipe_gui.exe
           if-no-files-found: error
+
+      - name: Attach exe to GitHub Release (only on tag push)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build_pipe_gui/dist/pipe_gui.exe
+          fail_on_unmatched_files: true

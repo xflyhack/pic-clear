@@ -6,6 +6,26 @@
 - 含**车 / 电车 / 公交 / 卡车 / 自行车 / 摩托车**的图片 → 只在相邻帧车辆位置发生变化时保护，否则参与去重
 - 可选开启**场景保护**（`--scene-protect`）：把明显的**纯色 / 渐变屏**（传感器遮挡等异常帧）识别出来强制保留
 
+## 下载 exe（推荐）
+
+**一键拿全套 6 个 exe** —— 打开这一个页面就行：
+
+👉 **[https://github.com/xflyhack/pic-clear/releases/latest](https://github.com/xflyhack/pic-clear/releases/latest)**
+
+页面右侧 `Assets` 区域会列出全部 6 个 exe（`extract_frames.exe` / `dedupe_pic.exe` / `pipeline.exe` / `pipe_gui.exe` / `summary_stats_gui.exe` / `gen_license_gui.exe`），点每个 exe 后面的 ⬇ 图标就能下载。
+
+私有仓库需要登录 GitHub 账号才能看到 Assets 区域。
+
+> **发版流程**（作者用）：本地打 tag 并推送：
+> ```bash
+> git tag v0.1.3
+> git push origin v0.1.3
+> ```
+> 6 个编译 workflow 会并行跑，各自把产物挂到同一个 Release page。约 15-30 分钟出全套。
+
+如果 Release 页面还没有你想要的版本、又急着要产物，也可以走**逐个 workflow 下载**的老路：
+仓库 `Actions` 页面 → 选对应 workflow（如 `Build Pipe GUI EXE`）→ 最新一次成功的 run → 底部 `Artifacts` 下载 zip。
+
 ## 工具集
 
 本仓库产出 **6 个 Windows exe**，分工不同，各自独立打包：
