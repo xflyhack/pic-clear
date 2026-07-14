@@ -179,15 +179,27 @@ def extract_one(
     fps: float,
     quality: int,
     skip_existing: bool,
-) -> tuple[bool, int, str]:
+) -> tuple[str, int, str]:
     """
-    对一个视频执行抽帧。返回 (是否成功, 生成的帧数量, 错误/说明信息)。
+    对一个视频执行抽帧。返回 (stage, 帧数, 说明)。stage 有三种：
+      - "ok"     抽出至少一帧，写 marker 内容 'done'
+      - "empty"  视频有效但抽不出帧（太短 / 没关键帧 / 头坏但 ffmpeg 判无致命错误）
+                 或 ffmpeg 报可预期的"无帧可解码"错误。也写 marker（内容 'empty'），
+                 下次轮询到会直接跳过，不再浪费时间重试
+      - "failed" 真正的失败（ffmpeg 不存在 / 崩溃 / IO 错误等），不写 marker，下次会重试
     """
     out_dir = task.out_dir
     marker = out_dir / "_done.marker"
     if skip_existing and marker.is_file():
         existing = list(out_dir.glob("frame_*.jpg"))
-        return True, len(existing), f"跳过（已完成，marker 存在，{len(existing)} 帧）"
+        # 老 marker 里可能写着 'done' 或 'empty'，都当已处理，直接跳过
+        try:
+            content = marker.read_text(encoding="utf-8", errors="replace").strip().lower()
+        except Exception:
+            content = "done"
+        if content == "empty" or len(existing) == 0:
+            return "empty", 0, "跳过（已完成，历史标记为 empty / 目录中无帧）"
+        return "ok", len(existing), f"跳过（已完成，marker 存在，{len(existing)} 帧）"
     if skip_existing and out_dir.is_dir():
         # 存在半成品目录（有 frame_ 文件但没 marker）→ 判为上次未完成，清空重抽
         stale = list(out_dir.glob("frame_*.jpg"))
@@ -230,23 +242,63 @@ def extract_one(
             creationflags=(0x08000000 if sys.platform == "win32" else 0),
         )
     except FileNotFoundError:
-        return False, 0, f"ffmpeg 不存在: {ffmpeg}"
+        return "failed", 0, f"ffmpeg 不存在: {ffmpeg}"
     except Exception as e:
-        return False, 0, f"ffmpeg 调用异常: {e}"
+        return "failed", 0, f"ffmpeg 调用异常: {e}"
 
+    stderr_text = proc.stderr.decode("utf-8", errors="replace")
     if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        err = stderr_text.strip()
         # 保留末尾一段，避免刷屏
         if len(err) > 400:
             err = "..." + err[-400:]
-        return False, 0, f"ffmpeg 返回 {proc.returncode}: {err}"
+        # 判断是不是可预期的"没帧可解码"错误——这类视频本身就没内容，
+        # 应当当作 empty 记 marker 永久跳过，而不是当失败让下次再试
+        if _is_no_frame_error(stderr_text):
+            # 空目录也写 marker，防止 pipeline 下次轮询到又跑一遍
+            try:
+                marker.write_text("empty", encoding="utf-8")
+            except Exception:
+                pass
+            return "empty", 0, (
+                f"视频无可解码帧（ffmpeg rc={proc.returncode}），已记 empty 标记"
+                f"，说明：{err[:200]}"
+            )
+        return "failed", 0, f"ffmpeg 返回 {proc.returncode}: {err}"
 
     frames = sorted(out_dir.glob("frame_*.jpg"))
+    if not frames:
+        # rc=0 但真的一帧没出来（比如极短视频 / fps 太低）——也算 empty，写 marker
+        try:
+            marker.write_text("empty", encoding="utf-8")
+        except Exception:
+            pass
+        return "empty", 0, "ffmpeg 成功退出但未产出任何帧（视频可能极短），已记 empty 标记"
     try:
         marker.write_text("done", encoding="utf-8")
     except Exception:
         pass
-    return True, len(frames), "OK"
+    return "ok", len(frames), "OK"
+
+
+_NO_FRAME_PATTERNS = (
+    "no frame decoded",
+    "no frames decoded",
+    "does not contain any stream",
+    "no video stream",
+    "invalid data found when processing input",
+    "output file is empty",
+    "output file #0 does not contain any stream",
+    "at least one output file must be specified",
+)
+
+
+def _is_no_frame_error(stderr_text: str) -> bool:
+    """判断 ffmpeg stderr 是不是可预期的'视频没帧可抽'类错误。"""
+    if not stderr_text:
+        return False
+    low = stderr_text.lower()
+    return any(p in low for p in _NO_FRAME_PATTERNS)
 
 
 # ------------------------------ CLI + main ---------------------------------
@@ -404,9 +456,11 @@ def main() -> int:
         return 0
 
     ok_cnt = 0
+    empty_cnt = 0
     fail_cnt = 0
     total_frames = 0
     fails: list[tuple[VideoTask, str]] = []
+    empties: list[tuple[VideoTask, str]] = []
     t_start = time.time()
 
     for i, task in enumerate(tasks, 1):
@@ -421,14 +475,18 @@ def main() -> int:
         print(f"    → {task.out_dir}", flush=True)
 
         print("    ...抽帧中，请稍候（ffmpeg 静默运行，视频越长等得越久）", flush=True)
-        ok, n, msg = extract_one(
+        stage, n, msg = extract_one(
             task, ffmpeg, args.fps, args.quality,
             skip_existing=not args.no_skip_existing,
         )
-        if ok:
+        if stage == "ok":
             ok_cnt += 1
             total_frames += n
             print(f"    ✓ {msg}，帧数 {n}", flush=True)
+        elif stage == "empty":
+            empty_cnt += 1
+            empties.append((task, msg))
+            print(f"    ⊘ 跳过（无帧）: {msg}", flush=True)
         else:
             fail_cnt += 1
             fails.append((task, msg))
@@ -437,9 +495,16 @@ def main() -> int:
     print()
     print("=" * 60)
     print(
-        f"[完成] 成功 {ok_cnt} / 失败 {fail_cnt}，"
+        f"[完成] 成功 {ok_cnt} / 空视频跳过 {empty_cnt} / 失败 {fail_cnt}，"
         f"共生成 {total_frames} 帧，总耗时 {_fmt_time(time.time()-t_start)}"
     )
+    if empties:
+        print(f"\n[空视频清单]（已记 empty 标记，下次运行会自动跳过）")
+        for task, msg in empties[:30]:
+            print(f"  - {task.src_path}")
+            print(f"    {msg}")
+        if len(empties) > 30:
+            print(f"  ... 另外 {len(empties)-30} 条省略")
     if fails:
         print("\n[失败列表]")
         for task, msg in fails[:30]:
@@ -447,6 +512,7 @@ def main() -> int:
             print(f"    {msg}")
         if len(fails) > 30:
             print(f"  ... 另外 {len(fails)-30} 条省略")
+    # 只有真失败才非 0；empty 不影响退出码
     return 0 if fail_cnt == 0 else 1
 
 
