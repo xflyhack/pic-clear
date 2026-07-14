@@ -45,6 +45,41 @@ pipeline.exe submit --auto ^
 
 提交后 pipeline 会 **立刻返回**（后台 detach 运行），关掉 cmd 窗口任务也在跑。
 
+### submit 全部参数
+
+```
+pipeline.exe submit [选项]
+
+源 / 输出：
+  --auto                     无交互，必须配合 -s/--src
+  -s, --src PATH             源目录（--auto 必填）
+  -n, --subs LIST            子目录选择：'1,2' / '1-3' / 'all' / 具体名字
+  --data-drive Z:            数据盘（默认 Z:）
+  --data-prefix sjbz_        源目录前缀（默认 sjbz_）
+  --out-root PATH            输出根（默认 <数据盘>\切帧结果）
+
+抽帧：
+  --fps FLOAT                抽帧频率，默认 1.0（1 秒一帧）
+  --ext .h265,.mp4           视频扩展名，逗号分隔（默认同时抓 h265 和 mp4）
+
+去重：
+  -t, --threshold N          相似阈值（Hamming 距离），默认 3
+  -m, --motion-threshold F   车运动阈值，默认 0.12（越大越严格越少保护）
+  -y, --apply                真删（默认只 dry-run 出报告）
+  -H, --hard-delete          真删时直接永久删，不落 _trash
+  -S, --scene-protect        场景保护：纯色屏/渐变屏这种异常帧强制保留（推荐开）
+
+安全阀 / 编排：
+  -L, --daily-remain-limit N 当日累计剩余到 N 张 pipeline 自动停止（0=禁用，默认 80000）
+  --watch-interval SEC       watcher 扫描 _done.marker 的间隔秒（默认 3.0）
+```
+
+**举例**：跟 `run_all.bat` 完全对齐的一条命令 —— 场景保护开、真删除、日限 8w、扫描 3 秒：
+```
+pipeline.exe submit --auto -s Z:\sjbz_20260708 -n all ^
+    -t 3 -m 0.12 -y -H -S -L 80000 --watch-interval 3
+```
+
 ### 查看进度
 
 ```
