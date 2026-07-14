@@ -32,6 +32,15 @@
 - 只读，**不做任何操作**；`Ctrl+C` 退出
 - 若 `OUT_ROOT` 不是默认 `Z:\切帧结果`，请打开 bat 改顶部的 `set "OUT_ROOT=..."`
 
+## 想隐藏 marker + csv 文件（不污染业务目录）
+
+`_done.marker` / `_dedup_done.marker` / `_dedup_running.marker` / `_dedup_failed.marker` / `dedupe_report.csv` 这几个文件默认散落在每个视频输出目录里。**代码逻辑对隐藏文件透明**，把它们设为隐藏后功能不受影响，只是资源管理器默认不显示。
+
+- **`hide_markers.bat`**：把 bat 拷到你要处理的根目录里（比如 `Z:\切帧结果\video\1`），双击运行 → 递归隐藏所有上述文件
+- **`unhide_markers.bat`**：同样双击运行 → 反向操作，把隐藏恢复回来（想排查问题看内容时用）
+
+约定：**bat 所在目录 = 处理根目录**，不用手工输入路径。
+
 ## 使用流程
 
 双击任一 bat：

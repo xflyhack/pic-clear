@@ -1,19 +1,38 @@
 # pic-clear
 
-## 工具集（两个独立 exe）
+在**离线、无 Python 环境**的 Windows（例如堡垒机里的跳板机）里，扫描目录、找出**接近相同**的图片并删除。默认会用 YOLOv8n 识别图片内容，含**人 / 车 / 电车 / 公交 / 卡车 / 自行车 / 摩托车**的图片会智能保护（相邻帧车运动才保护，否则可删）。
 
-本仓库产出**两个独立可执行程序**，可单独使用，也可串起来当 pipeline：
+## 工具集
 
-| exe | 作用 | 大概体积 |
+本仓库产出 **5 个 Windows exe**，分工不同，各自独立打包：
+
+### 业务 exe（4 个，都需要 `license.lic`）
+
+| exe | 作用 | 体积 |
 |---|---|---|
-| **`extract_frames.exe`** | 递归扫描视频目录，把 `.h265` 视频按 1 帧/秒抽成 JPEG，输出镜像目录 | ~95 MB（含 ffmpeg）|
-| **`dedupe_pic.exe`** | 对图片目录做近似去重（dHash）+ YOLO 保护（人/车）+ 前后帧车运动保护 | ~200 MB（含 yolov8n）|
+| **`extract_frames.exe`** | 递归扫描视频目录，把 `.h265` / `.mp4` 按 1 帧/秒抽成 JPEG，输出镜像目录 | ~95 MB（含 ffmpeg）|
+| **`dedupe_pic.exe`** | 对图片目录做近似去重（dHash）+ YOLO 保护（人/车）+ 前后帧车运动保护 | ~57 MB（含 yolov8n）|
 | **`pipeline.exe`** | 编排层：一键跑抽帧 + 去重，后台 detach，可查状态/停/看日志 | ~10-20 MB |
 | **`pipe_gui.exe`** | `pipeline.exe` 的图形前端，双击运行，托盘 + 快捷键，不习惯命令行的同事用 | ~15-25 MB |
 
-**典型 pipeline**：
+4 个业务 exe **共用同一份 `license.lic`**，同一台机器只需申请一次授权。
+
+### 签发工具（1 个，作者用）
+
+| exe | 作用 | 体积 |
+|---|---|---|
+| **`gen_license_gui.exe`** | 图形版 license 签发工具，双击运行，内置签发私钥。⚠ 仅限作者/内部使用，不要外发。 | ~15-25 MB |
+
+签发工具本身**不需要 license**。命令行版是 `gen_license.py`（`python gen_license.py <指纹>`）。
+
+### 辅助 bat 脚本
+
+`scripts_bat/` 目录下有一系列 bat，用于纯命令行流程、进程状态检测、marker 文件隐藏等。详见 [`scripts_bat/README.md`](scripts_bat/README.md)。
+
+## 典型 pipeline
+
 ```
-h265 视频目录 
+h265/mp4 视频目录 
     │  extract_frames.exe
     ▼
 镜像目录 + 抽好的 JPEG 帧
@@ -22,11 +41,17 @@ h265 视频目录
 去重后仅保留有价值的关键帧
 ```
 
-两个 exe 共用**同一份 `license.lic`**（同一台机器只需申请一次授权，两个 exe 都能用）。
+**推荐用 `pipeline.exe` 或 `pipe_gui.exe` 一键跑完整个流程**，不用一个个手动调。
 
----
+## 你想怎么用？
 
-在**离线、无 Python 环境**的 Windows（例如堡垒机里的跳板机）里，扫描目录、找出**接近相同**的图片并删除。**默认会用 YOLOv8n 识别图片内容，含"人 / 车 / 电车 / 公交 / 卡车 / 自行车 / 摩托车"的图片一律保留，绝不删除。**
+按角色选入口：
+
+- **不会命令行 → `pipe_gui.exe`**：双击打开 GUI，选盘 + 选源目录 + 选子目录 + 点『运行』，剩下的托盘里自动跑。详见 [`docs/pipe_gui_exe.md`](docs/pipe_gui_exe.md)。
+- **会命令行 → `pipeline.exe`**：CLI 提交任务，`pipeline.exe status/logs/stop` 查看和管理。详见 [`docs/pipeline_exe.md`](docs/pipeline_exe.md)。
+- **想极简（老派）→ `scripts_bat/*.bat`**：把 exe 放到 `C:\Windows\System32`，双击 bat 一键跑。详见 [`scripts_bat/README.md`](scripts_bat/README.md)。
+- **想单独抽帧 / 单独去重**：直接调 `extract_frames.exe` / `dedupe_pic.exe`，见下面的分节说明。
+- **作者要签发 license.lic**：命令行版 `python gen_license.py`（见"作者签发流程"章节），或图形版 `gen_license_gui.exe`（见 [`docs/gen_license_gui.md`](docs/gen_license_gui.md)）。
 
 ## 场景
 
