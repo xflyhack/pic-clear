@@ -118,6 +118,13 @@ dedupe_pic.exe --fingerprint
 
 **已签发指纹**在 `AGENTS.md` 里维护。
 
+**图形版签发工具（`gen_license_gui.exe`）**：不想敲命令行、想直接双击？CI 会自动构建 Windows 版：
+
+- artifact 名：`gen-license-gui-windows-exe`
+- 双击运行，表单里填指纹 / 发放对象 / 到期日 / 备注 / 输出路径，点『生成 license.lic』
+- **私钥内置**（用 CI 打包时把 `secrets/private.pem` 一起打进去），无需外部依赖
+- ⚠️ 此 exe 具备签发能力，**仅限内部使用，不要外发**（详见 `docs/gen_license_gui.md`）
+
 ---
 
 ### license 位置查找顺序

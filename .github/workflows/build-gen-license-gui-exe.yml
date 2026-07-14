@@ -1,0 +1,63 @@
+name: Build Gen License GUI EXE
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "gen_license_gui.py"
+      - "gen_license.py"
+      - "secrets/private.pem"
+      - ".github/workflows/build-gen-license-gui-exe.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography>=41.0
+          pip install pyinstaller
+
+      - name: Prepare build folder
+        run: |
+          mkdir build_gen_license_gui
+          copy gen_license_gui.py build_gen_license_gui\
+          mkdir build_gen_license_gui\secrets
+          copy secrets\private.pem build_gen_license_gui\secrets\
+        shell: cmd
+
+      - name: Build single-file exe (windowed，无控制台黑窗)
+        run: |
+          cd build_gen_license_gui
+          pyinstaller --onefile --windowed --name gen_license_gui ^
+            --add-data "secrets\private.pem;secrets" ^
+            --hidden-import cryptography ^
+            --hidden-import cryptography.hazmat.primitives.asymmetric.padding ^
+            --hidden-import cryptography.hazmat.primitives.hashes ^
+            --hidden-import cryptography.hazmat.primitives.serialization ^
+            --hidden-import tkinter ^
+            --hidden-import tkinter.ttk ^
+            --hidden-import tkinter.filedialog ^
+            --hidden-import tkinter.messagebox ^
+            gen_license_gui.py
+          cd ..
+        shell: cmd
+
+      - name: Show exe size
+        run: dir build_gen_license_gui\dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gen-license-gui-windows-exe
+          path: build_gen_license_gui/dist/gen_license_gui.exe
+          if-no-files-found: error
