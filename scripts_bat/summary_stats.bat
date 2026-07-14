@@ -6,29 +6,142 @@ title summary_stats - pic-clear
 
 REM ============================================================
 REM  summary_stats.bat
-REM  Aggregate Z:\data_source\<YYYYMMDD>\machine_id_*.csv
+REM  Aggregate <StatsRoot>\<YYYYMMDD>\machine_id_*.csv
 REM  Requires: powershell.exe + summary_stats_helper.ps1 (same dir)
 REM  Usage:
 REM    double-click summary_stats.bat        --  interactive menu
-REM    summary_stats.bat 20260714             --  fixed date, skip date menu
+REM    summary_stats.bat 20260714             --  fixed date
+REM    summary_stats.bat 20260714 D:\my_stats --  fixed date + fixed root
 REM ============================================================
 
-set "STATS_ROOT=Z:\data_source"
 set "PS1_HELPER=%~dp0summary_stats_helper.ps1"
 
 if not exist "%PS1_HELPER%" goto :ERR_NO_HELPER
-if not exist "%STATS_ROOT%\" goto :ERR_NO_STATS
 
+REM ---- arg 1 = date (YYYYMMDD), arg 2 = stats root ----
 set "DATE_MODE="
 set "DATE_VALUE="
+set "STATS_ROOT="
 if not "%~1"=="" (
     set "DATE_VALUE=%~1"
     set "DATE_MODE=one"
 )
+if not "%~2"=="" (
+    set "STATS_ROOT=%~2"
+)
 
 echo ============================================================
-echo   pic-clear tong ji hui zong / daily stats summary
+echo   pic-clear stats summary
 echo ============================================================
+echo.
+
+REM ============================================================
+REM  Step 0 : choose stats root
+REM ============================================================
+if defined STATS_ROOT goto :CHECK_STATS
+
+:MENU_ROOT
+echo [Step 0] choose stats root directory
+echo   scanning drives for \data_source ...
+echo.
+
+set "IDX=0"
+set "ROOT_LIST_FILE=%TEMP%\summary_stats_roots_%RANDOM%.txt"
+del /q "%ROOT_LIST_FILE%" 2>nul
+
+REM Enumerate FileSystem drives; for each check <drive>\data_source
+for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "Get-PSDrive -PSProvider FileSystem ^| ForEach-Object { $_.Root }"`) do (
+    if exist "%%~D" (
+        set "CAND=%%~Ddata_source"
+        if exist "!CAND!\" (
+            set /a IDX+=1
+            echo   [!IDX!] !CAND!    ^(has data_source^)
+            >>"%ROOT_LIST_FILE%" echo !CAND!
+        )
+    )
+)
+
+if "!IDX!"=="0" (
+    echo   ^(no drive has \data_source subfolder^)
+    echo.
+)
+
+echo   [M] input a custom path manually
+echo   [Q] quit
+echo.
+set "ROOT_CHOICE="
+if "!IDX!"=="0" goto :ROOT_ASK_NONE
+if "!IDX!"=="1" goto :ROOT_ASK_ONE
+goto :ROOT_ASK_MANY
+
+:ROOT_ASK_NONE
+set /p ROOT_CHOICE="choose [M/Q] default=M: "
+if not defined ROOT_CHOICE set "ROOT_CHOICE=M"
+goto :ROOT_HANDLE
+
+:ROOT_ASK_ONE
+set /p ROOT_CHOICE="choose [1/M/Q] default=1: "
+if not defined ROOT_CHOICE set "ROOT_CHOICE=1"
+goto :ROOT_HANDLE
+
+:ROOT_ASK_MANY
+set /p ROOT_CHOICE="choose [1-!IDX!/M/Q] default=1: "
+if not defined ROOT_CHOICE set "ROOT_CHOICE=1"
+goto :ROOT_HANDLE
+
+:ROOT_HANDLE
+
+if /I "!ROOT_CHOICE!"=="Q" (
+    del /q "%ROOT_LIST_FILE%" 2>nul
+    exit /b 0
+)
+if /I "!ROOT_CHOICE!"=="M" goto :ROOT_MANUAL
+
+REM numeric: read that line from list file
+set "N=0"
+for /f "usebackq delims=" %%L in ("%ROOT_LIST_FILE%") do (
+    set /a N+=1
+    if "!N!"=="!ROOT_CHOICE!" set "STATS_ROOT=%%L"
+)
+
+if not defined STATS_ROOT (
+    echo [ERROR] invalid choice: !ROOT_CHOICE!
+    echo.
+    goto :MENU_ROOT
+)
+
+del /q "%ROOT_LIST_FILE%" 2>nul
+goto :CHECK_STATS
+
+:ROOT_MANUAL
+del /q "%ROOT_LIST_FILE%" 2>nul
+set "STATS_ROOT="
+set /p STATS_ROOT="input stats root full path (e.g. Z:\data_source): "
+if not defined STATS_ROOT (
+    echo [ERROR] no path given
+    echo.
+    goto :MENU_ROOT
+)
+REM strip surrounding quotes if drag-drop
+set "STATS_ROOT=!STATS_ROOT:"=!"
+REM strip trailing backslash
+if "!STATS_ROOT:~-1!"=="\" set "STATS_ROOT=!STATS_ROOT:~0,-1!"
+
+:CHECK_STATS
+if not exist "!STATS_ROOT!\" (
+    echo [ERROR] stats root not exist: !STATS_ROOT!
+    echo.
+    if defined DATE_MODE (
+        echo         you passed it via command line, please double-check.
+        pause
+        exit /b 2
+    )
+    set "STATS_ROOT="
+    goto :MENU_ROOT
+)
+
+echo.
+echo [root] !STATS_ROOT!
 echo.
 
 if defined DATE_MODE goto :AFTER_DATE
@@ -148,7 +261,7 @@ echo ============================================================
 echo   working, please wait  (PowerShell)...
 echo ============================================================
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1_HELPER%" -StatsRoot "%STATS_ROOT%" -DateMode "!DATE_MODE!" -DateValue "!DATE_VALUE!" -PathMode "!PATH_MODE!" -PathFilter "!PATH_FILTER!" -ExportCsv "0"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1_HELPER%" -StatsRoot "!STATS_ROOT!" -DateMode "!DATE_MODE!" -DateValue "!DATE_VALUE!" -PathMode "!PATH_MODE!" -PathFilter "!PATH_FILTER!" -ExportCsv "0"
 
 if errorlevel 1 (
     echo.
@@ -162,7 +275,7 @@ set "EXPORT_CHOICE="
 set /p EXPORT_CHOICE="export the summary above to CSV? [Y/N] default=N: "
 if /I "!EXPORT_CHOICE!"=="Y" (
     echo.
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1_HELPER%" -StatsRoot "%STATS_ROOT%" -DateMode "!DATE_MODE!" -DateValue "!DATE_VALUE!" -PathMode "!PATH_MODE!" -PathFilter "!PATH_FILTER!" -ExportCsv "1"
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1_HELPER%" -StatsRoot "!STATS_ROOT!" -DateMode "!DATE_MODE!" -DateValue "!DATE_VALUE!" -PathMode "!PATH_MODE!" -PathFilter "!PATH_FILTER!" -ExportCsv "1"
 )
 
 echo.
@@ -175,11 +288,5 @@ exit /b 0
 :ERR_NO_HELPER
 echo [ERROR] helper not found: %PS1_HELPER%
 echo         Please place summary_stats_helper.ps1 next to summary_stats.bat
-pause
-exit /b 2
-
-:ERR_NO_STATS
-echo [ERROR] stats root not found: %STATS_ROOT%
-echo         Z: not mapped? Or no dedupe_watcher/append_stats has ever run?
 pause
 exit /b 2
