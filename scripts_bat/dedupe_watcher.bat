@@ -30,7 +30,7 @@ set "MOTION="
 set "RUN_ONCE=0"
 REM 当日累计剩余图片数超过该值就停止 watcher（不影响正在处理的目录）
 REM 改为 0 或不设置来禁用
-set "DAILY_REMAIN_LIMIT=80000"
+set "DAILY_REMAIN_LIMIT=8000000000"
 set "DAILY_LIMIT_HIT=0"
 
 :PARSE_ARGS
