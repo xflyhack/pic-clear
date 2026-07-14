@@ -322,6 +322,91 @@ def mark_latest_job_stopped(out_root: Path) -> str | None:
 # 主 GUI
 # =========================================================================
 
+
+# --- Tooltip 浮层 -----------------------------------------------------------
+
+class _Tooltip:
+    """轻量 tooltip：鼠标悬停 delay 毫秒后弹一个黄底 Toplevel，移开立即隐藏。
+    不依赖三方库，Windows tkinter 原生够用。"""
+
+    def __init__(self, widget: "tk.Widget", text: str, delay_ms: int = 350):
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self._after_id: str | None = None
+        self._tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._on_enter, add="+")
+        widget.bind("<Leave>", self._on_leave, add="+")
+        widget.bind("<ButtonPress>", self._on_leave, add="+")
+
+    def _on_enter(self, _event=None):
+        self._cancel_pending()
+        try:
+            self._after_id = self.widget.after(self.delay_ms, self._show)
+        except Exception:
+            self._after_id = None
+
+    def _on_leave(self, _event=None):
+        self._cancel_pending()
+        self._hide()
+
+    def _cancel_pending(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        if self._tip is not None or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 16
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        except Exception:
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)  # 无边框
+        try:
+            tip.wm_attributes("-topmost", True)
+        except Exception:
+            pass
+        tip.wm_geometry(f"+{x}+{y}")
+        # 黄底黑字，跟系统 tooltip 观感一致
+        lbl = tk.Label(
+            tip, text=self.text, justify="left",
+            background="#ffffe0", foreground="#111",
+            relief="solid", borderwidth=1,
+            font=("Microsoft YaHei", 9),
+            wraplength=360, padx=6, pady=3,
+        )
+        lbl.pack()
+        self._tip = tip
+
+    def _hide(self):
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
+
+
+def _add_tip(widget: "tk.Widget", text: str) -> None:
+    """给任意 widget 挂一个 tooltip（重复调用会重复挂，谨慎）。"""
+    _Tooltip(widget, text)
+
+
+def _tip_icon(parent: "tk.Widget", text: str) -> "tk.Label":
+    """返回一个可以 pack/grid 的 ⓘ 图标 Label，鼠标悬停时展示 text。
+    调用方负责把返回值 pack / grid 到合适位置。"""
+    lbl = tk.Label(parent, text="ⓘ", foreground="#0066cc",
+                   font=("Segoe UI", 10, "bold"), cursor="question_arrow")
+    _Tooltip(lbl, text)
+    return lbl
+
+
 class PipeGUI:
     APP_TITLE = "pic-clear 图形界面"
     REFRESH_MS = 5000
@@ -329,7 +414,8 @@ class PipeGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(self.APP_TITLE)
-        self.root.geometry("720x680")
+        self.root.geometry("820x720")
+        self.root.minsize(760, 560)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # 状态
@@ -386,15 +472,57 @@ class PipeGUI:
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
+        # ------------------- Notebook（顶层 Tab） -------------------
+        self._nb = ttk.Notebook(self.root)
+        self._nb.pack(fill="both", expand=True, padx=8, pady=(6, 2))
+
+        tab_home = ttk.Frame(self._nb)
+        tab_dedup = ttk.Frame(self._nb)
+        tab_extract = ttk.Frame(self._nb)
+        tab_bg = ttk.Frame(self._nb)
+        self._nb.add(tab_home, text="  主页  ")
+        self._nb.add(tab_dedup, text="  去重参数  ")
+        self._nb.add(tab_extract, text="  抽帧 & 编排  ")
+        self._nb.add(tab_bg, text="  后台 & 快捷键  ")
+
+        # ============= Tab 1：主页 =============
+        self._build_tab_home(tab_home, pad)
+
+        # ============= Tab 2：去重参数 =============
+        self._build_tab_dedup(tab_dedup, pad)
+
+        # ============= Tab 3：抽帧 & 编排 =============
+        self._build_tab_extract(tab_extract, pad)
+
+        # ============= Tab 4：后台 & 快捷键 =============
+        self._build_tab_bg(tab_bg, pad)
+
+        # 底部按钮（挂在 root 上，永远常驻，跟 Tab 无关）
+        f_btn = ttk.Frame(self.root); f_btn.pack(fill="x", **pad)
+        # 主动作按钮：空闲=运行，有任务=停止（run_or_stop 会根据最新 job 状态动态切）
+        self._action_btn = ttk.Button(f_btn, text="▶ 运行", command=self._on_action_click, width=16)
+        self._action_btn.pack(side="left", padx=4)
+        self._action_state = "run"  # "run" | "stop"
+        ttk.Button(f_btn, text="一键杀死所有", command=self._on_kill_all, width=14).pack(side="left", padx=4)
+        ttk.Button(f_btn, text="查看状态", command=self.show_status_window, width=14).pack(side="left", padx=4)
+        ttk.Button(f_btn, text="查看日志", command=self.show_log_window, width=14).pack(side="left", padx=4)
+        ttk.Button(f_btn, text="最小化到托盘", command=self.hide_to_tray, width=14).pack(side="left", padx=4)
+        ttk.Button(f_btn, text="退出", command=self.quit_all, width=10).pack(side="right", padx=4)
+        ttk.Button(f_btn, text="重置配置", command=self._on_reset_config, width=10).pack(side="right", padx=4)
+
+    # ------------------- 各 Tab 的内容 -------------------
+
+    def _build_tab_home(self, tab: "ttk.Frame", pad: dict):
+        """主页：环境检测 + 数据配置 + 子目录（含汇总条+进度列）"""
         # 环境检测
-        f_env = ttk.LabelFrame(self.root, text="▶ 环境检测")
+        f_env = ttk.LabelFrame(tab, text="▶ 环境检测")
         f_env.pack(fill="x", **pad)
         self._env_text = tk.Text(f_env, height=4, width=90, font=("Consolas", 9))
         self._env_text.pack(fill="x", padx=6, pady=4)
         self._env_text.config(state="disabled")
 
         # 数据配置
-        f_data = ttk.LabelFrame(self.root, text="▶ 数据配置")
+        f_data = ttk.LabelFrame(tab, text="▶ 数据配置")
         f_data.pack(fill="x", **pad)
 
         row = ttk.Frame(f_data); row.pack(fill="x", padx=6, pady=3)
@@ -402,21 +530,24 @@ class PipeGUI:
         self._drive_combo = ttk.Combobox(row, textvariable=self._drive_var,
                                          values=list_drives(), width=8, state="readonly")
         self._drive_combo.pack(side="left")
+        _tip_icon(row, "选择要处理数据所在的盘符。堡垒机常用 Z: 网络挂载盘；本地测试用 C:/D:").pack(side="left", padx=(6, 0))
         ttk.Button(row, text="刷新盘符", command=self._refresh_drives).pack(side="left", padx=6)
         self._drive_combo.bind("<<ComboboxSelected>>", lambda e: self._on_drive_change())
 
         row = ttk.Frame(f_data); row.pack(fill="x", padx=6, pady=3)
         ttk.Label(row, text="源目录：", width=10).pack(side="left")
         ttk.Entry(row, textvariable=self._src_var, width=60).pack(side="left", fill="x", expand=True)
+        _tip_icon(row, "要处理的视频/图片根目录。可以是 Z:\\sjbz_20260708 这种一天数据的根").pack(side="left", padx=(6, 0))
         ttk.Button(row, text="浏览...", command=self._browse_src).pack(side="left", padx=6)
 
         row = ttk.Frame(f_data); row.pack(fill="x", padx=6, pady=3)
         ttk.Label(row, text="输出根：", width=10).pack(side="left")
         ttk.Entry(row, textvariable=self._out_var, width=60).pack(side="left", fill="x", expand=True)
+        _tip_icon(row, "抽帧结果和 job 状态放这里，默认 <数据盘>\\切帧结果").pack(side="left", padx=(6, 0))
         ttk.Button(row, text="浏览...", command=self._browse_out).pack(side="left", padx=6)
 
-        # 子目录选择
-        f_subs = ttk.LabelFrame(self.root, text="▶ 子目录（勾选要处理的）")
+        # 子目录选择（本页核心）
+        f_subs = ttk.LabelFrame(tab, text="▶ 子目录（勾选要处理的，右侧显示实时进度）")
         f_subs.pack(fill="both", expand=True, **pad)
         # 汇总条：顶部一行，展示最新 job 的进度
         summary_row = ttk.Frame(f_subs)
@@ -431,7 +562,7 @@ class PipeGUI:
 
         self._subs_canvas_frame = ttk.Frame(f_subs)
         self._subs_canvas_frame.pack(fill="both", expand=True, padx=6, pady=3)
-        self._subs_canvas = tk.Canvas(self._subs_canvas_frame, height=110, highlightthickness=0)
+        self._subs_canvas = tk.Canvas(self._subs_canvas_frame, height=180, highlightthickness=0)
         self._subs_scroll = ttk.Scrollbar(self._subs_canvas_frame, orient="vertical",
                                           command=self._subs_canvas.yview)
         self._subs_inner = ttk.Frame(self._subs_canvas)
@@ -444,61 +575,121 @@ class PipeGUI:
         self._subs_canvas.pack(side="left", fill="both", expand=True)
         self._subs_scroll.pack(side="right", fill="y")
 
-        # 处理选项
-        f_opt = ttk.LabelFrame(self.root, text="▶ 处理选项")
-        f_opt.pack(fill="x", **pad)
-
-        row = ttk.Frame(f_opt); row.pack(fill="x", padx=6, pady=3)
+    def _build_tab_dedup(self, tab: "ttk.Frame", pad: dict):
+        """去重参数 tab：相似度、车运动、场景保护、真删除、日限"""
+        f = ttk.LabelFrame(tab, text="▶ 相似度")
+        f.pack(fill="x", **pad)
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=6)
+        _tip_icon(row, "两张图差异 ≤ 该值就当作近似重复。\n"
+                       "0 = 只删完全一样\n"
+                       "3 = 严格（几乎肉眼一样，推荐首次用）\n"
+                       "5 = 默认，轻微压缩/裁边算相同\n"
+                       "10 = 宽松，构图相似即合并，可能误伤").pack(side="left", padx=(0, 4))
         ttk.Label(row, text="相似度阈值 (-t)：", width=18).pack(side="left")
         ttk.Spinbox(row, from_=0, to=32, textvariable=self._threshold_var, width=6).pack(side="left")
-        ttk.Label(row, text="   车运动阈值 (-m)：").pack(side="left")
+
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=6)
+        _tip_icon(row, "同一目录相邻帧比较，车中心位移 > 该值 × max(W,H) 就判定'在动'，保留。\n"
+                       "越小越灵敏（车抖动就当动了），越大越钝。\n"
+                       "默认 0.12；车辆序列推荐 0.02~0.05；大幅移动镜头用 0.10+").pack(side="left", padx=(0, 4))
+        ttk.Label(row, text="车运动阈值 (-m)：", width=18).pack(side="left")
         ttk.Spinbox(row, from_=0.0, to=1.0, increment=0.01,
                     textvariable=self._motion_var, width=6, format="%.2f").pack(side="left")
-        ttk.Label(row, text="   抽帧 fps：").pack(side="left")
+
+        f = ttk.LabelFrame(tab, text="▶ 保护策略")
+        f.pack(fill="x", **pad)
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=4)
+        _tip_icon(row, "开启后把'纯色屏 / 渐变屏'这类传感器遮挡的异常帧识别出来强制保留。\n"
+                       "推荐开——异常帧留着做故障排查很有用").pack(side="left", padx=(0, 4))
+        ttk.Checkbutton(row, text="场景保护 -S（推荐开）",
+                        variable=self._scene_protect_var).pack(side="left")
+
+        f = ttk.LabelFrame(tab, text="▶ 删除策略")
+        f.pack(fill="x", **pad)
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=4)
+        _tip_icon(row, "不勾 = dry-run，只在每个子目录写 dedupe_report.csv 供检查，不动任何文件。\n"
+                       "勾上 = 按 CSV 里的 DELETE 行真的删掉/移走").pack(side="left", padx=(0, 4))
+        ttk.Checkbutton(row, text="真删除（-y，取消勾选则 dry-run）",
+                        variable=self._apply_var).pack(side="left")
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=4)
+        _tip_icon(row, "只在'真删除'勾上时生效：\n"
+                       "  不勾 = 移到目标目录下的 _trash/ 子文件夹，可回滚（占额外磁盘）\n"
+                       "  勾上 = 直接 os.remove，不可恢复（磁盘干净）").pack(side="left", padx=(0, 4))
+        ttk.Checkbutton(row, text="永久删除，不落 _trash（-H）",
+                        variable=self._hard_delete_var).pack(side="left")
+
+        f = ttk.LabelFrame(tab, text="▶ 安全阀")
+        f.pack(fill="x", **pad)
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=6)
+        _tip_icon(row, "当日累计'剩余'张数达到该值，pipeline 自动停止，防止把有用图删过头。\n"
+                       "0 = 禁用（不推荐）；默认 80000").pack(side="left", padx=(0, 4))
+        ttk.Label(row, text="当日剩余上限 (-L)：", width=20).pack(side="left")
+        ttk.Spinbox(row, from_=0, to=100000000, increment=1000,
+                    textvariable=self._daily_remain_limit_var, width=12).pack(side="left")
+
+    def _build_tab_extract(self, tab: "ttk.Frame", pad: dict):
+        """抽帧 & 编排 tab：fps + watcher 扫描秒"""
+        f = ttk.LabelFrame(tab, text="▶ 抽帧")
+        f.pack(fill="x", **pad)
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=6)
+        _tip_icon(row, "视频每秒抽多少帧。默认 1.0 表示 1 秒 1 帧。\n"
+                       "值越大图片越多、覆盖越全；也越占磁盘和 CPU。\n"
+                       "堡垒机场景不建议 > 5").pack(side="left", padx=(0, 4))
+        ttk.Label(row, text="抽帧 fps：", width=14).pack(side="left")
         ttk.Spinbox(row, from_=0.1, to=30.0, increment=0.5,
                     textvariable=self._fps_var, width=6, format="%.1f").pack(side="left")
 
-        row = ttk.Frame(f_opt); row.pack(fill="x", padx=6, pady=3)
-        ttk.Checkbutton(row, text="真删除（-y，取消勾选则 dry-run）",
-                        variable=self._apply_var).pack(side="left")
-        ttk.Checkbutton(row, text="永久删除，不落 _trash（-H）",
-                        variable=self._hard_delete_var).pack(side="left", padx=12)
-
-        row = ttk.Frame(f_opt); row.pack(fill="x", padx=6, pady=3)
-        ttk.Checkbutton(row, text="场景保护 -S（推荐开）",
-                        variable=self._scene_protect_var).pack(side="left")
-        ttk.Label(row, text="   当日剩余上限 (-L)：").pack(side="left")
-        ttk.Spinbox(row, from_=0, to=100000000, increment=1000,
-                    textvariable=self._daily_remain_limit_var, width=10).pack(side="left")
-        ttk.Label(row, text="   watcher 扫描秒：").pack(side="left")
+        f = ttk.LabelFrame(tab, text="▶ 编排")
+        f.pack(fill="x", **pad)
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=6)
+        _tip_icon(row, "去重 watcher 多久扫一次 _done.marker（抽帧完成标记）。\n"
+                       "越小越及时（视频抽完立刻开始去重），但更耗 CPU。\n"
+                       "默认 3.0 秒够用").pack(side="left", padx=(0, 4))
+        ttk.Label(row, text="watcher 扫描秒：", width=18).pack(side="left")
         ttk.Spinbox(row, from_=0.5, to=60.0, increment=0.5,
                     textvariable=self._watch_interval_var, width=6, format="%.1f").pack(side="left")
 
-        # 后台选项
-        f_bg = ttk.LabelFrame(self.root, text="▶ 后台选项")
-        f_bg.pack(fill="x", **pad)
-        row = ttk.Frame(f_bg); row.pack(fill="x", padx=6, pady=3)
+        # 说明性小字
+        note = ttk.Label(
+            tab, foreground="#666", justify="left",
+            text=("提示：抽帧和去重是并行的。主线程串行抽帧，watcher 在后台\n"
+                  "每 N 秒扫一次，看到 _done.marker 就立刻起 dedupe，视频粒度\n"
+                  "即抽即删，中间不会堆积占磁盘。"),
+        )
+        note.pack(fill="x", padx=14, pady=(4, 8), anchor="w")
+
+    def _build_tab_bg(self, tab: "ttk.Frame", pad: dict):
+        """后台 & 快捷键 tab"""
+        f = ttk.LabelFrame(tab, text="▶ 窗口行为")
+        f.pack(fill="x", **pad)
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=4)
+        _tip_icon(row, "关闭主窗口时最小化到系统托盘（右下角图标），进程不退出、任务继续跑。\n"
+                       "想真正退出：托盘图标右键 → 退出，或主窗底部『退出』按钮").pack(side="left", padx=(0, 4))
         ttk.Checkbutton(row, text="点 × 时最小化到托盘（不退出）",
                         variable=self._minimize_to_tray_var).pack(side="left")
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=4)
+        _tip_icon(row, "pipeline 后台已内建 CREATE_NO_WINDOW，子进程（extract_frames/dedupe_pic）\n"
+                       "不会弹黑窗口。此项只是提示，勾不勾都不影响").pack(side="left", padx=(0, 4))
         ttk.Checkbutton(row, text="隐藏所有子进程黑窗口（pipeline 已内建，此项仅提示）",
-                        variable=self._hide_children_var).pack(side="left", padx=12)
-        row = ttk.Frame(f_bg); row.pack(fill="x", padx=6, pady=3)
-        ttk.Label(row, text="呼出快捷键：").pack(side="left")
+                        variable=self._hide_children_var).pack(side="left")
+
+        f = ttk.LabelFrame(tab, text="▶ 全局快捷键")
+        f.pack(fill="x", **pad)
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=6)
+        _tip_icon(row, "GUI 缩到托盘后按此快捷键把状态浮层拉出来。\n"
+                       "格式 ctrl+alt+p / ctrl+shift+F1 之类。\n"
+                       "部分堡垒机 RDP 会话会拦截全局钩子，用不了就用托盘图标呼出").pack(side="left", padx=(0, 4))
+        ttk.Label(row, text="呼出快捷键：", width=14).pack(side="left")
         ttk.Entry(row, textvariable=self._hotkey_var, width=20).pack(side="left")
         ttk.Button(row, text="注册快捷键", command=self._register_hotkey).pack(side="left", padx=6)
 
-        # 底部按钮
-        f_btn = ttk.Frame(self.root); f_btn.pack(fill="x", **pad)
-        # 主动作按钮：空闲=运行，有任务=停止（run_or_stop 会根据最新 job 状态动态切）
-        self._action_btn = ttk.Button(f_btn, text="▶ 运行", command=self._on_action_click, width=16)
-        self._action_btn.pack(side="left", padx=4)
-        self._action_state = "run"  # "run" | "stop"
-        ttk.Button(f_btn, text="一键杀死所有", command=self._on_kill_all, width=14).pack(side="left", padx=4)
-        ttk.Button(f_btn, text="查看状态", command=self.show_status_window, width=14).pack(side="left", padx=4)
-        ttk.Button(f_btn, text="查看日志", command=self.show_log_window, width=14).pack(side="left", padx=4)
-        ttk.Button(f_btn, text="最小化到托盘", command=self.hide_to_tray, width=14).pack(side="left", padx=4)
-        ttk.Button(f_btn, text="退出", command=self.quit_all, width=10).pack(side="right", padx=4)
-        ttk.Button(f_btn, text="重置配置", command=self._on_reset_config, width=10).pack(side="right", padx=4)
+        # 提示语
+        note = ttk.Label(
+            tab, foreground="#666", justify="left",
+            text=("提示：所有 Tab 里的选项（包括源目录/输出根/勾选过的子目录）\n"
+                  "下次启动会自动填回来。想清零就按底部『重置配置』按钮。"),
+        )
+        note.pack(fill="x", padx=14, pady=(4, 8), anchor="w")
 
     # ---------- 环境检测 ----------
 
