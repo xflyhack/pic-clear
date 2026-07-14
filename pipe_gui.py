@@ -407,6 +407,160 @@ def _tip_icon(parent: "tk.Widget", text: str) -> "tk.Label":
     return lbl
 
 
+# --- 授权信息辅助 -----------------------------------------------------------
+
+def _resolve_license_path() -> Path:
+    """跟 pipeline._check_license_or_die 同一套路径解析：
+    优先环境变量 → frozen 模式取 exe 同目录 → 否则取 CWD"""
+    env_lic = os.environ.get("PIPELINE_LICENSE") or os.environ.get("DEDUPE_LICENSE")
+    if env_lic:
+        return Path(env_lic).expanduser().resolve()
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "license.lic"
+    return Path.cwd() / "license.lic"
+
+
+def _read_license_payload() -> dict:
+    """尝试读并 base64+json 解析 license.lic 的 payload，用于展示。
+    不做签名校验（校验交给 licensing.verify_license）。失败返回 {}。"""
+    try:
+        import base64
+        p = _resolve_license_path()
+        if not p.is_file():
+            return {}
+        lines = [l.strip() for l in p.read_text().splitlines() if l.strip()]
+        if len(lines) < 1:
+            return {}
+        payload = base64.b64decode(lines[0], validate=True)
+        data = json.loads(payload.decode("utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def probe_license_status() -> dict:
+    """一站式：拿本机指纹 + license 校验结果 + license payload。
+    返回结构：
+      {
+        'fingerprint': 'XXXX-XXXX-XXXX-XXXX',
+        'license_path': Path,
+        'ok': True/False,
+        'msg': '授权有效（发放给: xxx）' | '原因文字',
+        'payload': {issued_to, expire_date, note, ...} 或 {}
+      }
+    """
+    info = {"fingerprint": "?", "license_path": _resolve_license_path(),
+            "ok": False, "msg": "", "payload": {}}
+    try:
+        from licensing import get_fingerprint, verify_license
+    except Exception as e:
+        info["msg"] = f"缺少 licensing 模块：{e}"
+        return info
+    try:
+        info["fingerprint"] = get_fingerprint()
+    except Exception as e:
+        info["fingerprint"] = f"（获取失败：{e}）"
+    try:
+        ok, msg = verify_license(info["license_path"])
+        info["ok"] = bool(ok)
+        info["msg"] = str(msg)
+    except Exception as e:
+        info["ok"] = False
+        info["msg"] = f"校验异常：{e}"
+    info["payload"] = _read_license_payload()
+    return info
+
+
+def _copy_to_clipboard(root: "tk.Misc", text: str) -> bool:
+    """跨会话可靠复制：clear + append + update，返回是否成功。"""
+    try:
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        root.update()
+        return True
+    except Exception:
+        return False
+
+
+def show_license_error_dialog(info: dict) -> None:
+    """未授权时启动的对话框：
+    - 顶部红字提示未授权
+    - 中间大号显示本机指纹（可选中）+ 复制按钮
+    - 说明如何拿 license.lic
+    - 底部『退出』按钮
+    关闭窗口后 sys.exit(3)。"""
+    root = tk.Tk()
+    root.title("pic-clear 未授权")
+    root.geometry("560x400")
+    root.resizable(False, False)
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    # 高 DPI
+    if os.name == "nt":
+        try:
+            from ctypes import windll
+            windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+
+    pad = {"padx": 16, "pady": 6}
+
+    tk.Label(root, text="⚠  本机未授权，无法运行",
+             font=("Microsoft YaHei", 16, "bold"),
+             foreground="#c0392b").pack(pady=(20, 4))
+
+    tk.Label(root, text=info.get("msg", ""),
+             font=("Microsoft YaHei", 9),
+             foreground="#555", wraplength=520, justify="center").pack(**pad)
+
+    tk.Label(root, text="本机指纹（发给作者获取 license.lic）：",
+             font=("Microsoft YaHei", 10),
+             foreground="#333").pack(pady=(14, 4))
+
+    fp = info.get("fingerprint", "?")
+    fp_entry = tk.Entry(root, font=("Consolas", 14, "bold"),
+                        justify="center", relief="flat",
+                        readonlybackground="#f5f5f5",
+                        foreground="#0057b7", width=22)
+    fp_entry.insert(0, fp)
+    fp_entry.config(state="readonly")
+    fp_entry.pack(pady=(0, 8))
+
+    copied_var = tk.StringVar(value="")
+
+    def do_copy():
+        ok = _copy_to_clipboard(root, fp)
+        copied_var.set("✓ 已复制到剪贴板" if ok else "✗ 复制失败")
+        # 2 秒后清消息
+        root.after(2000, lambda: copied_var.set(""))
+
+    ttk.Button(root, text="复制指纹", command=do_copy, width=18).pack()
+    tk.Label(root, textvariable=copied_var,
+             foreground="#0a7f2e",
+             font=("Microsoft YaHei", 9)).pack(pady=(2, 6))
+
+    lic_path = info.get("license_path")
+    hint = (
+        f"操作步骤：\n"
+        f"  1. 点上方『复制指纹』按钮\n"
+        f"  2. 把指纹发给作者，索要 license.lic\n"
+        f"  3. 把 license.lic 放到下面这个位置，重新运行本程序：\n"
+        f"        {lic_path}"
+    )
+    tk.Label(root, text=hint, foreground="#555", justify="left",
+             font=("Microsoft YaHei", 9)).pack(pady=(6, 6), padx=20, anchor="w")
+
+    ttk.Button(root, text="退出", command=root.destroy, width=14).pack(pady=(4, 14))
+
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
+    root.mainloop()
+
+
 class PipeGUI:
     APP_TITLE = "pic-clear 图形界面"
     APP_VERSION = "v0.1.2"
@@ -699,33 +853,139 @@ class PipeGUI:
         note.pack(fill="x", padx=14, pady=(4, 8), anchor="w")
 
     def _build_tab_about(self, tab: "ttk.Frame", pad: dict):
-        """关于 tab：公司 + 版本 + 版权声明"""
-        # 中央容器，垂直居中
-        wrap = ttk.Frame(tab)
-        wrap.place(relx=0.5, rely=0.5, anchor="center")
+        """关于 tab：公司 + 版本 + 版权声明 + 授权信息"""
+        # 上半：产品/公司信息
+        top = ttk.Frame(tab)
+        top.pack(fill="x", padx=16, pady=(20, 4))
 
-        ttk.Label(wrap, text="pic-clear 图形界面",
+        ttk.Label(top, text="pic-clear 图形界面",
                   font=("Microsoft YaHei", 18, "bold"),
                   foreground="#222").pack(pady=(0, 6))
 
-        ttk.Label(wrap, text=f"版本  {self.APP_VERSION}",
+        ttk.Label(top, text=f"版本  {self.APP_VERSION}",
                   font=("Microsoft YaHei", 11),
-                  foreground="#555").pack(pady=(0, 20))
+                  foreground="#555").pack(pady=(0, 12))
 
-        ttk.Separator(wrap, orient="horizontal").pack(fill="x", pady=(0, 16))
+        ttk.Separator(top, orient="horizontal").pack(fill="x", pady=(0, 12))
 
-        ttk.Label(wrap, text=self.APP_COMPANY,
+        ttk.Label(top, text=self.APP_COMPANY,
                   font=("Microsoft YaHei", 13, "bold"),
                   foreground="#c0392b").pack(pady=(0, 4))
-        ttk.Label(wrap, text="版权所有  ·  All rights reserved.",
+        ttk.Label(top, text="版权所有  ·  All rights reserved.",
                   font=("Microsoft YaHei", 9),
-                  foreground="#888").pack(pady=(0, 20))
+                  foreground="#888").pack(pady=(0, 14))
 
-        ttk.Label(wrap, foreground="#666", justify="center",
+        ttk.Label(top, foreground="#666", justify="center",
                   text=("图片近似去重  ·  YOLO 目标保护  ·  H265/MP4 抽帧  ·  编排后台\n"
                         "共 6 个独立 exe：extract_frames / dedupe_pic / pipeline\n"
                         "pipe_gui / summary_stats_gui / gen_license_gui")
                   ).pack(pady=(0, 6))
+
+        # 下半：授权信息（占位框，_refresh_about_license 填充）
+        f_lic = ttk.LabelFrame(tab, text="▶ 授权信息")
+        f_lic.pack(fill="x", padx=16, pady=(20, 12))
+        self._about_lic_frame = f_lic
+        self._about_lic_rows: list["tk.Widget"] = []
+        self._about_lic_copy_msg = tk.StringVar(value="")
+
+        # 先占位显示"加载中"，正式内容由 _refresh_about_license 填
+        ttk.Label(f_lic, text="（正在读取本机授权信息...）",
+                  foreground="#888").pack(padx=10, pady=8, anchor="w")
+
+    def _refresh_about_license(self):
+        """把 self.license_info 里的数据渲染到关于 Tab 的授权信息栏。
+        在 main() 里 app 构造完 + license_info 赋值后调用一次。"""
+        f_lic = getattr(self, "_about_lic_frame", None)
+        if f_lic is None:
+            return
+        info = getattr(self, "license_info", None) or probe_license_status()
+
+        # 清空既有内容
+        for w in f_lic.winfo_children():
+            w.destroy()
+
+        payload = info.get("payload") or {}
+        issued_to = payload.get("issued_to", "-")
+        expire = str(payload.get("expire_date", "never")).strip()
+        expire_disp = "永久" if expire.lower() in ("never", "", "none") else expire
+        note = payload.get("note", "") or ""
+        lic_path = info.get("license_path")
+        fp = info.get("fingerprint", "?")
+        ok = bool(info.get("ok"))
+
+        # 状态行
+        row = ttk.Frame(f_lic); row.pack(fill="x", padx=10, pady=(6, 3))
+        ttk.Label(row, text="状态：", width=12,
+                  foreground="#555").pack(side="left")
+        state_lbl = ttk.Label(
+            row,
+            text=("✔ 已授权" if ok else "✘ 未授权"),
+            foreground=("#0a7f2e" if ok else "#c0392b"),
+            font=("Microsoft YaHei", 10, "bold"),
+        )
+        state_lbl.pack(side="left")
+        if info.get("msg"):
+            ttk.Label(row, text=f"   ({info['msg']})",
+                      foreground="#888",
+                      font=("Microsoft YaHei", 9)).pack(side="left")
+
+        # 发放给
+        row = ttk.Frame(f_lic); row.pack(fill="x", padx=10, pady=3)
+        ttk.Label(row, text="发放给：", width=12,
+                  foreground="#555").pack(side="left")
+        ttk.Label(row, text=issued_to,
+                  font=("Microsoft YaHei", 10)).pack(side="left")
+
+        # 过期日期
+        row = ttk.Frame(f_lic); row.pack(fill="x", padx=10, pady=3)
+        ttk.Label(row, text="过期日期：", width=12,
+                  foreground="#555").pack(side="left")
+        ttk.Label(row, text=expire_disp,
+                  font=("Microsoft YaHei", 10)).pack(side="left")
+
+        # 备注（有才显示）
+        if note:
+            row = ttk.Frame(f_lic); row.pack(fill="x", padx=10, pady=3)
+            ttk.Label(row, text="备注：", width=12,
+                      foreground="#555").pack(side="left")
+            ttk.Label(row, text=note,
+                      font=("Microsoft YaHei", 10)).pack(side="left")
+
+        # 本机指纹（可选中 + 复制按钮）
+        row = ttk.Frame(f_lic); row.pack(fill="x", padx=10, pady=(8, 3))
+        ttk.Label(row, text="本机指纹：", width=12,
+                  foreground="#555").pack(side="left")
+        fp_entry = tk.Entry(row, font=("Consolas", 11, "bold"),
+                            relief="flat", readonlybackground="#f5f5f5",
+                            foreground="#0057b7", width=22)
+        fp_entry.insert(0, fp)
+        fp_entry.config(state="readonly")
+        fp_entry.pack(side="left")
+
+        def do_copy():
+            if _copy_to_clipboard(self.root, fp):
+                self._about_lic_copy_msg.set("✓ 已复制到剪贴板")
+            else:
+                self._about_lic_copy_msg.set("✗ 复制失败")
+            self.root.after(2000, lambda: self._about_lic_copy_msg.set(""))
+
+        ttk.Button(row, text="复制", command=do_copy, width=6).pack(side="left", padx=6)
+        ttk.Label(row, textvariable=self._about_lic_copy_msg,
+                  foreground="#0a7f2e",
+                  font=("Microsoft YaHei", 9)).pack(side="left")
+
+        # license.lic 路径（放最后，字号小一点）
+        if lic_path:
+            row = ttk.Frame(f_lic); row.pack(fill="x", padx=10, pady=(8, 8))
+            ttk.Label(row, text="license.lic 路径：",
+                      foreground="#888",
+                      font=("Microsoft YaHei", 9)).pack(side="left")
+            path_entry = tk.Entry(row, font=("Consolas", 9),
+                                  relief="flat", readonlybackground="#f5f5f5",
+                                  foreground="#666")
+            path_entry.insert(0, str(lic_path))
+            path_entry.config(state="readonly")
+            path_entry.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
     # ---------- 环境检测 ----------
 
@@ -1647,14 +1907,24 @@ def main() -> int:
         return pipeline.main()
 
     # ---- 正常 GUI 启动 ----
-    # 授权检查（跟 pipeline 一样，如果签名过期直接报错）
-    try:
-        pipeline._check_license_or_die()
-    except SystemExit:
-        # _check_license_or_die 内部会 sys.exit()，让它自然带着 exit code 结束
-        raise
-    except Exception as e:
-        print(f"[WARN] 授权检查异常: {e}", file=sys.stderr)
+    # 授权检查：不再走 pipeline._check_license_or_die（它只 print+sys.exit，
+    # 但 pipe_gui 是 --windowed 打包无控制台，用户看不到消息）。
+    # 改成自己做 verify_license，未通过弹一个 Tk 对话框展示指纹 + 复制按钮。
+    license_info = probe_license_status()
+    if not license_info.get("ok"):
+        # 环境变量后门：PIPELINE_SKIP_LICENSE=1 时跳过（跟 pipeline 一致）
+        if os.environ.get("PIPELINE_SKIP_LICENSE") == "1":
+            print("[授权] PIPELINE_SKIP_LICENSE=1，跳过授权（开发模式）", flush=True)
+        else:
+            try:
+                show_license_error_dialog(license_info)
+            except Exception as e:
+                # 极端情况兜底：Tk 起不来就退到 CLI 行为
+                print(f"[授权] {license_info.get('msg', '未授权')}", file=sys.stderr)
+                print(f"[授权] 本机指纹: {license_info.get('fingerprint','?')}",
+                      file=sys.stderr)
+                print(f"[授权] 对话框展示失败: {e}", file=sys.stderr)
+            sys.exit(3)
 
     root = tk.Tk()
     try:
@@ -1666,6 +1936,13 @@ def main() -> int:
             except Exception:
                 pass
         app = PipeGUI(root)
+        # 把授权信息传进 app，用于『关于』Tab 展示
+        app.license_info = license_info
+        # 重新构建 About Tab（此时 license_info 已经就位）
+        try:
+            app._refresh_about_license()
+        except Exception:
+            pass
         root.mainloop()
     except Exception as e:
         try:
