@@ -170,6 +170,18 @@ set "TS_T=%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
 set "TS_T=%TS_T: =0%"
 set "TS=%TS_D%_%TS_T%"
 
+REM ---- 是否开启场景保护（纯色/渐变屏等异常帧不删） ----
+echo.
+call :LOG_INFO "场景保护: 把明显的纯色/渐变屏（传感器遮挡等）识别为异常帧，强制保留"
+call :LOG_INFO "  Y = 开启（多保留一些图，严格不删纯色屏）"
+call :LOG_INFO "  N = 关闭（与旧版一致，纯色屏也可能被删）"
+choice /C YN /M "是否开启场景保护 (Y=开启 / N=不开启)"
+set "SCENE_FLAG="
+if errorlevel 2 goto :SCENE_DONE
+set "SCENE_FLAG=--scene-protect"
+call :LOG_INFO "场景保护已开启（会传 --scene-protect 给 dedupe_pic.exe）"
+:SCENE_DONE
+echo.
 REM ---- 是否启动 dedupe_watcher 后台窗口 ----
 echo.
 call :LOG_INFO "并行模式: 抽帧的同时后台窗口自动去重，磁盘不攒垃圾"
@@ -201,7 +213,9 @@ if not exist "!WATCHER_BAT!" (
 
 call :LOG_INFO "启动后台窗口 : !WATCHER_BAT!"
 call :LOG_INFO "监听目录     : !WATCH_TARGET!"
-start "dedupe_watcher" cmd /k ""!WATCHER_BAT!" "!WATCH_TARGET!" /apply /motion %MOTION_THRESHOLD%"
+set "WATCH_SCENE="
+if defined SCENE_FLAG set "WATCH_SCENE=/scene"
+start "dedupe_watcher" cmd /k ""!WATCHER_BAT!" "!WATCH_TARGET!" /apply /motion %MOTION_THRESHOLD% !WATCH_SCENE!"
 call :LOG_INFO "监听窗口已弹出 (真删模式，重复图会被永久删除，不落回收站)"
 call :LOG_INFO "如需 dry-run 观察，可另开: dedupe_watcher.bat \"!WATCH_TARGET!\""
 echo.
@@ -268,7 +282,7 @@ set "REPORT_CSV=!DST_DIR!\dedupe_report_%TS%.csv"
 
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  去重 dry-run 开始"
-dedupe_pic.exe "!DST_DIR!" --threshold 3 --report "!REPORT_CSV!"
+dedupe_pic.exe "!DST_DIR!" --threshold 3 !SCENE_FLAG! --report "!REPORT_CSV!"
 if errorlevel 1 (
     call :LOG_ERR "  dry-run 失败: !SUBNAME!"
     endlocal & exit /b 1
@@ -284,7 +298,7 @@ if !CHOICE_RC! EQU 2 (
 
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  真删开始 (永久删除，不落回收站)"
-dedupe_pic.exe "!DST_DIR!" --threshold 3 --apply --hard-delete --report "!REPORT_CSV!"
+dedupe_pic.exe "!DST_DIR!" --threshold 3 !SCENE_FLAG! --apply --hard-delete --report "!REPORT_CSV!"
 if errorlevel 1 (
     set "T=%TIME:~0,8%"
     call :LOG_ERR "  %T%  真删失败: !SUBNAME!"

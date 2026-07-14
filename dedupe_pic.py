@@ -144,6 +144,9 @@ class Item:
     image_size: tuple[int, int] | None = None
     motion_protected: bool = False   # 相邻帧车变化 → True
     motion_reason: str = ""          # 变化原因描述（写入 CSV）
+    # 场景保护（--scene-protect 开启后才可能为 True）
+    scene_protected: bool = False
+    scene_reason: str = ""
 
 
 def count_files(root: Path, extensions: set[str] | None) -> int:
@@ -251,18 +254,31 @@ def build_index(
     protect_classes: set[str] | None = None,
     total: int | None = None,
     progress_interval: float = 5.0,
+    enable_scene: bool = False,
 ) -> tuple[list[Item], list[Path]]:
     """扫描 root 下所有匹配图片，计算 dHash；如果提供了 detector，
     还会跑目标检测并在 Item 上打上 is_protected 标记。
 
     total: 预扫得到的总文件数；用于计算百分比 / ETA。
     progress_interval: 进度打印的最小时间间隔（秒）。
+    enable_scene: 开启"场景保护"（纯色/渐变屏兜底保护）。仅在 YOLO 未命中
+        任何 person/vehicle 时才调用 analyze_scene，避免误伤正常场景。
+        --no-protect 模式下若开启此项，则对所有图都做一次场景分析。
     """
     items: list[Item] = []
     failed: list[Path] = []
     count = 0
     current_dir: str | None = None
     protect_hits = 0
+    scene_hits = 0
+
+    _analyze_scene = None
+    if enable_scene:
+        try:
+            from detector import analyze_scene as _analyze_scene  # type: ignore
+        except ImportError:
+            from importlib import import_module
+            _analyze_scene = import_module("detector").analyze_scene  # type: ignore
 
     stage = "扫描+检测" if detector is not None else "扫描"
     reporter = ProgressReporter(
@@ -320,16 +336,41 @@ def build_index(
                 item.max_conf = max((d.confidence for d in hits), default=0.0)
             item.vehicle_boxes = tuple(d.box_xyxy for d in vehicles)
             item.image_size = size
+
+        # ---- 场景保护（纯色/渐变屏）：仅当本图 YOLO 完全无 person/vehicle
+        # 命中时才调用；--no-protect 模式下 detector is None，对所有图都跑。
+        if _analyze_scene is not None and not item.is_protected:
+            no_yolo_hit = (
+                detector is None
+                or (not item.detected_classes and not item.vehicle_boxes)
+            )
+            if no_yolo_hit:
+                try:
+                    flags = _analyze_scene(p)
+                except Exception as e:
+                    flags = None
+                    print(f"  [warn] 场景分析失败 {p}: {e}", flush=True)
+                if flags is not None and flags.is_anomaly:
+                    item.scene_protected = True
+                    item.scene_reason = flags.reason
+                    scene_hits += 1
+
         items.append(item)
 
-        extra = (
-            f"受保护 {protect_hits}" if detector is not None else ""
-        )
+        extra_parts = []
+        if detector is not None:
+            extra_parts.append(f"受保护 {protect_hits}")
+        if _analyze_scene is not None:
+            extra_parts.append(f"场景 {scene_hits}")
+        extra = "  ".join(extra_parts)
         reporter.update(count, extra=extra, force=(count == 1))
 
-    reporter.finish(
-        extra=(f"受保护 {protect_hits}") if detector is not None else ""
-    )
+    final_parts = []
+    if detector is not None:
+        final_parts.append(f"受保护 {protect_hits}")
+    if _analyze_scene is not None:
+        final_parts.append(f"场景 {scene_hits}")
+    reporter.finish(extra="  ".join(final_parts))
     return items, failed
 
 
@@ -436,8 +477,12 @@ def pick_keeper(group: list[Item], strategy: str) -> Item:
 
 
 def _needs_keep(x: Item) -> bool:
-    """任一保护信号命中即强制保留：含保护类别 或 前后帧车辆变化。"""
-    return x.is_protected or x.motion_protected
+    """任一保护信号命中即强制保留：
+      - 含保护类别 (is_protected)
+      - 相邻帧车辆变化 (motion_protected)
+      - 场景异常帧 (scene_protected，需 --scene-protect 开启)
+    """
+    return x.is_protected or x.motion_protected or x.scene_protected
 
 
 def decide_actions(group: list[Item], strategy: str) -> dict[int, str]:
@@ -480,6 +525,7 @@ def write_report(
                 "group_id", "action", "path", "size_bytes", "mtime",
                 "phash_hex", "is_protected", "detected_classes", "max_conf",
                 "motion_protected", "motion_reason",
+                "scene_protected", "scene_reason",
             ]
         )
         for gid, group in enumerate(groups, 1):
@@ -505,6 +551,8 @@ def write_report(
                         f"{item.max_conf:.3f}" if item.max_conf else "",
                         "yes" if item.motion_protected else "no",
                         item.motion_reason,
+                        "yes" if item.scene_protected else "no",
+                        item.scene_reason,
                     ]
                 )
     if failed:
@@ -641,6 +689,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--scene-protect",
+        action="store_true",
+        help=(
+            "开启场景保护：把明显的纯色/渐变屏（大片同色遮挡）"
+            "识别为异常帧并强制保留，不参与相似度去重。默认关闭，"
+            "开启后仅对 YOLO 无 person/vehicle 命中的图做判定。"
+        ),
+    )
+    p.add_argument(
         "--trash-dir",
         type=Path,
         default=None,
@@ -727,6 +784,7 @@ def main() -> int:
     if not args.no_protect:
         print(f"  保护规则 : 有 person -> 硬保护；只有车类 -> 动了才保护")
         print(f"  运动阈值 : {args.motion_threshold} (同目录相邻帧车变化)")
+    print(f"  场景保护 : {'开启（纯色/渐变屏保留）' if args.scene_protect else '关闭'}")
     print(f"  执行删除 : {'是' if args.apply else '否 (dry-run)'}")
     if args.apply:
         if args.hard_delete or args.trash_dir is None:
@@ -810,6 +868,7 @@ def main() -> int:
         args.root, extensions,
         detector=detector, protect_classes=protect_set,
         total=total,
+        enable_scene=args.scene_protect,
     )
     print(
         f"[扫描完成] 有效图片 {len(items)}，失败/跳过 {len(failed)}，"

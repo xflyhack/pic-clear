@@ -27,6 +27,7 @@ set "APPLY=0"
 set "THRESHOLD=3"
 set "INTERVAL=5"
 set "MOTION="
+set "SCENE_ARG="
 set "RUN_ONCE=0"
 REM 当日累计剩余图片数超过该值就停止 watcher（不影响正在处理的目录）
 REM 改为 0 或不设置来禁用
@@ -42,6 +43,9 @@ if /I "%~1"=="--once"     ( set "RUN_ONCE=1" & shift & goto :PARSE_ARGS )
 if /I "%~1"=="/threshold" ( set "THRESHOLD=%~2" & shift & shift & goto :PARSE_ARGS )
 if /I "%~1"=="/interval"  ( set "INTERVAL=%~2"  & shift & shift & goto :PARSE_ARGS )
 if /I "%~1"=="/motion"    ( set "MOTION=%~2"    & shift & shift & goto :PARSE_ARGS )
+if /I "%~1"=="/scene"     ( set "SCENE_ARG=--scene-protect" & shift & goto :PARSE_ARGS )
+if /I "%~1"=="--scene"    ( set "SCENE_ARG=--scene-protect" & shift & goto :PARSE_ARGS )
+if /I "%~1"=="--scene-protect" ( set "SCENE_ARG=--scene-protect" & shift & goto :PARSE_ARGS )
 if not defined WATCH_ROOT set "WATCH_ROOT=%~1"
 shift
 goto :PARSE_ARGS
@@ -72,6 +76,7 @@ call :LOG_INFO "模式       : %APPLY_TXT%"
 call :LOG_INFO "阈值       : %THRESHOLD%"
 call :LOG_INFO "扫描间隔   : %INTERVAL% 秒"
 call :LOG_INFO "一次即退   : %RUN_ONCE%"
+if defined SCENE_ARG ( call :LOG_INFO "场景保护   : 开启 (--scene-protect)" ) else ( call :LOG_INFO "场景保护   : 关闭" )
 echo ------------------------------------------------------------
 call :LOG_INFO "工作原理: 扫描有 _done.marker 但没 _dedup_done.marker 的目录"
 call :LOG_INFO "          对每个这样的目录调用 dedupe_pic.exe"
@@ -136,15 +141,15 @@ set "REPORT_CSV=!TARGET_DIR!\dedupe_report.csv"
 if "%APPLY%"=="1" (
     REM 直接永久删除，不落 _trash（避免堡垒机上又要清理一遍）
     if defined MOTION (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --motion-threshold %MOTION% --apply --hard-delete --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% !SCENE_ARG! --motion-threshold %MOTION% --apply --hard-delete --report "!REPORT_CSV!"
     ) else (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --apply --hard-delete --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% !SCENE_ARG! --apply --hard-delete --report "!REPORT_CSV!"
     )
 ) else (
     if defined MOTION (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --motion-threshold %MOTION% --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% !SCENE_ARG! --motion-threshold %MOTION% --report "!REPORT_CSV!"
     ) else (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% !SCENE_ARG! --report "!REPORT_CSV!"
     )
 )
 set "RC=!ERRORLEVEL!"

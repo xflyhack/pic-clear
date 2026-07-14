@@ -44,6 +44,95 @@ VEHICLE_CLASSES = frozenset({
 })
 
 
+# =============================================================================
+#  场景异常检测（不依赖 YOLO / onnxruntime）
+#
+#  背景：切帧图偶尔出现"YOLO 什么都识别不到但明显不该删"的异常帧，例如：
+#    - 传感器故障 / 大面积遮挡产生的纯色或渐变屏（整张几乎一片同色）
+#
+#  这些图纯 dHash 会把它们聚成一组只留一张，其余被删。业务希望"宁多留
+#  勿多删"，因此提供一个廉价的场景分析：只对 YOLO 空手回来的图调用，
+#  命中即保护，不影响正常带人/车的图。
+#
+#  目前仅覆盖"纯色屏 / 渐变屏"(mono)。其他类型（引擎盖打开、复杂遮挡）
+#  样本不足，暂不判定，避免误伤正常无主体帧（空路面、纯天空、树影特写等）。
+# =============================================================================
+
+
+@dataclass
+class SceneFlags:
+    is_anomaly: bool
+    reason: str
+    metrics: dict  # 便于调参/排查；CSV 里只落 reason
+
+
+def analyze_scene(
+    image_path: str | Path,
+    *,
+    edge_flat: float = 3.0,
+    sat_high: float = 0.5,
+    hue_top_high: float = 0.6,
+    resize_to: int = 128,
+) -> SceneFlags:
+    """判定单张图是否属于"纯色/渐变屏"（应保护、不删）。
+
+    命中任一即视为异常：
+      A) mono_flat  全图平均边缘 edge_mean < edge_flat  （几乎无纹理）
+      B) mono_color 饱和度均值 > sat_high 且 色相直方峰值占比 > hue_top_high
+                    （高饱和且色相集中——大片同色/近同色）
+
+    调用方约定：只对 YOLO 无 person/vehicle 命中的图调用，避免误伤正常场景。
+    """
+    try:
+        with Image.open(image_path) as im:
+            im = im.convert("RGB")
+            w0, h0 = im.size
+            if w0 <= 0 or h0 <= 0:
+                return SceneFlags(False, "", {})
+            r = min(resize_to / w0, resize_to / h0, 1.0)
+            if r < 1.0:
+                nw = max(1, int(round(w0 * r)))
+                nh = max(1, int(round(h0 * r)))
+                im = im.resize((nw, nh), Image.BILINEAR)
+            arr = np.asarray(im, dtype=np.float32)   # (H, W, 3)
+            hsv = np.asarray(im.convert("HSV"), dtype=np.float32)
+    except Exception:
+        return SceneFlags(False, "", {})
+
+    h, w = arr.shape[:2]
+    if h < 2 or w < 2:
+        return SceneFlags(False, "", {})
+
+    r_ch, g_ch, b_ch = arr[..., 0], arr[..., 1], arr[..., 2]
+    gray = 0.299 * r_ch + 0.587 * g_ch + 0.114 * b_ch
+    edge_mean = float(
+        (np.abs(np.diff(gray, axis=0)).mean()
+         + np.abs(np.diff(gray, axis=1)).mean()) / 2.0
+    )
+
+    mx = arr.max(-1)
+    mn = arr.min(-1)
+    sat = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1e-6), 0.0)
+    sat_mean = float(sat.mean())
+
+    hue = hsv[..., 0]
+    hist, _ = np.histogram(hue, bins=18, range=(0, 256))
+    hue_top_ratio = float(hist.max() / max(hist.sum(), 1))
+
+    metrics = {
+        "edge_mean": edge_mean,
+        "sat_mean": sat_mean,
+        "hue_top_ratio": hue_top_ratio,
+        "size": (w, h),
+    }
+
+    if edge_mean < edge_flat:
+        return SceneFlags(True, "mono_flat", metrics)
+    if sat_mean > sat_high and hue_top_ratio > hue_top_high:
+        return SceneFlags(True, "mono_color", metrics)
+    return SceneFlags(False, "", metrics)
+
+
 def _iou(box_a: tuple[float, float, float, float],
          box_b: tuple[float, float, float, float]) -> float:
     ax1, ay1, ax2, ay2 = box_a
