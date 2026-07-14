@@ -409,11 +409,13 @@ def _tip_icon(parent: "tk.Widget", text: str) -> "tk.Label":
 
 class PipeGUI:
     APP_TITLE = "pic-clear 图形界面"
+    APP_VERSION = "v0.1.2"
+    APP_COMPANY = "山东数旗信息科技有限公司"
     REFRESH_MS = 5000
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title(self.APP_TITLE)
+        self.root.title(f"{self.APP_TITLE}  {self.APP_VERSION}")
         self.root.geometry("820x720")
         self.root.minsize(760, 560)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -480,10 +482,12 @@ class PipeGUI:
         tab_dedup = ttk.Frame(self._nb)
         tab_extract = ttk.Frame(self._nb)
         tab_bg = ttk.Frame(self._nb)
+        tab_about = ttk.Frame(self._nb)
         self._nb.add(tab_home, text="  主页  ")
         self._nb.add(tab_dedup, text="  去重参数  ")
         self._nb.add(tab_extract, text="  抽帧 & 编排  ")
         self._nb.add(tab_bg, text="  后台 & 快捷键  ")
+        self._nb.add(tab_about, text="  关于  ")
 
         # ============= Tab 1：主页 =============
         self._build_tab_home(tab_home, pad)
@@ -496,6 +500,9 @@ class PipeGUI:
 
         # ============= Tab 4：后台 & 快捷键 =============
         self._build_tab_bg(tab_bg, pad)
+
+        # ============= Tab 5：关于 =============
+        self._build_tab_about(tab_about, pad)
 
         # 底部按钮（挂在 root 上，永远常驻，跟 Tab 无关）
         f_btn = ttk.Frame(self.root); f_btn.pack(fill="x", **pad)
@@ -690,6 +697,35 @@ class PipeGUI:
                   "下次启动会自动填回来。想清零就按底部『重置配置』按钮。"),
         )
         note.pack(fill="x", padx=14, pady=(4, 8), anchor="w")
+
+    def _build_tab_about(self, tab: "ttk.Frame", pad: dict):
+        """关于 tab：公司 + 版本 + 版权声明"""
+        # 中央容器，垂直居中
+        wrap = ttk.Frame(tab)
+        wrap.place(relx=0.5, rely=0.5, anchor="center")
+
+        ttk.Label(wrap, text="pic-clear 图形界面",
+                  font=("Microsoft YaHei", 18, "bold"),
+                  foreground="#222").pack(pady=(0, 6))
+
+        ttk.Label(wrap, text=f"版本  {self.APP_VERSION}",
+                  font=("Microsoft YaHei", 11),
+                  foreground="#555").pack(pady=(0, 20))
+
+        ttk.Separator(wrap, orient="horizontal").pack(fill="x", pady=(0, 16))
+
+        ttk.Label(wrap, text=self.APP_COMPANY,
+                  font=("Microsoft YaHei", 13, "bold"),
+                  foreground="#c0392b").pack(pady=(0, 4))
+        ttk.Label(wrap, text="版权所有  ·  All rights reserved.",
+                  font=("Microsoft YaHei", 9),
+                  foreground="#888").pack(pady=(0, 20))
+
+        ttk.Label(wrap, foreground="#666", justify="center",
+                  text=("图片近似去重  ·  YOLO 目标保护  ·  H265/MP4 抽帧  ·  编排后台\n"
+                        "共 6 个独立 exe：extract_frames / dedupe_pic / pipeline\n"
+                        "pipe_gui / summary_stats_gui / gen_license_gui")
+                  ).pack(pady=(0, 6))
 
     # ---------- 环境检测 ----------
 
