@@ -546,6 +546,8 @@ def cmd_submit(args: argparse.Namespace) -> int:
         "hard_delete": args.hard_delete,
         "motion_threshold": args.motion_threshold,
         "daily_remain_limit": args.daily_remain_limit,
+        "scene_protect": bool(args.scene_protect),
+        "watch_interval": float(args.watch_interval),
     }
     (job_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -743,6 +745,10 @@ def cmd_worker(args: argparse.Namespace) -> int:
     hard_delete = bool(manifest.get("hard_delete", False))
     motion_threshold = float(manifest.get("motion_threshold", 0.12))
     daily_remain_limit = int(manifest.get("daily_remain_limit", 80000))
+    scene_protect = bool(manifest.get("scene_protect", False))
+    watch_interval = float(manifest.get("watch_interval", 3.0))
+    if watch_interval <= 0:
+        watch_interval = 3.0
 
     extract_exe = resolve_worker_exe("extract_frames")
     dedupe_exe = resolve_worker_exe("dedupe_pic")
@@ -816,6 +822,8 @@ def cmd_worker(args: argparse.Namespace) -> int:
                            "--threshold", str(threshold),
                            "--motion-threshold", str(motion_threshold),
                            "--report", str(report_csv)]
+                    if scene_protect:
+                        cmd.append("--scene-protect")
                     if apply_delete:
                         cmd.append("--apply")
                         if hard_delete:
@@ -879,7 +887,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
             if producer_done.is_set() and not any_work:
                 _pipeline_log(job_dir, "[watcher] 生产者已完成且无剩余任务，退出")
                 return
-            time.sleep(3.0)
+            time.sleep(watch_interval)
 
     watcher_thread = threading.Thread(target=watcher_loop, name="dedupe-watcher", daemon=False)
     watcher_thread.start()
@@ -1189,6 +1197,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="车运动保护阈值，越大越严格。默认 0.12")
     sp.add_argument("-L", "--daily-remain-limit", type=int, default=80000,
                     help="当日累计剩余达此值 pipeline 自动停止（0=禁用）。默认 80000")
+    sp.add_argument("-S", "--scene-protect", action="store_true",
+                    help="场景保护：纯色屏/渐变屏等异常帧强制保留（推荐开）")
+    sp.add_argument("--watch-interval", type=float, default=3.0,
+                    help="watcher 扫描 _done.marker 的间隔秒。默认 3.0")
 
     # worker (internal)
     wp = sub.add_parser("worker", parents=[common_out], help="[内部] 后台执行体，不要手动调")

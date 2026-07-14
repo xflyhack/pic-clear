@@ -350,6 +350,10 @@ class PipeGUI:
         self._threshold_var = tk.IntVar(value=3)
         self._motion_var = tk.DoubleVar(value=0.12)
         self._fps_var = tk.DoubleVar(value=1.0)
+        # 新增：跟 run_all.bat 对齐的三个参数
+        self._scene_protect_var = tk.BooleanVar(value=True)
+        self._daily_remain_limit_var = tk.IntVar(value=80000)
+        self._watch_interval_var = tk.DoubleVar(value=3.0)
         self._hotkey_var = tk.StringVar(value="ctrl+alt+p")
 
         self._sub_vars: list[tuple[str, tk.BooleanVar]] = []
@@ -447,6 +451,16 @@ class PipeGUI:
         ttk.Checkbutton(row, text="永久删除，不落 _trash（-H）",
                         variable=self._hard_delete_var).pack(side="left", padx=12)
 
+        row = ttk.Frame(f_opt); row.pack(fill="x", padx=6, pady=3)
+        ttk.Checkbutton(row, text="场景保护 -S（推荐开）",
+                        variable=self._scene_protect_var).pack(side="left")
+        ttk.Label(row, text="   当日剩余上限 (-L)：").pack(side="left")
+        ttk.Spinbox(row, from_=0, to=100000000, increment=1000,
+                    textvariable=self._daily_remain_limit_var, width=10).pack(side="left")
+        ttk.Label(row, text="   watcher 扫描秒：").pack(side="left")
+        ttk.Spinbox(row, from_=0.5, to=60.0, increment=0.5,
+                    textvariable=self._watch_interval_var, width=6, format="%.1f").pack(side="left")
+
         # 后台选项
         f_bg = ttk.LabelFrame(self.root, text="▶ 后台选项")
         f_bg.pack(fill="x", **pad)
@@ -537,6 +551,14 @@ class PipeGUI:
             self._hard_delete_var.set(bool(cfg["hard_delete"]))
         if "minimize_to_tray" in cfg:
             self._minimize_to_tray_var.set(bool(cfg["minimize_to_tray"]))
+        if "scene_protect" in cfg:
+            self._scene_protect_var.set(bool(cfg["scene_protect"]))
+        if "daily_remain_limit" in cfg:
+            try: self._daily_remain_limit_var.set(int(cfg["daily_remain_limit"]))
+            except Exception: pass
+        if "watch_interval" in cfg:
+            try: self._watch_interval_var.set(float(cfg["watch_interval"]))
+            except Exception: pass
 
         # 快捷键
         if cfg.get("hotkey"):
@@ -563,6 +585,9 @@ class PipeGUI:
             "hard_delete": bool(self._hard_delete_var.get()),
             "minimize_to_tray": bool(self._minimize_to_tray_var.get()),
             "hotkey": self._hotkey_var.get(),
+            "scene_protect": bool(self._scene_protect_var.get()),
+            "daily_remain_limit": int(self._daily_remain_limit_var.get()),
+            "watch_interval": float(self._watch_interval_var.get()),
             "selected_subs": [name for name, v in self._sub_vars if v.get()],
         }
 
@@ -725,7 +750,9 @@ class PipeGUI:
             apply=bool(self._apply_var.get()),
             hard_delete=bool(self._hard_delete_var.get()),
             motion_threshold=float(self._motion_var.get()),
-            daily_remain_limit=80000,
+            daily_remain_limit=int(self._daily_remain_limit_var.get()),
+            scene_protect=bool(self._scene_protect_var.get()),
+            watch_interval=float(self._watch_interval_var.get()),
             fingerprint=False,
         )
 
@@ -775,6 +802,9 @@ class PipeGUI:
         self._hard_delete_var.set(True)
         self._minimize_to_tray_var.set(True)
         self._hotkey_var.set("ctrl+alt+p")
+        self._scene_protect_var.set(True)
+        self._daily_remain_limit_var.set(80000)
+        self._watch_interval_var.set(3.0)
         # 清空子目录列表
         for w in self._subs_inner.winfo_children():
             w.destroy()
@@ -927,7 +957,7 @@ class PipeGUI:
         w = tk.Toplevel(self.root)
         self._status_toplevel = w
         w.title("pic-clear 运行状态")
-        w.geometry("520x300")
+        w.geometry("720x520")
         w.protocol("WM_DELETE_WINDOW", lambda: (w.withdraw()))
 
         info = tk.Text(w, font=("Consolas", 10))
@@ -980,6 +1010,33 @@ class PipeGUI:
                 lines.append(f"  状态      : {st.state}    worker PID: {st.pid}")
                 lines.append(f"  进度      : {done} / {st.total_subs}   (失败 {failed})")
                 lines.append(f"  最后消息  : {st.last_message}")
+                # 每个子目录的抽帧/去重进度（marker 驱动，视频粒度）
+                if st.subs:
+                    lines.append("")
+                    lines.append("  子目录进度（抽帧=视频已抽完数，去重=视频已去重数）：")
+                    total_extract = 0
+                    total_dedup = 0
+                    for idx, s in enumerate(st.subs, 1):
+                        name = (s.name or f"sub{idx}")
+                        # 名字过长截断，保证一行不溢
+                        short = name if len(name) <= 28 else name[:25] + "..."
+                        stage_disp = {
+                            "pending": "待处理",
+                            "extracting": "抽帧中",
+                            "done": "抽帧完",
+                            "failed": "失败",
+                            "skipped": "跳过",
+                        }.get(s.stage, s.stage)
+                        ve = int(getattr(s, "videos_extracted", 0) or 0)
+                        vd = int(getattr(s, "videos_deduped", 0) or 0)
+                        total_extract += ve
+                        total_dedup += vd
+                        lines.append(
+                            f"    [{idx:>2}] {short:<28}  {stage_disp:<6}  抽帧={ve:<4}  去重={vd:<4}"
+                        )
+                    lines.append(
+                        f"  合计      : 抽帧={total_extract}  去重={total_dedup}"
+                    )
             else:
                 lines.append("  最新任务  : （无）")
         else:
