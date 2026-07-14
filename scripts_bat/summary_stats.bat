@@ -35,11 +35,11 @@ set "DRIVE_LIST_FILE=%TEMP%\summary_stats_drives_%RANDOM%.txt"
 del /q "%DRIVE_LIST_FILE%" 2>nul
 
 set "IDX=0"
-for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "Get-PSDrive -PSProvider FileSystem ^| ForEach-Object { $_.Root }"`) do (
-    if exist "%%~D" (
+for %%D in (A B C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
+    if exist "%%D:\" (
         set /a IDX+=1
-        echo   [!IDX!] %%~D
-        >>"%DRIVE_LIST_FILE%" echo %%~D
+        echo   [!IDX!] %%D:\
+        >>"%DRIVE_LIST_FILE%" echo %%D:\
     )
 )
 
@@ -86,7 +86,7 @@ set "SUB_LIST_FILE=%TEMP%\summary_stats_subs_%RANDOM%.txt"
 del /q "%SUB_LIST_FILE%" 2>nul
 
 set "SUB_IDX=0"
-for /f "usebackq delims=" %%S in (`powershell -NoProfile -Command "Get-ChildItem -LiteralPath '!CUR_DIR!\' -Directory -ErrorAction SilentlyContinue ^| Sort-Object Name ^| ForEach-Object { $_.Name }"`) do (
+for /f "delims=" %%S in ('dir /ad /b "!CUR_DIR!\" 2^>nul') do (
     set /a SUB_IDX+=1
     echo   [!SUB_IDX!] %%S
     >>"%SUB_LIST_FILE%" echo %%S
