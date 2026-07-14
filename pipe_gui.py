@@ -129,6 +129,25 @@ def check_environment() -> tuple[bool, list[tuple[str, str, str]]]:
         else:
             rows.append((name, "MISS", "  ".join(str(d) for d in _candidate_dirs())))
             all_ok = False
+    # 追加一条 worker 一致性预检：extract_frames / dedupe_pic 必须同源
+    try:
+        ok, resolved, errors = pipeline.preflight_check_workers()
+        if ok:
+            paths = {Path(v).parent for v in resolved.values()}
+            if len(paths) == 1:
+                where = next(iter(paths))
+                rows.append(("worker 一致性", "OK", f"两个 worker 都来自 {where}"))
+            else:
+                # 不太应该出现（一致性预检通过但目录不同）；给个提示
+                rows.append(("worker 一致性", "OK",
+                             "  ,  ".join(f"{k}={v}" for k, v in resolved.items())))
+        else:
+            rows.append(("worker 一致性", "MISS",
+                         " | ".join(errors[:3]) if errors else "预检失败"))
+            all_ok = False
+    except Exception as e:
+        rows.append(("worker 一致性", "MISS", f"预检异常：{e}"))
+        all_ok = False
     return all_ok, rows
 
 

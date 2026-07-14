@@ -228,6 +228,132 @@ def resolve_worker_exe(name: str) -> str:
     return f"{name}.exe"  # 让子进程报错
 
 
+# ------------------------- worker 一致性预检 ---------------------------
+#
+# 规则：pipeline.exe 同目录 与 系统 PATH（比如 System32）里都可能存在
+# extract_frames.exe / dedupe_pic.exe。为避免"一个走同目录、一个走 System32"
+# 的版本错配（导致奇怪的 rc 或找不到参数），启动前做一次强一致性检查：
+#
+#   同目录 2/2 都在  →  锁定同目录，都用这份
+#   同目录 0/2 都不在 →  统一走 PATH（相当于 System32）
+#   同目录 1/2 缺一个 →  报错拒绝启动，让用户补齐
+#
+# 环境变量后门 PIPELINE_XXX_EXE 仍然最优先，但要求"要么都指定要么都不指定"。
+
+WORKER_NAMES = ("extract_frames", "dedupe_pic")
+
+
+def _pipeline_dir() -> Path | None:
+    """pipeline 自身可执行文件所在目录；开发模式（未 freeze）时返回 None。"""
+    if getattr(sys, "frozen", False):
+        try:
+            return Path(sys.executable).resolve().parent
+        except Exception:
+            return None
+    return None
+
+
+def preflight_check_workers() -> tuple[bool, dict, list[str]]:
+    """在启动 submit / worker 之前检查 2 个 worker exe 的一致性。
+
+    返回 (ok, resolved, errors)：
+      - ok:        True 表示可以启动
+      - resolved:  {'extract_frames': 'C:\\...', 'dedupe_pic': 'C:\\...'} 决议后的绝对路径
+      - errors:    ok=False 时给出的多行中文诊断
+
+    检查逻辑（优先级从高到低）：
+      1. 若两个 worker 都由 env 变量 PIPELINE_*_EXE 指定 → 采信；
+         若只指定其中一个 → 报错（不允许半指定）
+      2. pipeline 自身目录里两个都有 → 用同目录
+      3. pipeline 自身目录里一个都没有 → 走 PATH（找不到再报错）
+      4. pipeline 自身目录里只有一个 → 报错，让用户补齐或都挪走
+    """
+    errors: list[str] = []
+    resolved: dict[str, str] = {}
+
+    # ---- Step 1: env override ----
+    env_pairs = {}
+    for name in WORKER_NAMES:
+        v = os.environ.get(f"PIPELINE_{name.upper()}_EXE")
+        if v:
+            env_pairs[name] = v
+    if env_pairs:
+        if len(env_pairs) != len(WORKER_NAMES):
+            missing = [n for n in WORKER_NAMES if n not in env_pairs]
+            errors.append(
+                "[预检] 环境变量 PIPELINE_*_EXE 只指定了部分 worker，"
+                "为避免版本错配，要求'要么都指定，要么都不指定'。"
+            )
+            errors.append(f"       已指定: {list(env_pairs.keys())}")
+            errors.append(f"       缺失: {missing}")
+            return False, {}, errors
+        for name, path in env_pairs.items():
+            if not Path(path).is_file():
+                errors.append(f"[预检] 环境变量 PIPELINE_{name.upper()}_EXE 指向的文件不存在: {path}")
+        if errors:
+            return False, {}, errors
+        return True, {k: str(Path(v).resolve()) for k, v in env_pairs.items()}, []
+
+    # ---- Step 2/3/4: 检查 pipeline 同目录 vs PATH ----
+    pipe_dir = _pipeline_dir()
+    same_dir_hits: dict[str, Path] = {}
+    if pipe_dir is not None:
+        for name in WORKER_NAMES:
+            p = pipe_dir / f"{name}.exe"
+            if p.is_file():
+                same_dir_hits[name] = p
+
+    # 情况 A：同目录都有 → 用同目录
+    if pipe_dir is not None and len(same_dir_hits) == len(WORKER_NAMES):
+        return True, {n: str(p.resolve()) for n, p in same_dir_hits.items()}, []
+
+    # 情况 B：同目录只有一部分 → 报错
+    if pipe_dir is not None and 0 < len(same_dir_hits) < len(WORKER_NAMES):
+        missing = [n for n in WORKER_NAMES if n not in same_dir_hits]
+        hit_list = "、".join(f"{n}.exe" for n in same_dir_hits)
+        miss_list = "、".join(f"{n}.exe" for n in missing)
+        errors.append("[预检] pipeline 同目录下 worker exe 不完整，为避免'一个走同目录、")
+        errors.append("       另一个走 System32'的版本错配，拒绝启动。")
+        errors.append(f"       pipeline 目录: {pipe_dir}")
+        errors.append(f"       同目录已有  : {hit_list}")
+        errors.append(f"       同目录缺失  : {miss_list}")
+        errors.append("")
+        errors.append("       解决方案二选一：")
+        errors.append(f"         A. 把缺失的 {miss_list} 也复制到 {pipe_dir}")
+        errors.append(f"         B. 把已有的 {hit_list} 从 {pipe_dir} 移走，")
+        errors.append("            让所有 worker 统一从 System32（或 PATH）加载")
+        return False, {}, errors
+
+    # 情况 C：同目录一个都没有 → 走 PATH
+    path_hits: dict[str, str] = {}
+    missing_in_path: list[str] = []
+    for name in WORKER_NAMES:
+        p = shutil.which(f"{name}.exe") or shutil.which(name)
+        if p:
+            path_hits[name] = str(Path(p).resolve())
+        else:
+            missing_in_path.append(name)
+    if missing_in_path:
+        errors.append("[预检] 未在 pipeline 同目录、也未在系统 PATH 中找到全部 worker exe：")
+        for name in missing_in_path:
+            errors.append(f"       ✘ 找不到 {name}.exe")
+        errors.append("")
+        errors.append("       解决方案二选一：")
+        errors.append("         A. 把 extract_frames.exe 和 dedupe_pic.exe 一起放到")
+        errors.append(f"            {pipe_dir if pipe_dir else '（pipeline 同目录）'}")
+        errors.append("         B. 或一起放到 C:\\Windows\\System32（管理员权限）")
+        return False, {}, errors
+
+    return True, path_hits, []
+
+
+def _print_preflight_errors(errors: list[str]) -> None:
+    print("=" * 64, file=sys.stderr)
+    for line in errors:
+        print(line, file=sys.stderr)
+    print("=" * 64, file=sys.stderr)
+
+
 def resolve_self_exe() -> str:
     """自身 exe 路径，供 detach 时 spawn 新的 worker 进程。
 
@@ -489,6 +615,13 @@ def cmd_submit(args: argparse.Namespace) -> int:
     data_drive = args.data_drive or DEFAULT_DATA_DRIVE
     data_prefix = args.data_prefix or DEFAULT_DATA_PREFIX
 
+    # 启动前一致性预检：extract_frames.exe / dedupe_pic.exe 必须"要么都在 pipeline
+    # 同目录，要么都走 System32/PATH"，不允许一个走同目录、另一个走 PATH，避免版本错配
+    ok, resolved, errors = preflight_check_workers()
+    if not ok:
+        _print_preflight_errors(errors)
+        return 2
+
     # --- 决定 src_root / subs ---
     if args.auto:
         if not args.src:
@@ -722,6 +855,24 @@ def cmd_worker(args: argparse.Namespace) -> int:
         print(f"[FATAL] job 目录不存在: {job_dir}", file=sys.stderr)
         return 2
 
+    # worker 自身也做一次预检；如果失败，把错误写进 pipeline.log 和 status 便于排查
+    ok, resolved_workers, errors = preflight_check_workers()
+    if not ok:
+        _print_preflight_errors(errors)
+        for line in errors:
+            _pipeline_log(job_dir, f"[预检失败] {line}")
+        # 尝试把 status 标为 failed，方便 pipe_gui/pipeline status 一眼看到
+        try:
+            st = _load_status(job_dir)
+            if st is not None:
+                st.state = "failed"
+                st.last_message = "预检失败：worker exe 一致性检查未通过"
+                st.ended_at = _now_iso()
+                _save_status(job_dir, st)
+        except Exception:
+            pass
+        return 2
+
     manifest = json.loads((job_dir / "manifest.json").read_text(encoding="utf-8"))
     status = _load_status(job_dir)
     if status is None:
@@ -750,8 +901,11 @@ def cmd_worker(args: argparse.Namespace) -> int:
     if watch_interval <= 0:
         watch_interval = 3.0
 
-    extract_exe = resolve_worker_exe("extract_frames")
-    dedupe_exe = resolve_worker_exe("dedupe_pic")
+    # 用 preflight 返回的绝对路径，保证跟 submit 时期望的位置一致
+    extract_exe = resolved_workers.get("extract_frames") or resolve_worker_exe("extract_frames")
+    dedupe_exe = resolved_workers.get("dedupe_pic") or resolve_worker_exe("dedupe_pic")
+    _pipeline_log(job_dir, f"[预检] extract_frames.exe = {extract_exe}")
+    _pipeline_log(job_dir, f"[预检] dedupe_pic.exe     = {dedupe_exe}")
 
     reports_dir = job_dir / "reports"
     reports_dir.mkdir(exist_ok=True)
