@@ -14,6 +14,10 @@ gen_license_gui.py —— license.lic 签发工具（GUI 版）
 
 from __future__ import annotations
 
+# ---- 版本 / 版权 ----
+APP_VERSION = "v0.1.1"
+COPYRIGHT_TEXT = "本工具版权归山东数旗信息科技有限公司所有"
+
 import base64
 import json
 import os
@@ -113,7 +117,7 @@ def sign_license(
 # =========================================================================
 
 class GenLicenseGUI:
-    APP_TITLE = "license.lic 签发工具（内置私钥版，仅限内部）"
+    APP_TITLE = f"license.lic 签发工具（内置私钥版，仅限内部）  {APP_VERSION}"
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -152,6 +156,15 @@ class GenLicenseGUI:
             anchor="w",
         )
         warn.pack(fill="x", padx=8, pady=(8, 0))
+
+        # 版权行（红色）
+        copyright_label = tk.Label(
+            self.root,
+            text=COPYRIGHT_TEXT,
+            fg="red", font=("Microsoft YaHei", 10, "bold"),
+            anchor="w",
+        )
+        copyright_label.pack(fill="x", padx=8, pady=(0, 0))
 
         # 内置私钥状态
         key_hint_frame = tk.Frame(self.root)
@@ -230,6 +243,18 @@ class GenLicenseGUI:
                    width=10).pack(side="left")
         ttk.Button(f_btn, text="退出", command=self.root.destroy,
                    width=10).pack(side="right", padx=10)
+
+        # ---- 底部 status bar：版权 + 版本 ----
+        # 注意：必须先 pack 到 bottom，再 pack 结果 Text，否则 Text 的 expand=True
+        # 会把 status_bar 挤到看不见的地方。
+        status_bar = tk.Label(
+            self.root,
+            text=f"{COPYRIGHT_TEXT}    |    {APP_VERSION}",
+            bd=1, relief="sunken", anchor="e",
+            font=("Microsoft YaHei", 9),
+            fg="gray",
+        )
+        status_bar.pack(side="bottom", fill="x")
 
         # ---- 结果显示 ----
         self._result = tk.Text(self.root, height=6, font=("Consolas", 9))
