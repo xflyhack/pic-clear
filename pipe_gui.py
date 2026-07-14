@@ -357,6 +357,13 @@ class PipeGUI:
         self._hotkey_var = tk.StringVar(value="ctrl+alt+p")
 
         self._sub_vars: list[tuple[str, tk.BooleanVar]] = []
+        # 子目录进度 Label 引用：name -> Label
+        self._sub_progress_labels: dict[str, "ttk.Label"] = {}
+        # 汇总条 StringVar（顶部一句话概览）
+        self._summary_var = tk.StringVar(value="空闲")
+        # 日志窗
+        self._log_toplevel: "tk.Toplevel | None" = None
+        self._log_widgets: dict = {}
 
         # 加载上次的配置（如果有），下面填进各个 tk 变量
         self._loaded_config = _load_config()
@@ -411,6 +418,12 @@ class PipeGUI:
         # 子目录选择
         f_subs = ttk.LabelFrame(self.root, text="▶ 子目录（勾选要处理的）")
         f_subs.pack(fill="both", expand=True, **pad)
+        # 汇总条：顶部一行，展示最新 job 的进度
+        summary_row = ttk.Frame(f_subs)
+        summary_row.pack(fill="x", padx=6, pady=(3, 0))
+        ttk.Label(summary_row, text="当前任务：", foreground="#555").pack(side="left")
+        ttk.Label(summary_row, textvariable=self._summary_var,
+                  foreground="#0057b7").pack(side="left", padx=4)
         top = ttk.Frame(f_subs); top.pack(fill="x", padx=6, pady=3)
         ttk.Button(top, text="扫描/刷新", command=self._rescan_subs).pack(side="left")
         ttk.Button(top, text="全选", command=lambda: self._sub_toggle_all(True)).pack(side="left", padx=6)
@@ -482,6 +495,7 @@ class PipeGUI:
         self._action_state = "run"  # "run" | "stop"
         ttk.Button(f_btn, text="一键杀死所有", command=self._on_kill_all, width=14).pack(side="left", padx=4)
         ttk.Button(f_btn, text="查看状态", command=self.show_status_window, width=14).pack(side="left", padx=4)
+        ttk.Button(f_btn, text="查看日志", command=self.show_log_window, width=14).pack(side="left", padx=4)
         ttk.Button(f_btn, text="最小化到托盘", command=self.hide_to_tray, width=14).pack(side="left", padx=4)
         ttk.Button(f_btn, text="退出", command=self.quit_all, width=10).pack(side="right", padx=4)
         ttk.Button(f_btn, text="重置配置", command=self._on_reset_config, width=10).pack(side="right", padx=4)
@@ -638,6 +652,7 @@ class PipeGUI:
         for w in self._subs_inner.winfo_children():
             w.destroy()
         self._sub_vars.clear()
+        self._sub_progress_labels.clear()
         src = self._src_var.get()
         if not src:
             return
@@ -646,13 +661,21 @@ class PipeGUI:
             ttk.Label(self._subs_inner, text="（该目录下没有子目录，将直接处理整个目录）",
                       foreground="gray").pack(anchor="w")
             return
-        # 6 列布局
-        cols = 6
+        # 单列布局：左边勾选 + 目录名，右边进度 Label
         for i, name in enumerate(subs):
             var = tk.BooleanVar(value=True)
-            cb = ttk.Checkbutton(self._subs_inner, text=name, variable=var)
-            cb.grid(row=i // cols, column=i % cols, sticky="w", padx=6, pady=2)
+            row = ttk.Frame(self._subs_inner)
+            row.grid(row=i, column=0, sticky="ew", padx=4, pady=1)
+            row.columnconfigure(0, weight=1)
+            cb = ttk.Checkbutton(row, text=name, variable=var)
+            cb.grid(row=0, column=0, sticky="w")
+            prog = ttk.Label(row, text="—", foreground="#888",
+                             font=("Consolas", 9), width=42, anchor="e")
+            prog.grid(row=0, column=1, sticky="e", padx=(8, 4))
             self._sub_vars.append((name, var))
+            self._sub_progress_labels[name] = prog
+        # 让 subs_inner 撑满 canvas 宽度，进度列才能贴右
+        self._subs_inner.columnconfigure(0, weight=1)
 
     def _sub_toggle_all(self, value: bool):
         for _, v in self._sub_vars:
@@ -709,6 +732,7 @@ class PipeGUI:
         """每 5 秒轮询一次，自动切换按钮文案。"""
         try:
             self._refresh_action_button()
+            self._refresh_progress_panel()
         finally:
             # 只要主窗口还在就继续轮询
             try:
@@ -717,6 +741,80 @@ class PipeGUI:
             except Exception:
                 pass
 
+    def _refresh_progress_panel(self):
+        """把最新 job 的进度铺到主窗：汇总条 + 每个子目录一行 Label。
+        没任务或输出根找不到，就把进度列清空、汇总条显示空闲。"""
+        # 默认状态
+        summary = "空闲"
+        sub_state: dict[str, tuple[str, int, int]] = {}
+
+        try:
+            out = self._out_var.get().strip()
+            if out and Path(out).is_dir():
+                st = find_latest_job(Path(out))
+                if st:
+                    done = sum(1 for s in st.subs if s.stage == "done")
+                    failed = sum(1 for s in st.subs if s.stage == "failed")
+                    total_ve = sum(int(getattr(s, "videos_extracted", 0) or 0) for s in st.subs)
+                    total_vd = sum(int(getattr(s, "videos_deduped", 0) or 0) for s in st.subs)
+                    alive = pipeline._process_alive(st.pid)
+                    state_disp = st.state
+                    if st.state in ("pending", "running") and not alive:
+                        state_disp = f"{st.state}(worker已退出)"
+                    summary = (
+                        f"{st.job_id}  ·  {state_disp}  ·  "
+                        f"完成 {done}/{st.total_subs}  失败 {failed}  ·  "
+                        f"抽帧 {total_ve}  去重 {total_vd}"
+                    )
+                    if st.last_message:
+                        # 消息太长截一下，避免撑爆汇总条
+                        msg = st.last_message
+                        if len(msg) > 60:
+                            msg = msg[:57] + "..."
+                        summary += f"  ·  {msg}"
+                    for s in st.subs:
+                        sub_state[s.name] = (
+                            s.stage,
+                            int(getattr(s, "videos_extracted", 0) or 0),
+                            int(getattr(s, "videos_deduped", 0) or 0),
+                        )
+        except Exception as e:
+            summary = f"（读取状态失败：{e}）"
+
+        # 汇总条
+        try:
+            self._summary_var.set(summary)
+        except Exception:
+            pass
+
+        # 每个子目录一行进度
+        stage_map = {
+            "pending": "待处理",
+            "extracting": "抽帧中",
+            "done": "抽帧完",
+            "failed": "失败",
+            "skipped": "跳过",
+        }
+        for name, lbl in self._sub_progress_labels.items():
+            try:
+                if name in sub_state:
+                    stage, ve, vd = sub_state[name]
+                    disp = stage_map.get(stage, stage)
+                    fg = "#0057b7"
+                    if stage == "done":
+                        fg = "#0a7f2e"
+                    elif stage == "failed":
+                        fg = "#c0392b"
+                    elif stage == "extracting":
+                        fg = "#d17b00"
+                    lbl.configure(
+                        text=f"{disp}  抽帧={ve:<4} 去重={vd:<4}",
+                        foreground=fg,
+                    )
+                else:
+                    lbl.configure(text="—", foreground="#888")
+            except Exception:
+                pass
     def _on_run(self):
         if not getattr(self, "_env_ok", False):
             if not messagebox.askyesno("环境缺失", "有必需文件缺失，仍然继续吗？"):
@@ -1046,6 +1144,226 @@ class PipeGUI:
         info.delete("1.0", "end")
         info.insert("end", "\n".join(lines))
         info.config(state="disabled")
+
+    # ---------- 日志浮层 ----------
+
+    LOG_TAIL_MAX_BYTES = 200_000  # 首次打开只加载末尾 200KB，防止大日志卡死
+    LOG_TAIL_LINES = 500          # Text 里最多留多少行，超了裁前面
+    LOG_REFRESH_MS = 2000         # 自动 tail 刷新间隔
+
+    def show_log_window(self):
+        if self._log_toplevel is not None and self._log_toplevel.winfo_exists():
+            self._log_toplevel.deiconify()
+            self._log_toplevel.lift()
+            self._log_toplevel.focus_force()
+            return
+        w = tk.Toplevel(self.root)
+        self._log_toplevel = w
+        w.title("pic-clear 日志")
+        w.geometry("900x560")
+        w.protocol("WM_DELETE_WINDOW", lambda: (w.withdraw()))
+
+        # 顶部：日志种类切换 + 当前 job 信息
+        top = ttk.Frame(w); top.pack(fill="x", padx=8, pady=(8, 4))
+        ttk.Label(top, text="日志种类：").pack(side="left")
+        which_var = tk.StringVar(value="worker")
+        cb = ttk.Combobox(top, textvariable=which_var,
+                          values=["worker", "pipeline"],
+                          state="readonly", width=12)
+        cb.pack(side="left", padx=4)
+        job_info_var = tk.StringVar(value="")
+        ttk.Label(top, textvariable=job_info_var, foreground="#555").pack(side="left", padx=12)
+
+        # 文本区
+        mid = ttk.Frame(w); mid.pack(fill="both", expand=True, padx=8, pady=4)
+        txt = tk.Text(mid, font=("Consolas", 9), wrap="none")
+        yscroll = ttk.Scrollbar(mid, orient="vertical", command=txt.yview)
+        xscroll = ttk.Scrollbar(mid, orient="horizontal", command=txt.xview)
+        txt.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        txt.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        mid.rowconfigure(0, weight=1)
+        mid.columnconfigure(0, weight=1)
+        txt.config(state="disabled")
+
+        # 底部按钮
+        auto_tail_var = tk.BooleanVar(value=True)
+        btm = ttk.Frame(w); btm.pack(fill="x", padx=8, pady=(4, 8))
+        ttk.Checkbutton(btm, text="自动 tail（2 秒刷）",
+                        variable=auto_tail_var).pack(side="left")
+        ttk.Button(btm, text="立即刷新",
+                   command=lambda: self._reload_log_text(txt, which_var.get(), job_info_var, full_reload=True)
+                   ).pack(side="left", padx=6)
+        ttk.Button(btm, text="打开 job 目录",
+                   command=self._open_current_job_dir).pack(side="left", padx=6)
+        ttk.Button(btm, text="清屏",
+                   command=lambda: self._clear_log_text(txt)).pack(side="left", padx=6)
+        ttk.Button(btm, text="关闭", command=lambda: w.withdraw()).pack(side="right")
+
+        # 状态存到实例，供 tail 循环用
+        self._log_widgets = {
+            "text": txt,
+            "which": which_var,
+            "auto_tail": auto_tail_var,
+            "job_info": job_info_var,
+            "last_size": {"worker": 0, "pipeline": 0},
+            "last_job_id": None,
+        }
+
+        cb.bind("<<ComboboxSelected>>",
+                lambda e: self._reload_log_text(txt, which_var.get(), job_info_var, full_reload=True))
+
+        # 首次装载
+        self._reload_log_text(txt, which_var.get(), job_info_var, full_reload=True)
+        # 起 tail 循环
+        self._schedule_log_refresh()
+
+    def _resolve_log_path(self, which: str) -> "tuple[Path | None, str | None]":
+        """定位最新 job 的日志文件。返回 (path, job_id)。"""
+        out = self._out_var.get().strip()
+        if not out or not Path(out).is_dir():
+            return None, None
+        st = find_latest_job(Path(out))
+        if not st:
+            return None, None
+        job_dir = pipeline._job_dir(Path(out), st.job_id)
+        fname = "worker.log" if which == "worker" else "pipeline.log"
+        p = job_dir / fname
+        return (p if p.is_file() else None), st.job_id
+
+    def _reload_log_text(self, txt: tk.Text, which: str,
+                         job_info_var: tk.StringVar, full_reload: bool = False):
+        """重新加载日志。full_reload=True 时清空 Text 从末尾 200KB 重装。"""
+        p, job_id = self._resolve_log_path(which)
+        if p is None:
+            self._set_log_content(txt, f"（暂无 {which}.log；请先跑一个任务）")
+            job_info_var.set("（无任务）")
+            self._log_widgets["last_size"][which] = 0
+            self._log_widgets["last_job_id"] = None
+            return
+        # job 切换或强制重载 → 全量重载末尾一段
+        need_full = full_reload or (self._log_widgets.get("last_job_id") != job_id)
+        try:
+            size = p.stat().st_size
+        except OSError:
+            return
+        if need_full:
+            try:
+                with p.open("rb") as f:
+                    if size > self.LOG_TAIL_MAX_BYTES:
+                        f.seek(size - self.LOG_TAIL_MAX_BYTES)
+                        # 跳过残行
+                        f.readline()
+                    content = f.read().decode("utf-8", errors="replace")
+            except Exception as e:
+                content = f"（读取失败：{e}）"
+            self._set_log_content(txt, content)
+            self._log_widgets["last_size"][which] = size
+            self._log_widgets["last_job_id"] = job_id
+            job_info_var.set(f"{job_id}  ·  {p.name}  ·  {size:,} 字节")
+            self._scroll_log_to_end(txt)
+            return
+        # 增量 tail
+        last_size = int(self._log_widgets["last_size"].get(which, 0))
+        if size < last_size:
+            # 文件被截断（不太可能），当作全量重载
+            self._log_widgets["last_size"][which] = 0
+            self._reload_log_text(txt, which, job_info_var, full_reload=True)
+            return
+        if size == last_size:
+            return
+        try:
+            with p.open("rb") as f:
+                f.seek(last_size)
+                chunk = f.read(size - last_size).decode("utf-8", errors="replace")
+        except Exception:
+            return
+        self._append_log_text(txt, chunk)
+        self._log_widgets["last_size"][which] = size
+        job_info_var.set(f"{job_id}  ·  {p.name}  ·  {size:,} 字节")
+
+    def _set_log_content(self, txt: tk.Text, content: str) -> None:
+        txt.config(state="normal")
+        txt.delete("1.0", "end")
+        txt.insert("end", content)
+        self._trim_log_lines(txt)
+        txt.config(state="disabled")
+
+    def _append_log_text(self, txt: tk.Text, chunk: str) -> None:
+        if not chunk:
+            return
+        # 记住滚动位置：如果用户在末尾，追加后自动滚到底；否则不动
+        was_at_end = False
+        try:
+            yv = txt.yview()
+            was_at_end = yv[1] >= 0.999
+        except Exception:
+            pass
+        txt.config(state="normal")
+        txt.insert("end", chunk)
+        self._trim_log_lines(txt)
+        txt.config(state="disabled")
+        if was_at_end:
+            self._scroll_log_to_end(txt)
+
+    def _trim_log_lines(self, txt: tk.Text) -> None:
+        try:
+            total = int(txt.index("end-1c").split(".")[0])
+        except Exception:
+            return
+        if total > self.LOG_TAIL_LINES:
+            over = total - self.LOG_TAIL_LINES
+            txt.delete("1.0", f"{over + 1}.0")
+
+    def _scroll_log_to_end(self, txt: tk.Text) -> None:
+        try:
+            txt.see("end")
+        except Exception:
+            pass
+
+    def _clear_log_text(self, txt: tk.Text) -> None:
+        txt.config(state="normal")
+        txt.delete("1.0", "end")
+        txt.config(state="disabled")
+
+    def _schedule_log_refresh(self):
+        w = self._log_toplevel
+        if w is None or not w.winfo_exists():
+            return
+        try:
+            if w.winfo_viewable() and self._log_widgets.get("auto_tail") and \
+                    self._log_widgets["auto_tail"].get():
+                self._reload_log_text(
+                    self._log_widgets["text"],
+                    self._log_widgets["which"].get(),
+                    self._log_widgets["job_info"],
+                    full_reload=False,
+                )
+        except Exception:
+            pass
+        try:
+            self.root.after(self.LOG_REFRESH_MS, self._schedule_log_refresh)
+        except Exception:
+            pass
+
+    def _open_current_job_dir(self):
+        out = self._out_var.get().strip()
+        if not out or not Path(out).is_dir():
+            messagebox.showinfo("提示", "输出根目录未设置或不存在"); return
+        st = find_latest_job(Path(out))
+        if not st:
+            messagebox.showinfo("提示", "还没有任何任务"); return
+        job_dir = pipeline._job_dir(Path(out), st.job_id)
+        try:
+            if os.name == "nt":
+                os.startfile(str(job_dir))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(job_dir)])
+            else:
+                subprocess.Popen(["xdg-open", str(job_dir)])
+        except Exception as e:
+            messagebox.showerror("失败", f"打开目录失败：{e}")
 
     # ---------- 全局快捷键 ----------
 
