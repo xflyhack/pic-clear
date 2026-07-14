@@ -1,21 +1,21 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
 >nul chcp 65001
+setlocal EnableExtensions EnableDelayedExpansion
 title summary_stats - pic-clear
 
 REM ============================================================
-REM  summary_stats.bat   pic-clear CSV 汇总
+REM  summary_stats.bat   pic-clear CSV   
 REM
-REM  流程：
-REM    Step 0  选盘符
-REM    Step 1  在盘上浏览/钻取，最终选定 stats root
-REM            会递归找 root 下所有 machine_id_*.csv 参与汇总
-REM    Step 2  选粒度(全部 / 单目录精确 / 单目录及子孙)
-REM    Step 3  屏幕汇总 + 询问是否导出 CSV
+REM     
+REM    Step 0     
+REM    Step 1       /        stats root
+REM                 root     machine_id_*.csv     
+REM    Step 2     :   ,      ,       
+REM    Step 3       +        CSV
 REM
-REM  依赖：
-REM    powershell.exe(Windows 自带)
-REM    同目录下 summary_stats_helper.ps1
+REM     
+REM    powershell.exe   -- Windows   
+REM         summary_stats_helper.ps1
 REM ============================================================
 
 set "PS1_HELPER=%~dp0summary_stats_helper.ps1"
@@ -27,7 +27,7 @@ echo ============================================================
 echo.
 
 REM ============================================================
-REM  Step 0  选盘符
+REM  Step 0     
 REM ============================================================
 :MENU_DRIVE
 echo [第一步] 选择数据盘
@@ -75,7 +75,7 @@ echo [已选盘] !CUR_DIR!\
 echo.
 
 REM ============================================================
-REM  Step 1  浏览 / 钻取，选定 stats root
+REM  Step 1     /       stats root
 REM ============================================================
 :BROWSE_LOOP
 echo ============================================================
@@ -159,7 +159,7 @@ echo [已选 stats root] !STATS_ROOT!
 echo.
 
 REM ============================================================
-REM  Step 2  选粒度
+REM  Step 2     
 REM ============================================================
 :MENU_GRAN
 echo [第二步] 统计粒度
