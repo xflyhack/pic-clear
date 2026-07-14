@@ -4,9 +4,9 @@
 
 ## 工具集
 
-本仓库产出 **5 个 Windows exe**，分工不同，各自独立打包：
+本仓库产出 **6 个 Windows exe**，分工不同，各自独立打包：
 
-### 业务 exe（4 个，都需要 `license.lic`）
+### 业务 exe（5 个，都需要 `license.lic`）
 
 | exe | 作用 | 体积 |
 |---|---|---|
@@ -14,8 +14,9 @@
 | **`dedupe_pic.exe`** | 对图片目录做近似去重（dHash）+ YOLO 保护（人/车）+ 前后帧车运动保护 | ~57 MB（含 yolov8n）|
 | **`pipeline.exe`** | 编排层：一键跑抽帧 + 去重，后台 detach，可查状态/停/看日志 | ~10-20 MB |
 | **`pipe_gui.exe`** | `pipeline.exe` 的图形前端，双击运行，托盘 + 快捷键，不习惯命令行的同事用 | ~15-25 MB |
+| **`summary_stats_gui.exe`** | 图形版统计汇总工具，扫 `machine_id_*.csv`，选磁盘 + 目录树钻取 + 汇总 + 导出 CSV | ~15-25 MB |
 
-4 个业务 exe **共用同一份 `license.lic`**，同一台机器只需申请一次授权。
+5 个业务 exe **共用同一份 `license.lic`**，同一台机器只需申请一次授权。
 
 ### 签发工具（1 个，作者用）
 
@@ -51,6 +52,7 @@ h265/mp4 视频目录
 - **会命令行 → `pipeline.exe`**：CLI 提交任务，`pipeline.exe status/logs/stop` 查看和管理。详见 [`docs/pipeline_exe.md`](docs/pipeline_exe.md)。
 - **想极简（老派）→ `scripts_bat/*.bat`**：把 exe 放到 `C:\Windows\System32`，双击 bat 一键跑。详见 [`scripts_bat/README.md`](scripts_bat/README.md)。
 - **想单独抽帧 / 单独去重**：直接调 `extract_frames.exe` / `dedupe_pic.exe`，见下面的分节说明。
+- **想看统计 / 看每台机器删了多少张 → `summary_stats_gui.exe`**：双击打开 GUI，选磁盘 + 目录树钻取到 `data_source` 或某天的目录，点『开始汇总』看当前剩余 / 累计删除 / 按机器分。也能导出 CSV 给老板看。
 - **作者要签发 license.lic**：命令行版 `python gen_license.py`（见"作者签发流程"章节），或图形版 `gen_license_gui.exe`（见 [`docs/gen_license_gui.md`](docs/gen_license_gui.md)）。
 
 ## 场景
