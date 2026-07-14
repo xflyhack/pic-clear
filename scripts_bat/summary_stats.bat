@@ -1,36 +1,28 @@
 @echo off
 >nul chcp 65001
 setlocal EnableExtensions EnableDelayedExpansion
-title summary_stats - pic-clear
+title summary_stats
 
-REM ============================================================
-REM  summary_stats.bat   pic-clear CSV   
-REM
-REM     
-REM    Step 0     
-REM    Step 1       /        stats root
-REM                 root     machine_id_*.csv     
-REM    Step 2     :   ,      ,       
-REM    Step 3       +        CSV
-REM
-REM     
-REM    powershell.exe   -- Windows   
-REM         summary_stats_helper.ps1
-REM ============================================================
+REM ========================================================
+REM  summary_stats.bat  --  aggregate machine_id_*.csv
+REM  Menus intentionally kept ASCII to survive cmd encoding.
+REM  Summary output (Chinese) is emitted by PowerShell where
+REM  the encoding path is clean.
+REM ========================================================
 
 set "PS1_HELPER=%~dp0summary_stats_helper.ps1"
 if not exist "%PS1_HELPER%" goto :ERR_NO_HELPER
 
 echo ============================================================
-echo   pic-clear 统计汇总
+echo   pic-clear stats summary
 echo ============================================================
 echo.
 
-REM ============================================================
-REM  Step 0     
-REM ============================================================
+REM =============================================
+REM  Step 0  choose drive
+REM =============================================
 :MENU_DRIVE
-echo [第一步] 选择数据盘
+echo [Step 1/3] choose drive
 set "DRIVE_LIST_FILE=%TEMP%\summary_stats_drives_%RANDOM%.txt"
 del /q "%DRIVE_LIST_FILE%" 2>nul
 
@@ -44,7 +36,7 @@ for %%D in (A B C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
 )
 
 if "!IDX!"=="0" (
-    echo   [错误] 没有可用盘符
+    echo   [ERR] no drive found
     del /q "%DRIVE_LIST_FILE%" 2>nul
     pause
     exit /b 2
@@ -52,7 +44,7 @@ if "!IDX!"=="0" (
 
 echo.
 set "DRIVE_CHOICE="
-set /p DRIVE_CHOICE="请输入盘符编号(默认 1): "
+set /p DRIVE_CHOICE="drive # (default 1): "
 if not defined DRIVE_CHOICE set "DRIVE_CHOICE=1"
 
 set "CUR_DIR="
@@ -64,22 +56,22 @@ for /f "usebackq delims=" %%L in ("%DRIVE_LIST_FILE%") do (
 del /q "%DRIVE_LIST_FILE%" 2>nul
 
 if not defined CUR_DIR (
-    echo   [错误] 无效编号: !DRIVE_CHOICE!
+    echo   [ERR] invalid: !DRIVE_CHOICE!
     echo.
     goto :MENU_DRIVE
 )
 
 if "!CUR_DIR:~-1!"=="\" set "CUR_DIR=!CUR_DIR:~0,-1!"
 echo.
-echo [已选盘] !CUR_DIR!\
+echo [drive] !CUR_DIR!\
 echo.
 
-REM ============================================================
-REM  Step 1     /       stats root
-REM ============================================================
+REM =============================================
+REM  Step 1  browse / drill
+REM =============================================
 :BROWSE_LOOP
 echo ============================================================
-echo   当前目录: !CUR_DIR!\
+echo   current: !CUR_DIR!\
 echo ============================================================
 
 set "SUB_LIST_FILE=%TEMP%\summary_stats_subs_%RANDOM%.txt"
@@ -93,19 +85,19 @@ for /f "delims=" %%S in ('dir /ad /b "!CUR_DIR!\" 2^>nul') do (
 )
 
 if "!SUB_IDX!"=="0" (
-    echo   [空目录，没有子目录]
+    echo   [empty, no subfolders]
 )
 
 echo.
-echo   [数字]  钻取到对应编号的子目录
-echo   [0]     就用当前目录作为 stats root
-echo   [U]     返回上一级
-echo   [D]     换盘符
-echo   [Q]     退出
+echo   [1-N]  drill into that subfolder
+echo   [0]    use CURRENT dir as stats root
+echo   [U]    go UP one level
+echo   [D]    switch DRIVE
+echo   [Q]    quit
 echo.
 
 set "BROWSE_CHOICE="
-set /p BROWSE_CHOICE="请选择(默认 0): "
+set /p BROWSE_CHOICE="choice (default 0): "
 if not defined BROWSE_CHOICE set "BROWSE_CHOICE=0"
 
 if /I "!BROWSE_CHOICE!"=="Q" (
@@ -135,7 +127,7 @@ for /f "usebackq delims=" %%L in ("%SUB_LIST_FILE%") do (
 del /q "%SUB_LIST_FILE%" 2>nul
 
 if not defined SUB_NAME (
-    echo   [错误] 无效编号: !BROWSE_CHOICE!
+    echo   [ERR] invalid: !BROWSE_CHOICE!
     echo.
     goto :BROWSE_LOOP
 )
@@ -155,20 +147,20 @@ goto :BROWSE_LOOP
 
 :AFTER_ROOT
 echo.
-echo [已选 stats root] !STATS_ROOT!
+echo [stats root] !STATS_ROOT!
 echo.
 
-REM ============================================================
-REM  Step 2     
-REM ============================================================
+REM =============================================
+REM  Step 2  granularity
+REM =============================================
 :MENU_GRAN
-echo [第二步] 统计粒度
-echo   [1] 全部  (递归 stats root 下所有 csv)  (默认)
-echo   [2] 单个目录  (精确匹配 abs_path)
-echo   [3] 目录及子孙  (前缀匹配 abs_path\...)
+echo [Step 2/3] granularity
+echo   [1] all  (recurse the stats root)  (default)
+echo   [2] exact  (match abs_path exactly)
+echo   [3] prefix (abs_path + descendants)
 echo.
 set "GRAN_CHOICE="
-set /p GRAN_CHOICE="请选择 [1/2/3](默认 1): "
+set /p GRAN_CHOICE="choice [1/2/3] (default 1): "
 if not defined GRAN_CHOICE set "GRAN_CHOICE=1"
 
 set "PATH_FILTER="
@@ -178,7 +170,7 @@ if "!GRAN_CHOICE!"=="1" goto :GRAN_ALL
 if "!GRAN_CHOICE!"=="2" goto :GRAN_EXACT
 if "!GRAN_CHOICE!"=="3" goto :GRAN_PREFIX
 
-echo   [错误] 无效选项: !GRAN_CHOICE!
+echo   [ERR] invalid: !GRAN_CHOICE!
 echo.
 goto :MENU_GRAN
 
@@ -188,9 +180,9 @@ goto :AFTER_GRAN
 
 :GRAN_EXACT
 set "PATH_FILTER="
-set /p PATH_FILTER="请输入目录完整路径(可拖拽窗口): "
+set /p PATH_FILTER="input full path (drag-drop ok): "
 if not defined PATH_FILTER (
-    echo   [错误] 未输入路径
+    echo   [ERR] no path
     echo.
     goto :MENU_GRAN
 )
@@ -199,9 +191,9 @@ goto :AFTER_GRAN
 
 :GRAN_PREFIX
 set "PATH_FILTER="
-set /p PATH_FILTER="请输入目录完整路径(可拖拽窗口): "
+set /p PATH_FILTER="input full path (drag-drop ok): "
 if not defined PATH_FILTER (
-    echo   [错误] 未输入路径
+    echo   [ERR] no path
     echo.
     goto :MENU_GRAN
 )
@@ -213,30 +205,30 @@ if defined PATH_FILTER set "PATH_FILTER=!PATH_FILTER:"=!"
 
 echo.
 if "!PATH_MODE!"=="all" (
-    echo [粒度] 全部机器 + 全部目录
+    echo [scope] all machines + all folders
 ) else if "!PATH_MODE!"=="exact" (
-    echo [粒度] 精确: !PATH_FILTER!
+    echo [scope] exact: !PATH_FILTER!
 ) else (
-    echo [粒度] 前缀: !PATH_FILTER!\...
+    echo [scope] prefix: !PATH_FILTER!\...
 )
 
 echo.
 echo ============================================================
-echo   汇总中，请稍候(PowerShell 处理中)...
+echo   [Step 3/3] aggregating (PowerShell) ...
 echo ============================================================
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1_HELPER%" -StatsRoot "!STATS_ROOT!" -PathMode "!PATH_MODE!" -PathFilter "!PATH_FILTER!" -ExportCsv "0"
 
 if errorlevel 1 (
     echo.
-    echo   [错误] PowerShell 汇总失败，errorlevel=!errorlevel!
+    echo   [ERR] PowerShell aggregation failed, errorlevel=!errorlevel!
     pause
     exit /b 3
 )
 
 echo.
 set "EXPORT_CHOICE="
-set /p EXPORT_CHOICE="是否把汇总导出成 CSV? [Y/N](默认 N): "
+set /p EXPORT_CHOICE="export summary to CSV? [Y/N] (default N): "
 if /I "!EXPORT_CHOICE!"=="Y" (
     echo.
     powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1_HELPER%" -StatsRoot "!STATS_ROOT!" -PathMode "!PATH_MODE!" -PathFilter "!PATH_FILTER!" -ExportCsv "1"
@@ -244,13 +236,13 @@ if /I "!EXPORT_CHOICE!"=="Y" (
 
 echo.
 echo ============================================================
-echo   完成
+echo   done.
 echo ============================================================
 pause
 exit /b 0
 
 :ERR_NO_HELPER
-echo [错误] 找不到帮助脚本: %PS1_HELPER%
-echo        请把 summary_stats_helper.ps1 放到 summary_stats.bat 同目录。
+echo [ERR] helper not found: %PS1_HELPER%
+echo       Place summary_stats_helper.ps1 next to summary_stats.bat
 pause
 exit /b 2
