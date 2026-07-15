@@ -29,7 +29,11 @@ from pathlib import Path
 
 import otp_utils
 
-VAULT_DIR = Path(os.path.expanduser("~")) / ".pic-clear-otp"
+# 密钥库位置：优先环境变量 PIC_CLEAR_OTP_VAULT（Docker 挂载 volume 用），
+# 否则默认 ~/.pic-clear-otp。
+_env_vault = os.environ.get("PIC_CLEAR_OTP_VAULT")
+VAULT_DIR = (Path(_env_vault).expanduser() if _env_vault
+             else Path(os.path.expanduser("~")) / ".pic-clear-otp")
 
 
 # ---------- 数据 ----------

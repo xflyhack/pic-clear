@@ -1,0 +1,17 @@
+# 极简 otp_web 镜像：纯标准库，零依赖
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 只拷 web 需要的三个文件
+COPY otp_web.py otp_utils.py otp_admin.py ./
+
+# 密钥库落到 /data，宿主机 volume 挂到这里就实现持久化
+ENV PIC_CLEAR_OTP_VAULT=/data
+RUN mkdir -p /data
+VOLUME ["/data"]
+
+EXPOSE 5000
+
+# 0.0.0.0 才能被容器外访问
+CMD ["python", "otp_web.py", "--host", "0.0.0.0", "--port", "5000"]

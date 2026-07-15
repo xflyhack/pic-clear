@@ -105,3 +105,51 @@ python3 otp_web.py --host 0.0.0.0 --port 8080
 **Q**：算法是标准 TOTP 吗？
 **A**：是。`SHA1` + 30 秒周期 + 6 位数字，兼容 Google Authenticator /
 微软 Authenticator / Authy / 1Password。已过 RFC 6238 官方测试向量。
+
+---
+
+## 六、Docker 部署 otp_web（持久化）
+
+密钥库路径由环境变量 `PIC_CLEAR_OTP_VAULT` 控制（未设置则回落 `~/.pic-clear-otp`）。
+Docker 里把 volume 挂到这个路径即可持久化，容器重建密钥不丢。
+
+### 方式 1：docker compose（推荐）
+
+```bash
+docker compose -f docker-compose.otp_web.yml up -d
+# 打开 http://localhost:5000
+```
+
+- 数据落在 Docker **命名卷** `otp_vault` 里，`docker volume ls` 可见
+- 想直接看宿主机文件：把 compose 里 `otp_vault:/data` 改成 `./otp_vault:/data`
+- 停容器：`docker compose -f docker-compose.otp_web.yml down`
+
+### 方式 2：docker run
+
+```bash
+docker build -f Dockerfile.otp_web -t pic-clear-otp-web .
+
+docker run -d --name pic-clear-otp-web \
+    --restart unless-stopped \
+    -p 5000:5000 \
+    -v /srv/otp_vault:/data \
+    -e PIC_CLEAR_OTP_VAULT=/data \
+    pic-clear-otp-web
+```
+
+### 数据备份 / 迁移
+
+密钥库就是一堆 json 文件，直接打包 `/data` 目录即可：
+
+```bash
+docker cp pic-clear-otp-web:/data ./otp_vault_backup
+# 或者宿主机直接 tar
+tar czf otp_vault.tgz /srv/otp_vault
+```
+
+恢复：把文件塞回挂载目录，重启容器。
+
+### 想让 otp_admin.py 也用同一个库
+
+作者机器上跑签发命令时，`export PIC_CLEAR_OTP_VAULT=/srv/otp_vault` 即可让
+CLI 和 web 共用一份数据。
