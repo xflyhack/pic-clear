@@ -47,6 +47,9 @@ jobs:
         run: |
           cd build_summary_gui
           pyinstaller --onefile --windowed --name summary_stats_gui ^
+            --icon "..\icon.ico" ^
+            --add-data "..\icon.ico;." ^
+            --add-data "..\icon.png;." ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import json ^
             --hidden-import base64 ^

@@ -51,6 +51,7 @@ jobs:
       - name: Build single-file exe (with embedded model + pyarmor runtime)
         run: |
           pyinstaller --onefile --console --name dedupe_pic ^
+            --icon "icon.ico" ^
             --add-data "yolov8n.onnx;." ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import onnxruntime ^

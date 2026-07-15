@@ -37,6 +37,40 @@ import pipeline  # noqa: E402
 
 
 # =========================================================================
+# 图标（icon.ico / icon.png）
+# =========================================================================
+
+def _resource_path(name: str) -> str:
+    """在 dev 模式和 PyInstaller onefile 打包后都能定位到资源文件。"""
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        candidate = os.path.join(base, name)
+        if os.path.exists(candidate):
+            return candidate
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, name)
+
+
+def _apply_window_icon(win) -> None:
+    """给 Tk 窗口设置 pic-clear 图标。Windows 用 .ico，其他平台用 PhotoImage(.png)。
+    失败静默：图标缺失不影响功能。"""
+    try:
+        ico = _resource_path("icon.ico")
+        if os.name == "nt" and os.path.exists(ico):
+            win.iconbitmap(ico)
+            return
+        png = _resource_path("icon.png")
+        if os.path.exists(png):
+            img = tk.PhotoImage(file=png)
+            win.iconphoto(True, img)
+            # 挂到窗口上防止被 GC
+            win._icon_photo_ref = img  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
+
+# =========================================================================
 # 环境自检
 # =========================================================================
 
@@ -834,6 +868,7 @@ def show_license_error_dialog(info: dict) -> None:
     关闭窗口后 sys.exit(3)。"""
     root = tk.Tk()
     root.title("pic-clear 未授权")
+    _apply_window_icon(root)
     root.resizable(False, False)
     try:
         root.attributes("-topmost", True)
@@ -899,7 +934,7 @@ def show_license_error_dialog(info: dict) -> None:
 
 
 class PipeGUI:
-    APP_TITLE = "pic-clear 图形界面"
+    APP_TITLE = "pic-clear"
     APP_VERSION = "v0.1.9"
     APP_COMPANY = "山东数旗信息科技有限公司"
     REFRESH_MS = 5000
@@ -907,6 +942,7 @@ class PipeGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"{self.APP_TITLE}  {self.APP_VERSION}")
+        _apply_window_icon(self.root)
         # 高分屏字号 / 尺寸自适应：main() 里已经调用 _apply_dpi_scaling 并把倍率挂到 root 上
         self._ui_scale = float(getattr(self.root, "__ui_scale__", 1.0))
 
@@ -1843,10 +1879,18 @@ class PipeGUI:
         except Exception as e:
             raise RuntimeError(f"缺少 pystray/Pillow：{e}")
 
-        img = Image.new("RGB", (64, 64), color=(30, 100, 200))
-        d = ImageDraw.Draw(img)
-        d.rectangle((12, 20, 52, 44), fill=(255, 255, 255))
-        d.text((22, 24), "PC", fill=(30, 100, 200))
+        img = None
+        try:
+            icon_png = _resource_path("icon.png")
+            if os.path.exists(icon_png):
+                img = Image.open(icon_png).convert("RGBA")
+        except Exception:
+            img = None
+        if img is None:
+            img = Image.new("RGB", (64, 64), color=(30, 100, 200))
+            d = ImageDraw.Draw(img)
+            d.rectangle((12, 20, 52, 44), fill=(255, 255, 255))
+            d.text((22, 24), "PC", fill=(30, 100, 200))
 
         menu = pystray.Menu(
             pystray.MenuItem("显示主窗口", lambda: self.root.after(0, self.show_main)),
@@ -1900,6 +1944,7 @@ class PipeGUI:
         except Exception:
             return
         top.title("pic-clear 已最小化到托盘")
+        _apply_window_icon(top)
         try:
             top.transient(self.root)
         except Exception:
@@ -1984,6 +2029,7 @@ class PipeGUI:
         w = tk.Toplevel(self.root)
         self._status_toplevel = w
         w.title("pic-clear 运行状态")
+        _apply_window_icon(w)
         w.geometry(_scale_geometry(720, 520, getattr(self, "_ui_scale", 1.0)))
         w.protocol("WM_DELETE_WINDOW", lambda: (w.withdraw()))
 
@@ -2089,6 +2135,7 @@ class PipeGUI:
         w = tk.Toplevel(self.root)
         self._log_toplevel = w
         w.title("pic-clear 日志")
+        _apply_window_icon(w)
         w.geometry(_scale_geometry(900, 560, getattr(self, "_ui_scale", 1.0)))
         w.protocol("WM_DELETE_WINDOW", lambda: (w.withdraw()))
 

@@ -59,6 +59,7 @@ jobs:
         run: |
           cd build_extract
           pyinstaller --onefile --console --name extract_frames ^
+            --icon "..\icon.ico" ^
             --add-binary "..\ffmpeg.exe;." ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import json ^

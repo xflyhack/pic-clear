@@ -43,6 +43,9 @@ jobs:
         run: |
           cd build_gen_license_gui
           pyinstaller --onefile --windowed --name gen_license_gui ^
+            --icon "..\icon.ico" ^
+            --add-data "..\icon.ico;." ^
+            --add-data "..\icon.png;." ^
             --add-data "secrets\private.pem;secrets" ^
             --hidden-import cryptography ^
             --hidden-import cryptography.hazmat.primitives.asymmetric.padding ^

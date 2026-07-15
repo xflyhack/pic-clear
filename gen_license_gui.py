@@ -43,6 +43,36 @@ except Exception as e:
 
 
 # =========================================================================
+# 图标（icon.ico / icon.png）
+# =========================================================================
+
+def _resource_path(name: str) -> str:
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        candidate = os.path.join(base, name)
+        if os.path.exists(candidate):
+            return candidate
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, name)
+
+
+def _apply_window_icon(win) -> None:
+    try:
+        ico = _resource_path("icon.ico")
+        if os.name == "nt" and os.path.exists(ico):
+            win.iconbitmap(ico)
+            return
+        png = _resource_path("icon.png")
+        if os.path.exists(png):
+            img = tk.PhotoImage(file=png)
+            win.iconphoto(True, img)
+            win._icon_photo_ref = img  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+
+
+# =========================================================================
 # 内置私钥定位
 # =========================================================================
 
@@ -117,11 +147,12 @@ def sign_license(
 # =========================================================================
 
 class GenLicenseGUI:
-    APP_TITLE = f"license.lic 签发工具（内置私钥版，仅限内部）  {APP_VERSION}"
+    APP_TITLE = f"pic-clear 授权签发工具（内置私钥，仅限内部）  {APP_VERSION}"
 
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(self.APP_TITLE)
+        _apply_window_icon(self.root)
         self.root.geometry("620x520")
 
         # 状态变量

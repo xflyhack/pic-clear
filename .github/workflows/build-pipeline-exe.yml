@@ -47,6 +47,7 @@ jobs:
         run: |
           cd build_pipeline
           pyinstaller --onefile --console --name pipeline ^
+            --icon "..\icon.ico" ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import json ^
             --hidden-import base64 ^
