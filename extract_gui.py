@@ -41,7 +41,7 @@ import pipeline  # noqa: E402
 
 
 APP_TITLE = "pic-clear 抽帧工具"
-APP_VERSION = "v0.2.0"
+APP_VERSION = "v0.2.1"
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "extract_gui.json"
 HOTKEY_DEFAULT = "ctrl+alt+e"
@@ -674,6 +674,8 @@ def main() -> int:
             sys.exit(3)
 
     root = tk.Tk()
+    # 先隐藏窗口，等 UI 全部构造完再一次性 deiconify，避免"小窗口闪现→变大"
+    root.withdraw()
     try:
         scale = _pg._apply_dpi_scaling(root)
         root.__ui_scale__ = scale
@@ -682,6 +684,8 @@ def main() -> int:
         # 扫描默认子目录
         if app._src_var.get():
             app._rescan_subs()
+        root.update_idletasks()
+        root.deiconify()
         root.mainloop()
     except Exception as e:
         try:

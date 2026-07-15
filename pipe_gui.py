@@ -935,7 +935,7 @@ def show_license_error_dialog(info: dict) -> None:
 
 class PipeGUI:
     APP_TITLE = "pic-clear"
-    APP_VERSION = "v0.1.10"
+    APP_VERSION = "v0.2.1"
     APP_COMPANY = "山东数旗信息科技有限公司"
     REFRESH_MS = 5000
 
@@ -2425,6 +2425,9 @@ def main() -> int:
             sys.exit(3)
 
     root = tk.Tk()
+    # 立刻隐藏窗口，直到所有 UI 构造 + geometry 都定好再显示。
+    # 不这么做就会出现"先弹一个默认小窗口 → 再变大 → 再填充控件"三段闪烁。
+    root.withdraw()
     try:
         # DPI aware 已经在 main() 首行声明过。这里只算 scale 并放大 Tk 字号。
         scale = _apply_dpi_scaling(root)
@@ -2438,6 +2441,9 @@ def main() -> int:
             app._refresh_about_license()
         except Exception:
             pass
+        # 所有 UI 就位，立刻显示；deiconify + update_idletasks 保证一次绘制
+        root.update_idletasks()
+        root.deiconify()
         root.mainloop()
     except Exception as e:
         try:
