@@ -143,6 +143,18 @@ main{
   transform:translateY(-2px);
   box-shadow:0 30px 80px -20px rgba(0,0,0,0.75);
 }
+.card .del-btn{
+  position:absolute; top:10px; right:12px;
+  width:26px; height:26px; border-radius:50%;
+  background:rgba(255,80,80,0.12); border:1px solid rgba(255,80,80,0.35);
+  color:#ff9a9a; font-size:15px; line-height:24px; text-align:center;
+  cursor:pointer; user-select:none; z-index:2;
+  transition: all 0.15s ease;
+}
+.card .del-btn:hover{
+  background:rgba(255,80,80,0.35); color:#fff; transform:scale(1.08);
+}
+
 .card::before{
   content:"";position:absolute;inset:-1px;border-radius:20px;pointer-events:none;
   background:linear-gradient(135deg, rgba(124,231,255,0.30), rgba(164,139,255,0.10), transparent 60%);
@@ -245,6 +257,24 @@ main{
 </svg>
 
 <script>
+async function deleteRec(fp) {
+  if (!confirm(`确认删除机器授权？\n\n指纹：${fp}\n\n此操作不可撤销。`)) return;
+  try {
+    const r = await fetch('/api/delete', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({fingerprint: fp})
+    });
+    const j = await r.json();
+    if (!j.ok) { alert('删除失败：' + (j.msg || '未知错误')); return; }
+    // 立即从 DOM 移掉，避免等下一轮刷新
+    const card = document.querySelector(`.card[data-fp="${fp}"]`);
+    if (card) card.remove();
+  } catch(e) {
+    alert('删除失败：' + e);
+  }
+}
+
 const RING_R = 24;
 const RING_C = 2 * Math.PI * RING_R;
 
@@ -255,6 +285,7 @@ function cardHtml(rec) {
   const nice = code.replace(/(\d{3})(?=\d)/g, '$1 ');
   return `
     <div class="card" data-fp="${rec.fingerprint}" data-period="${period}">
+      <div class="del-btn" title="删除该机器授权" onclick="deleteRec('${rec.fingerprint}')">×</div>
       <div class="row">
         <div class="fp">${rec.fingerprint}</div>
         <div class="who">${rec.issued_to || '未署名'}</div>
@@ -391,6 +422,52 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         self.send_error(404, "Not Found")
+
+    def do_POST(self):  # noqa: N802
+        if self.path == "/api/delete":
+            self._handle_delete()
+            return
+        self.send_error(404, "Not Found")
+
+    def _handle_delete(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            data = json.loads(raw.decode("utf-8")) if raw else {}
+            fp = str(data.get("fingerprint", "")).strip()
+        except Exception as e:
+            return self._json(400, {"ok": False, "msg": f"参数解析失败: {e}"})
+
+        # 只允许 [A-Za-z0-9-]，防路径穿越
+        import re as _re
+        if not fp or not _re.fullmatch(r"[A-Za-z0-9-]{1,64}", fp):
+            return self._json(400, {"ok": False, "msg": "非法指纹"})
+
+        target = VAULT_DIR / f"{fp}.json"
+        try:
+            target = target.resolve()
+            vault = VAULT_DIR.resolve()
+            if not str(target).startswith(str(vault) + os.sep):
+                return self._json(400, {"ok": False, "msg": "路径越界"})
+        except Exception as e:
+            return self._json(500, {"ok": False, "msg": f"路径解析失败: {e}"})
+
+        if not target.is_file():
+            return self._json(404, {"ok": False, "msg": "记录不存在"})
+        try:
+            target.unlink()
+        except Exception as e:
+            return self._json(500, {"ok": False, "msg": f"删除失败: {e}"})
+        return self._json(200, {"ok": True})
+
+    def _json(self, status: int, obj: dict):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, fmt, *args):  # 静音默认日志，避免刷屏
         return
