@@ -122,22 +122,57 @@ h265/mp4 视频目录
 适合多人共享堡垒机的场景。特点：
 
 - 完全离线（TOTP，参考 RFC 6238，兼容 Google / 微软 Authenticator）
-- 通过后 **24 小时**内三个 GUI 都免输入
+- 通过后 **24 小时**内三个 GUI 都免输入（`~/.pic-clear/otp_session.json`）
+- 错 3 次冷却 60 秒，容忍时钟偏差 ±90 秒
 - 没有 `otp.secret` 文件时**自动跳过**，不影响老用户
 - 环境变量 `PIC_CLEAR_SKIP_OTP=1` 可临时关闭
+- 密钥库位置由 `PIC_CLEAR_OTP_VAULT` 环境变量控制（未设置回落 `~/.pic-clear-otp`）
 
-**作者签发**：
+### 作者签发
+
 ```bash
+# 方式 A：命令行签发（旧）
 /tmp/pic_venv/bin/python otp_admin.py generate <指纹> \
     --issued-to <名字> --write-secret-to /tmp/otp.secret
+
+# 方式 B：网页签发（新，推荐）
+/tmp/pic_venv/bin/python otp_web.py --host 127.0.0.1 --port 5000
+# 浏览器打开 http://127.0.0.1:5000，右上角"+ 添加机器"，填三项：
+#   - 机器指纹  （用户在堡垒机 exe 上打印）
+#   - 机器 ID / IP （一般填机器 IP，用于识别）
+#   - 颁发给     （使用人名字）
 ```
 
-**用户使用**：把 `otp.secret` 跟 `license.lic` 一起放到 exe 同目录即可。
+### 用户使用
 
-**多机器实时面板**（毛玻璃黑色主题网页）：
+- 把 `otp.secret` 跟 `license.lic` 一起放到 exe 同目录
+- 双击 exe → 授权通过 → 弹 6 位口令对话框 → 输入即可
+- 6 位口令从 Authenticator / 作者的网页面板 / 作者的 `otp_admin.py current` 命令拿
+
+### 网页面板（毛玻璃黑色主题）
+
 ```bash
 python3 otp_web.py --host 127.0.0.1 --port 5000
+# 局域网共享
+python3 otp_web.py --host 0.0.0.0 --port 5000
 ```
+
+功能：
+- 每台机器一张毛玻璃卡片，6 位大字号数字每秒刷新，30 秒环形倒计时
+- 点数字复制到剪贴板
+- 卡片 hover 出现小三点按钮 → 两步确认删除（防误触）
+- 顶部 "+ 添加机器" 按钮，弹窗签发新机器（指纹 / 机器 ID / 颁发给 三项必填）
+
+### Docker 部署 otp_web（持久化）
+
+```bash
+docker compose -f docker-compose.otp_web.yml up -d
+# 打开 http://localhost:5000
+```
+
+- 数据落在 Docker 命名卷 `otp_vault` 里，容器重建密钥不丢
+- 想直接看宿主机文件：把 compose 里 `otp_vault:/data` 改成 `./otp_vault:/data`
+- 想让本地 `otp_admin.py` 也用这个库：`export PIC_CLEAR_OTP_VAULT=/srv/otp_vault`
 
 完整文档见 `docs/otp.md`。
 
