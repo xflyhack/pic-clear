@@ -433,11 +433,53 @@ def _tip_icon(parent: "tk.Widget", text: str) -> "tk.Label":
 _TK_DEFAULT_SCALING = 96.0 / 72.0
 
 
+def _query_windows_dpi() -> float | None:
+    """直接问 Windows 系统真实 DPI。
+
+    Tk 自己的 winfo_fpixels("1i") 在 PyInstaller 打包 + 部分虚拟机 / 未声明
+    DPI aware 的场景下会永远返回 96，导致 scale 一直算成 1.0。所以我们
+    优先用 Windows API：
+      1) GetDpiForSystem   Win10 1607+：系统 DPI（跟"显示设置"里那个 % 一致）
+      2) GetDeviceCaps     兜底：桌面 DC 的 LOGPIXELSY
+      3) 返回 None         非 Windows 或调用全部失败
+    """
+    if os.name != "nt":
+        return None
+    try:
+        from ctypes import windll
+    except Exception:
+        return None
+    # 1) GetDpiForSystem —— 最准，跟 Windows 显示设置里的 % 完全一致
+    try:
+        dpi = int(windll.user32.GetDpiForSystem())
+        if dpi > 0:
+            return float(dpi)
+    except Exception:
+        pass
+    # 2) GetDeviceCaps(hdc, LOGPIXELSY=90) —— 老 Windows 也能用
+    try:
+        LOGPIXELSY = 90
+        hdc = windll.user32.GetDC(0)
+        if hdc:
+            try:
+                dpi = int(windll.gdi32.GetDeviceCaps(hdc, LOGPIXELSY))
+                if dpi > 0:
+                    return float(dpi)
+            finally:
+                windll.user32.ReleaseDC(0, hdc)
+    except Exception:
+        pass
+    return None
+
+
 def _apply_dpi_scaling(root: "tk.Tk", *, min_scale: float = 1.0,
                        max_scale: float = 3.0) -> float:
     """把 Tk 的字号和 pixel 尺度按屏幕 DPI 放大。
 
-    - 通过 winfo_fpixels("1i") 拿到"1 英寸多少像素"，即真实 DPI
+    - 优先用 Windows API（GetDpiForSystem / GetDeviceCaps）拿真实 DPI；
+      拿不到再退回到 Tk 的 winfo_fpixels("1i")
+    - 环境变量 PIC_CLEAR_UI_SCALE 可强制指定倍率（相对 100%），
+      调试或虚拟机 DPI 透传不准时救急用
     - Tk scaling 单位是"点/像素"，正确公式是 dpi / 72
     - 结果做上下限 clamp，防止极端 DPI（比如虚拟机报 300+）把 UI 撑爆
     - 返回值是"用户实际 scale ÷ Tk 默认 scale"，调用方可以把硬编码 geometry
@@ -449,10 +491,28 @@ def _apply_dpi_scaling(root: "tk.Tk", *, min_scale: float = 1.0,
       150% 屏（144dpi） → 1.50
       200% 屏（192dpi） → 2.00
     """
-    try:
-        dpi = float(root.winfo_fpixels("1i"))
-    except Exception:
-        dpi = 96.0
+    # 0) 环境变量强制指定：PIC_CLEAR_UI_SCALE=1.5 → 相当于 144dpi
+    env_scale = os.environ.get("PIC_CLEAR_UI_SCALE", "").strip()
+    if env_scale:
+        try:
+            forced = float(env_scale)
+            if forced > 0:
+                dpi = 96.0 * forced
+            else:
+                dpi = None
+        except Exception:
+            dpi = None
+    else:
+        dpi = None
+    # 1) Windows API
+    if dpi is None:
+        dpi = _query_windows_dpi()
+    # 2) 兜底：Tk 自己
+    if dpi is None:
+        try:
+            dpi = float(root.winfo_fpixels("1i"))
+        except Exception:
+            dpi = 96.0
     if dpi <= 0:
         dpi = 96.0
     scaling = dpi / 72.0
@@ -488,6 +548,125 @@ def _enable_hidpi_awareness() -> None:
             windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
+
+
+def _run_diag_dpi() -> int:
+    """`pipe_gui.exe --diag-dpi` 入口：打印 DPI 相关状态方便排障。
+
+    输出去向：
+      - 同时写到 stdout（cmd 直接运行时能看到）
+      - 同时写到 %TEMP%\\pic_clear_diag_dpi.txt
+      - 最后弹一个 Tk messagebox 展示全文（因为 --windowed 打包吞掉了 stdout）
+
+    信息内容：
+      - Windows 版本（sys.getwindowsversion）
+      - Process DPI awareness 当前值（GetProcessDpiAwareness）
+      - GetDpiForSystem 返回值
+      - GetDeviceCaps(LOGPIXELSY) 返回值
+      - 一个瞬时的 Tk 根窗口的 winfo_fpixels("1i") 读数
+      - _apply_dpi_scaling 最终选出来的 scale
+      - PIC_CLEAR_UI_SCALE 环境变量当前值
+    退出码 0。
+    """
+    lines: list[str] = []
+    def _p(s: str) -> None:
+        lines.append(s)
+        try:
+            print(s)
+        except Exception:
+            pass
+
+    _p("=" * 60)
+    _p("  pipe_gui.exe --diag-dpi")
+    _p("=" * 60)
+    _p(f"[python]   {sys.version.splitlines()[0]}")
+    _p(f"[platform] os.name={os.name}  sys.platform={sys.platform}")
+    _p(f"[env]      PIC_CLEAR_UI_SCALE={os.environ.get('PIC_CLEAR_UI_SCALE','(未设置)')}")
+
+    if os.name == "nt":
+        try:
+            wv = sys.getwindowsversion()
+            _p(f"[winver]   major={wv.major} minor={wv.minor} build={wv.build}")
+        except Exception as e:
+            _p(f"[winver]   查询失败: {e}")
+        try:
+            from ctypes import windll, c_int, byref
+            # GetProcessDpiAwareness（Win8.1+）
+            try:
+                v = c_int(-1)
+                # 参数 0 表示当前进程
+                windll.shcore.GetProcessDpiAwareness(0, byref(v))
+                names = {0: "UNAWARE", 1: "SYSTEM_AWARE", 2: "PER_MONITOR_AWARE"}
+                _p(f"[awareness] GetProcessDpiAwareness = {v.value} ({names.get(v.value,'?')})")
+            except Exception as e:
+                _p(f"[awareness] GetProcessDpiAwareness 失败: {e}")
+            # GetDpiForSystem（Win10 1607+）
+            try:
+                dpi_sys = int(windll.user32.GetDpiForSystem())
+                _p(f"[dpi]      GetDpiForSystem = {dpi_sys}  (100%=96, 125%=120, 150%=144, 200%=192)")
+            except Exception as e:
+                _p(f"[dpi]      GetDpiForSystem 失败: {e}")
+            # GetDeviceCaps
+            try:
+                LOGPIXELSY = 90
+                hdc = windll.user32.GetDC(0)
+                if hdc:
+                    try:
+                        dpi_dc = int(windll.gdi32.GetDeviceCaps(hdc, LOGPIXELSY))
+                    finally:
+                        windll.user32.ReleaseDC(0, hdc)
+                    _p(f"[dpi]      GetDeviceCaps(LOGPIXELSY) = {dpi_dc}")
+                else:
+                    _p("[dpi]      GetDC(0) 返回 0")
+            except Exception as e:
+                _p(f"[dpi]      GetDeviceCaps 失败: {e}")
+        except Exception as e:
+            _p(f"[dpi]      ctypes.windll 加载失败: {e}")
+
+    q = _query_windows_dpi()
+    _p(f"[final]    _query_windows_dpi() = {q}")
+
+    # 起一个隐藏 Tk 根，只为拿 winfo_fpixels，然后立刻销毁
+    tk_root = None
+    try:
+        tk_root = tk.Tk()
+        tk_root.withdraw()
+        try:
+            fpx = float(tk_root.winfo_fpixels("1i"))
+        except Exception as e:
+            fpx = f"失败: {e}"
+        try:
+            scale = _apply_dpi_scaling(tk_root)
+        except Exception as e:
+            scale = f"失败: {e}"
+        _p(f"[tk]       winfo_fpixels('1i') = {fpx}")
+        _p(f"[tk]       _apply_dpi_scaling  = {scale}")
+    except Exception as e:
+        _p(f"[tk]       Tk 初始化失败: {e}")
+
+    _p("=" * 60)
+
+    # 写文件（诊断结果落盘，无论 stdout 是否被吞）
+    try:
+        import tempfile
+        report_path = Path(tempfile.gettempdir()) / "pic_clear_diag_dpi.txt"
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+        _p(f"[report]   已写入 {report_path}")
+    except Exception as e:
+        _p(f"[report]   写入失败: {e}")
+
+    # 用 messagebox 展示（--windowed 打包吞了 stdout，需要 GUI 显示）
+    if tk_root is not None:
+        try:
+            messagebox.showinfo("pipe_gui --diag-dpi 诊断", "\n".join(lines))
+        except Exception:
+            pass
+        try:
+            tk_root.destroy()
+        except Exception:
+            pass
+
+    return 0
 
 
 # --- 授权信息辅助 -----------------------------------------------------------
@@ -642,7 +821,7 @@ def show_license_error_dialog(info: dict) -> None:
 
 class PipeGUI:
     APP_TITLE = "pic-clear 图形界面"
-    APP_VERSION = "v0.1.6"
+    APP_VERSION = "v0.1.7"
     APP_COMPANY = "山东数旗信息科技有限公司"
     REFRESH_MS = 5000
 
@@ -1982,6 +2161,15 @@ def _looks_like_cli() -> bool:
 
 
 def main() -> int:
+    # ---- 高 DPI 感知必须在任何 Tk / GUI 代码之前调用 ----
+    # 移到 main() 首行：老实现放在 tk.Tk() 之后，导致 Windows 已经用低分辨率
+    # 位图创建了 Tk 根窗口，再声明就来不及了（表现为字号偏小）。
+    _enable_hidpi_awareness()
+
+    # ---- 诊断参数：--diag-dpi 打印 DPI 相关信息后直接退出 ----
+    if "--diag-dpi" in sys.argv[1:]:
+        return _run_diag_dpi()
+
     # ---- CLI 短路：命中 pipeline 子命令时，直接把控制权交给 pipeline.main() ----
     # 这是修复"detach worker 又开 GUI"和"worker 未运行"两个问题的关键。
     if _looks_like_cli():
@@ -2009,9 +2197,7 @@ def main() -> int:
 
     root = tk.Tk()
     try:
-        # Windows 高 DPI 适配：先跟系统声明"我们自己管缩放"，
-        # 再让 Tk 按屏幕 DPI 放大字号和 pixel 尺度
-        _enable_hidpi_awareness()
+        # DPI aware 已经在 main() 首行声明过。这里只算 scale 并放大 Tk 字号。
         scale = _apply_dpi_scaling(root)
         # 把 scale 挂到 root 上，供后续窗口（状态浮层、日志浮层）复用
         root.__ui_scale__ = scale
