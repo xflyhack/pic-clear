@@ -1028,9 +1028,230 @@ def show_license_error_dialog(info: dict) -> None:
     root.mainloop()
 
 
+
+
+# ==================== TOTP 动态口令（v0.3.0 新增） ====================
+# 说明：
+# - 密钥文件 otp.secret（单行 base32）与 license.lic 并列放在 exe 同目录。
+# - 通过后写 ~/.pic-clear/otp_session.json，24 小时内启动不再要求输入。
+# - 三个 GUI (pipe_gui / extract_gui / dedupe_gui) 共用同一份 session。
+# - 兼容开关：环境变量 PIC_CLEAR_SKIP_OTP=1 跳过；otp.secret 不存在也跳过。
+# - 6 位口令，容忍 ±90 秒（otp_utils.verify window=3）。
+# - 错 3 次 → 冷却 60 秒。
+# - 用户取消 / 关闭对话框 → sys.exit(4)。
+
+OTP_SECRET_FILENAME = "otp.secret"
+OTP_SESSION_PATH = Path.home() / ".pic-clear" / "otp_session.json"
+OTP_SESSION_TTL = 24 * 3600
+OTP_LOCKOUT_ATTEMPTS = 3
+OTP_LOCKOUT_SECONDS = 60
+
+
+def _resolve_otp_secret_path() -> Path:
+    """otp.secret 的位置策略跟 license.lic 一致：
+    优先环境变量 PIC_CLEAR_OTP_SECRET → frozen 模式取 exe 同目录 → 否则取 CWD。"""
+    env_p = os.environ.get("PIC_CLEAR_OTP_SECRET")
+    if env_p:
+        return Path(env_p).expanduser().resolve()
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / OTP_SECRET_FILENAME
+    return Path.cwd() / OTP_SECRET_FILENAME
+
+
+def _read_otp_secret() -> str | None:
+    """读 otp.secret（第一行有效的 base32），不存在或空文件返回 None。"""
+    try:
+        p = _resolve_otp_secret_path()
+        if not p.is_file():
+            return None
+        for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                return line
+    except Exception:
+        return None
+    return None
+
+
+def _otp_session_alive() -> bool:
+    """当前 session 是否还在 24h 有效期内。"""
+    try:
+        if not OTP_SESSION_PATH.is_file():
+            return False
+        data = json.loads(OTP_SESSION_PATH.read_text(encoding="utf-8"))
+        exp = float(data.get("expires_at", 0))
+        return exp > time.time()
+    except Exception:
+        return False
+
+
+def _otp_session_mark_ok() -> None:
+    """记一次通过验证，24h 内不再要求输入。"""
+    try:
+        OTP_SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+        OTP_SESSION_PATH.write_text(
+            json.dumps({"expires_at": time.time() + OTP_SESSION_TTL},
+                       ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def show_otp_dialog(secret: str) -> bool:
+    """弹出一个 6 位口令输入框，返回 True 表示验证通过。
+    - Enter 提交，满 6 位数字自动提交
+    - 错 OTP_LOCKOUT_ATTEMPTS 次后冷却 OTP_LOCKOUT_SECONDS 秒（每秒刷新倒计时）
+    - 用户关窗口 / 点『退出』返回 False
+    """
+    try:
+        from otp_utils import verify as _otp_verify
+    except Exception as e:
+        # otp_utils 都读不到，属于打包/环境异常；保守放行避免误伤
+        print(f"[OTP] 加载 otp_utils 失败：{e}", file=sys.stderr)
+        return True
+
+    root = tk.Tk()
+    root.title("pic-clear 动态口令")
+    _apply_window_icon(root)
+    root.resizable(False, False)
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    _enable_hidpi_awareness()
+    scale = _apply_dpi_scaling(root)
+    root.geometry(_scale_geometry(420, 260, scale))
+
+    state = {"ok": False, "attempts": 0, "lock_until": 0.0}
+
+    tk.Label(root, text="请输入 6 位动态口令",
+             font=("Microsoft YaHei", 14, "bold")).pack(pady=(16, 4))
+    tk.Label(root, text="口令每 30 秒变化一次，容忍 ±90 秒",
+             foreground="#666", font=("Microsoft YaHei", 9)).pack()
+
+    entry_var = tk.StringVar()
+    entry = ttk.Entry(root, textvariable=entry_var,
+                      width=10, justify="center",
+                      font=("Consolas", 22, "bold"))
+    entry.pack(pady=(14, 6))
+    entry.focus_set()
+
+    msg_var = tk.StringVar(value="")
+    msg_lbl = tk.Label(root, textvariable=msg_var,
+                       foreground="#c0392b", font=("Microsoft YaHei", 10))
+    msg_lbl.pack(pady=(2, 6))
+
+    btn_frame = tk.Frame(root)
+    btn_frame.pack(pady=(4, 8))
+
+    def _in_lockout() -> float:
+        remain = state["lock_until"] - time.time()
+        return remain if remain > 0 else 0.0
+
+    def _tick_lockout():
+        remain = _in_lockout()
+        if remain > 0:
+            msg_var.set(f"输入次数过多，请等待 {int(remain)+1} 秒…")
+            entry.configure(state="disabled")
+            root.after(1000, _tick_lockout)
+        else:
+            msg_var.set("")
+            entry.configure(state="normal")
+            entry.focus_set()
+
+    def _do_submit(event=None):
+        if _in_lockout() > 0:
+            return
+        code = "".join(ch for ch in (entry_var.get() or "") if ch.isdigit())
+        if len(code) != 6:
+            msg_var.set("请输入 6 位数字")
+            return
+        try:
+            ok = _otp_verify(secret, code, window=3)
+        except Exception as e:
+            msg_var.set(f"验证异常：{e}")
+            return
+        if ok:
+            state["ok"] = True
+            _otp_session_mark_ok()
+            try:
+                root.destroy()
+            except Exception:
+                pass
+            return
+        state["attempts"] += 1
+        remain = OTP_LOCKOUT_ATTEMPTS - state["attempts"]
+        entry_var.set("")
+        if remain <= 0:
+            state["attempts"] = 0
+            state["lock_until"] = time.time() + OTP_LOCKOUT_SECONDS
+            _tick_lockout()
+        else:
+            msg_var.set(f"口令错误，还剩 {remain} 次机会")
+
+    def _do_cancel():
+        state["ok"] = False
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    ttk.Button(btn_frame, text="确定", command=_do_submit, width=10).pack(side="left", padx=4)
+    ttk.Button(btn_frame, text="退出", command=_do_cancel, width=10).pack(side="left", padx=4)
+
+    entry.bind("<Return>", _do_submit)
+
+    def _on_key_release(event=None):
+        code = "".join(ch for ch in (entry_var.get() or "") if ch.isdigit())
+        if code != (entry_var.get() or ""):
+            # 去掉非数字
+            entry_var.set(code[:6])
+        if len(code) >= 6:
+            _do_submit()
+    entry.bind("<KeyRelease>", _on_key_release)
+
+    root.protocol("WM_DELETE_WINDOW", _do_cancel)
+    try:
+        root.mainloop()
+    except Exception:
+        pass
+
+    return bool(state.get("ok"))
+
+
+def require_otp_or_die() -> None:
+    """三个 GUI 的 main() 在授权检查通过后调用一次。
+    - 环境变量 PIC_CLEAR_SKIP_OTP=1 → 跳过
+    - otp.secret 不存在 → 跳过（向后兼容旧用户）
+    - 24h 内已通过 → 跳过
+    - 否则弹口令对话框；不通过 sys.exit(4)
+    """
+    if os.environ.get("PIC_CLEAR_SKIP_OTP") == "1":
+        return
+    secret = _read_otp_secret()
+    if not secret:
+        return
+    if _otp_session_alive():
+        return
+    ok = False
+    try:
+        ok = show_otp_dialog(secret)
+    except Exception as e:
+        print(f"[OTP] 对话框异常：{e}", file=sys.stderr)
+        # 弹框失败，保守放行（避免打包环境个例把用户锁死）
+        return
+    if not ok:
+        sys.exit(4)
+
+
+# ==================== TOTP 动态口令 END ====================
+
+
 class PipeGUI:
     APP_TITLE = "pic-clear"
-    APP_VERSION = "v0.2.2"
+    APP_VERSION = "v0.3.0"
     APP_COMPANY = "山东数旗信息科技有限公司"
     REFRESH_MS = 5000
 
@@ -1583,6 +1804,31 @@ class PipeGUI:
             path_entry.insert(0, str(lic_path))
             path_entry.config(state="readonly")
             path_entry.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        # ---- 动态口令（OTP）状态 ----
+        try:
+            otp_path = _resolve_otp_secret_path()
+            has_secret = otp_path.is_file()
+            session_alive = _otp_session_alive()
+        except Exception:
+            otp_path = None
+            has_secret = False
+            session_alive = False
+        row = ttk.Frame(f_lic); row.pack(fill="x", padx=10, pady=(4, 6))
+        ttk.Label(row, text="动态口令：", width=12,
+                  foreground="#555").pack(side="left")
+        if not has_secret:
+            ttk.Label(row, text="未启用（无 otp.secret 文件）",
+                      foreground="#888",
+                      font=("Microsoft YaHei", 10)).pack(side="left")
+        elif session_alive:
+            ttk.Label(row, text="✔ 已通过（24 小时内免输入）",
+                      foreground="#0a7f2e",
+                      font=("Microsoft YaHei", 10, "bold")).pack(side="left")
+        else:
+            ttk.Label(row, text="已启用，下次启动需重新输入 6 位口令",
+                      foreground="#0057b7",
+                      font=("Microsoft YaHei", 10)).pack(side="left")
 
     # ---------- 环境检测 ----------
 
@@ -2646,6 +2892,10 @@ def main() -> int:
                       file=sys.stderr)
                 print(f"[授权] 对话框展示失败: {e}", file=sys.stderr)
             sys.exit(3)
+
+    # ---- 动态口令（TOTP，v0.3.0 新增） ----
+    # 授权通过后再验；未通过 sys.exit(4)。兼容行为见 require_otp_or_die 注释。
+    require_otp_or_die()
 
     root = tk.Tk()
     # 立刻隐藏窗口，直到所有 UI 构造 + geometry 都定好再显示。

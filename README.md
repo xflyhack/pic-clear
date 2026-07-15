@@ -116,6 +116,31 @@ h265/mp4 视频目录
   - 组内任何图触发保护（含 `person` 硬保护 / 相邻帧车变化 / 场景保护）→ **全部 KEEP**
   - 组内全部未保护 → 按 `--strategy` 挑一张 KEEP，其余 DELETE
 
+## 动态口令（可选，v0.3.0+）
+
+在 `license.lic` 之上，可以再加一层**每天首次启动必须输 6 位数字**的二次验证，
+适合多人共享堡垒机的场景。特点：
+
+- 完全离线（TOTP，参考 RFC 6238，兼容 Google / 微软 Authenticator）
+- 通过后 **24 小时**内三个 GUI 都免输入
+- 没有 `otp.secret` 文件时**自动跳过**，不影响老用户
+- 环境变量 `PIC_CLEAR_SKIP_OTP=1` 可临时关闭
+
+**作者签发**：
+```bash
+/tmp/pic_venv/bin/python otp_admin.py generate <指纹> \
+    --issued-to <名字> --write-secret-to /tmp/otp.secret
+```
+
+**用户使用**：把 `otp.secret` 跟 `license.lic` 一起放到 exe 同目录即可。
+
+**多机器实时面板**（毛玻璃黑色主题网页）：
+```bash
+python3 otp_web.py --host 127.0.0.1 --port 5000
+```
+
+完整文档见 `docs/otp.md`。
+
 ## 授权
 
 exe **必须搭配 license.lic 才能运行**。授权采用 **RSA-2048 签名 + 机器指纹（主板序列号+磁盘序列号+主机名）** 绑定，一台机一份。

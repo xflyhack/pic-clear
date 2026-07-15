@@ -41,7 +41,7 @@ import pipeline  # noqa: E402
 
 
 APP_TITLE = "pic-clear 抽帧工具"
-APP_VERSION = "v0.2.2"
+APP_VERSION = "v0.3.0"
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "extract_gui.json"
 HOTKEY_DEFAULT = "ctrl+alt+e"
@@ -672,6 +672,9 @@ def main() -> int:
             except Exception:
                 print(f"[授权] {license_info.get('msg')}", file=sys.stderr)
             sys.exit(3)
+
+    # ---- 动态口令（TOTP，v0.3.0 新增），未通过 sys.exit(4) ----
+    _pg.require_otp_or_die()
 
     root = tk.Tk()
     # 先隐藏窗口，等 UI 全部构造完再一次性 deiconify，避免"小窗口闪现→变大"
