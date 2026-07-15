@@ -123,6 +123,16 @@ header h1{
   -webkit-background-clip:text;background-clip:text;color:transparent;
 }
 header .sub{color:var(--text-dim);font-size:13px}
+header .brand{
+  margin-top:4px;
+  font-size:11px;
+  letter-spacing:1px;
+  color:var(--text-dim);
+  opacity:0.55;
+  background:linear-gradient(90deg,var(--hi),var(--hi-2));
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  font-weight:500;
+}
 header .meta{color:var(--text-dim);font-size:12px}
 
 /* 添加机器按钮 */
@@ -399,6 +409,7 @@ main{
   <div>
     <h1>pic-clear · TOTP 面板</h1>
     <div class="sub">共享密钥离线动态口令 · 每 30 秒刷新</div>
+    <div class="brand">© 山东数旗信息科技有限公司</div>
   </div>
   <div style="display:flex;align-items:center;gap:16px;">
     <div class="btn-add" onclick="openAddModal()">
