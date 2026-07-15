@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -122,6 +123,127 @@ header h1{
 }
 header .sub{color:var(--text-dim);font-size:13px}
 header .meta{color:var(--text-dim);font-size:12px}
+
+/* 添加机器按钮 */
+.btn-add{
+  display:inline-flex; align-items:center; gap:6px;
+  padding:8px 16px; border-radius:20px;
+  background:linear-gradient(135deg, rgba(124,231,255,0.18), rgba(164,139,255,0.22));
+  border:1px solid rgba(164,139,255,0.35);
+  color:#e7ebf5; font-size:13px; font-weight:500; letter-spacing:0.3px;
+  cursor:pointer; user-select:none;
+  transition: all 0.15s ease;
+  box-shadow:0 4px 16px -6px rgba(124,231,255,0.35);
+}
+.btn-add:hover{
+  transform:translateY(-1px);
+  background:linear-gradient(135deg, rgba(124,231,255,0.28), rgba(164,139,255,0.34));
+  border-color:rgba(164,139,255,0.55);
+  box-shadow:0 6px 20px -6px rgba(164,139,255,0.5);
+}
+.btn-add .plus{
+  font-size:16px; line-height:1; opacity:0.9;
+  background:linear-gradient(90deg,var(--hi),var(--hi-2));
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  font-weight:700;
+}
+
+/* 模态框遮罩 */
+.modal-mask{
+  position:fixed; inset:0; z-index:100;
+  background:rgba(5,7,12,0.55);
+  backdrop-filter: blur(6px) saturate(120%);
+  -webkit-backdrop-filter: blur(6px) saturate(120%);
+  display:none; align-items:center; justify-content:center;
+  animation:fadeIn 0.15s ease;
+}
+.modal-mask.show{display:flex}
+@keyframes fadeIn{ from{opacity:0} to{opacity:1} }
+
+.modal{
+  width:min(440px, 92vw);
+  padding:28px 28px 22px;
+  border-radius:20px;
+  background:rgba(22,26,38,0.85);
+  backdrop-filter: blur(22px) saturate(140%);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
+  border:1px solid var(--glass-border);
+  box-shadow:0 30px 80px -20px rgba(0,0,0,0.75);
+  position:relative;
+  animation:popIn 0.18s ease;
+}
+@keyframes popIn{
+  from{ opacity:0; transform:translateY(8px) scale(0.98) }
+  to{ opacity:1; transform:translateY(0) scale(1) }
+}
+.modal h2{
+  margin:0 0 4px; font-size:18px; font-weight:600;
+  background:linear-gradient(90deg,var(--hi),var(--hi-2));
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.modal .sub{color:var(--text-dim);font-size:12px;margin-bottom:20px}
+.modal .close-x{
+  position:absolute; top:14px; right:16px;
+  width:24px; height:24px; border-radius:50%;
+  background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.10);
+  color:rgba(255,255,255,0.55); font-size:14px; line-height:22px; text-align:center;
+  cursor:pointer; user-select:none;
+  transition: all 0.15s ease;
+}
+.modal .close-x:hover{
+  background:rgba(255,255,255,0.10); color:#fff;
+}
+.modal label{
+  display:block; font-size:12px; color:var(--text-dim);
+  margin:12px 0 6px; letter-spacing:0.3px;
+}
+.modal label .req{ color:#ff9a9a; margin-left:4px }
+.modal input{
+  width:100%; padding:11px 14px;
+  border-radius:10px;
+  background:rgba(0,0,0,0.25);
+  border:1px solid rgba(255,255,255,0.10);
+  color:var(--text);
+  font-family:'SF Mono','JetBrains Mono','Consolas',monospace;
+  font-size:14px; letter-spacing:0.5px;
+  outline:none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.modal input:focus{
+  border-color:rgba(124,231,255,0.55);
+  background:rgba(0,0,0,0.35);
+}
+.modal input::placeholder{ color:rgba(255,255,255,0.20); letter-spacing:0.5px }
+.modal .hint{ font-size:11px; color:var(--text-dim); margin-top:6px; opacity:0.7 }
+.modal .err{
+  font-size:12px; color:#ff9a9a; margin-top:14px; min-height:16px;
+  display:flex; align-items:center; gap:6px;
+}
+.modal .actions{
+  display:flex; gap:10px; justify-content:flex-end; margin-top:22px;
+}
+.modal .btn{
+  padding:9px 20px; border-radius:10px; font-size:13px;
+  cursor:pointer; user-select:none; border:1px solid transparent;
+  transition: all 0.15s ease;
+}
+.modal .btn-cancel{
+  background:rgba(255,255,255,0.05); color:var(--text-dim);
+  border-color:rgba(255,255,255,0.10);
+}
+.modal .btn-cancel:hover{ background:rgba(255,255,255,0.10); color:var(--text) }
+.modal .btn-ok{
+  background:linear-gradient(135deg, rgba(124,231,255,0.35), rgba(164,139,255,0.45));
+  color:#fff; font-weight:500;
+  border-color:rgba(164,139,255,0.55);
+}
+.modal .btn-ok:hover{
+  background:linear-gradient(135deg, rgba(124,231,255,0.5), rgba(164,139,255,0.6));
+  transform:translateY(-1px);
+}
+.modal .btn-ok:disabled{
+  opacity:0.5; cursor:not-allowed; transform:none;
+}
 
 main{
   position:relative;z-index:1;
@@ -265,8 +387,37 @@ main{
     <h1>pic-clear · TOTP 面板</h1>
     <div class="sub">共享密钥离线动态口令 · 每 30 秒刷新</div>
   </div>
-  <div class="meta" id="meta">正在加载...</div>
+  <div style="display:flex;align-items:center;gap:16px;">
+    <div class="btn-add" onclick="openAddModal()">
+      <span class="plus">+</span><span>添加机器</span>
+    </div>
+    <div class="meta" id="meta">正在加载...</div>
+  </div>
 </header>
+
+<!-- 添加机器模态框 -->
+<div class="modal-mask" id="addModal" onclick="if(event.target===this)closeAddModal()">
+  <div class="modal">
+    <div class="close-x" onclick="closeAddModal()">×</div>
+    <h2>添加机器授权</h2>
+    <div class="sub">生成一份新的 TOTP 密钥，写入本地 vault</div>
+
+    <label>机器指纹 <span class="req">*</span></label>
+    <input type="text" id="inp_fp" placeholder="E062-9731-46AC-1C0D" spellcheck="false" autocomplete="off">
+    <div class="hint">由用户在堡垒机跑 exe 打印，格式一般是 XXXX-XXXX-XXXX-XXXX</div>
+
+    <label>颁发给（添加人 / 使用人） <span class="req">*</span></label>
+    <input type="text" id="inp_issued_to" placeholder="张三 / xflyhack" autocomplete="off">
+    <div class="hint">必填。用来在卡片和 CSV 里标识这台机器归谁</div>
+
+    <div class="err" id="addErr"></div>
+
+    <div class="actions">
+      <div class="btn btn-cancel" onclick="closeAddModal()">取消</div>
+      <div class="btn btn-ok" id="addOkBtn" onclick="submitAdd()">生成并添加</div>
+    </div>
+  </div>
+</div>
 
 <main id="grid">
   <div class="empty">加载中...</div>
@@ -284,6 +435,61 @@ main{
 </svg>
 
 <script>
+// ================== 添加机器 ==================
+function openAddModal() {
+  const m = document.getElementById('addModal');
+  document.getElementById('inp_fp').value = '';
+  document.getElementById('inp_issued_to').value = '';
+  document.getElementById('addErr').textContent = '';
+  document.getElementById('addOkBtn').removeAttribute('disabled');
+  m.classList.add('show');
+  setTimeout(() => document.getElementById('inp_fp').focus(), 60);
+}
+function closeAddModal() {
+  document.getElementById('addModal').classList.remove('show');
+}
+// Esc 关闭
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeAddModal();
+});
+async function submitAdd() {
+  const fp = document.getElementById('inp_fp').value.trim().toUpperCase();
+  const who = document.getElementById('inp_issued_to').value.trim();
+  const err = document.getElementById('addErr');
+  err.textContent = '';
+
+  if (!fp) { err.textContent = '⚠ 机器指纹必填'; return; }
+  if (!/^[A-Za-z0-9-]{1,64}$/.test(fp)) {
+    err.textContent = '⚠ 指纹格式错误，只允许字母/数字/短横线'; return;
+  }
+  if (!who) { err.textContent = '⚠ 颁发给必填'; return; }
+
+  const btn = document.getElementById('addOkBtn');
+  btn.setAttribute('disabled', '1');
+  btn.textContent = '生成中…';
+  try {
+    const r = await fetch('/api/add', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({fingerprint: fp, issued_to: who})
+    });
+    const j = await r.json();
+    if (!j.ok) {
+      err.textContent = '✘ ' + (j.msg || '添加失败');
+      btn.removeAttribute('disabled');
+      btn.textContent = '生成并添加';
+      return;
+    }
+    closeAddModal();
+    // 立即拉一次
+    tick(true);
+  } catch(e) {
+    err.textContent = '✘ 网络异常：' + e;
+    btn.removeAttribute('disabled');
+    btn.textContent = '生成并添加';
+  }
+}
+
 // 两步确认删除：第一次点 → 按钮变红胶囊"确认删除"，3 秒内再点才真删
 let _armedTimer = null;
 function _resetArmed(btn) {
@@ -489,7 +695,58 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/delete":
             self._handle_delete()
             return
+        if self.path == "/api/add":
+            self._handle_add()
+            return
         self.send_error(404, "Not Found")
+
+    def _handle_add(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            data = json.loads(raw.decode("utf-8")) if raw else {}
+            fp = str(data.get("fingerprint", "")).strip().upper()
+            issued_to = str(data.get("issued_to", "")).strip()
+        except Exception as e:
+            return self._json(400, {"ok": False, "msg": f"参数解析失败: {e}"})
+
+        import re as _re
+        if not fp or not _re.fullmatch(r"[A-Za-z0-9-]{1,64}", fp):
+            return self._json(400, {"ok": False, "msg": "指纹格式非法（仅允许字母/数字/短横线，长度 ≤64）"})
+        if not issued_to:
+            return self._json(400, {"ok": False, "msg": "颁发给必填"})
+        if len(issued_to) > 64:
+            return self._json(400, {"ok": False, "msg": "颁发给不能超过 64 字符"})
+
+        VAULT_DIR.mkdir(parents=True, exist_ok=True)
+        target = VAULT_DIR / f"{fp}.json"
+        if target.is_file():
+            return self._json(409, {"ok": False, "msg": f"该指纹已存在：{fp}"})
+
+        try:
+            secret = otp_utils.generate_secret()
+            rec = {
+                "fingerprint": fp,
+                "issued_to": issued_to,
+                "issuer": otp_utils.DEFAULT_ISSUER,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "secret": secret,
+                "algo": otp_utils.DEFAULT_ALGO,
+                "digits": otp_utils.DEFAULT_DIGITS,
+                "period": otp_utils.DEFAULT_PERIOD,
+            }
+            tmp = target.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(rec, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            tmp.replace(target)
+            try:
+                os.chmod(target, 0o600)
+            except Exception:
+                pass
+        except Exception as e:
+            return self._json(500, {"ok": False, "msg": f"写入失败: {e}"})
+        return self._json(200, {"ok": True, "fingerprint": fp,
+                                 "issued_to": issued_to, "secret": secret})
 
     def _handle_delete(self):
         try:
