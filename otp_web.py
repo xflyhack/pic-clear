@@ -88,23 +88,27 @@ INDEX_HTML = r"""<!doctype html>
 }
 *{box-sizing:border-box}
 html,body{
-  margin:0;padding:0;min-height:100%;
-  background:
-    radial-gradient(1200px 800px at 10% -10%, #1a2140 0%, transparent 60%),
-    radial-gradient(1000px 700px at 100% 100%, #2a1a4a 0%, transparent 55%),
-    linear-gradient(180deg, var(--bg-grad-1), var(--bg-grad-2));
+  margin:0;padding:0;min-height:100vh;
   color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
   -webkit-font-smoothing:antialiased;
   overflow-x:hidden;
+  background:var(--bg-grad-1);
+}
+/* 背景层：固定到视口，滚动时不重绘、不出现色带分层 */
+body::after{
+  content:"";position:fixed;inset:0;z-index:-2;pointer-events:none;
+  background:
+    radial-gradient(1200px 800px at 10% -10%, #1a2140 0%, transparent 60%),
+    radial-gradient(1000px 700px at 100% 100%, #2a1a4a 0%, transparent 55%),
+    linear-gradient(180deg, var(--bg-grad-1), var(--bg-grad-2));
 }
 body::before{
-  content:"";position:fixed;inset:0;pointer-events:none;
+  content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
   background:
     radial-gradient(2px 2px at 20% 30%, rgba(255,255,255,0.06), transparent),
     radial-gradient(1px 1px at 80% 70%, rgba(124,231,255,0.10), transparent),
     radial-gradient(1px 1px at 40% 80%, rgba(164,139,255,0.08), transparent);
-  z-index:0;
 }
 header{
   position:relative;z-index:1;
@@ -143,16 +147,39 @@ main{
   transform:translateY(-2px);
   box-shadow:0 30px 80px -20px rgba(0,0,0,0.75);
 }
+/* 删除按钮：默认极简小圆点（不刺眼），卡片 hover 时才浮现；
+   两步确认：第一次点变红色"确认删除"胶囊，再点才真删 */
 .card .del-btn{
-  position:absolute; top:10px; right:12px;
-  width:26px; height:26px; border-radius:50%;
-  background:rgba(255,80,80,0.12); border:1px solid rgba(255,80,80,0.35);
-  color:#ff9a9a; font-size:15px; line-height:24px; text-align:center;
+  position:absolute; top:12px; right:12px;
+  min-width:22px; height:22px; padding:0 8px;
+  border-radius:11px;
+  background:rgba(255,255,255,0.04);
+  border:1px solid rgba(255,255,255,0.10);
+  color:rgba(255,255,255,0.35);
+  font-size:12px; line-height:20px; text-align:center;
   cursor:pointer; user-select:none; z-index:2;
-  transition: all 0.15s ease;
+  opacity:0; pointer-events:none;
+  transition: opacity 0.2s ease, background 0.15s ease, color 0.15s ease,
+              min-width 0.2s ease, padding 0.2s ease, border-color 0.15s ease;
+}
+.card:hover .del-btn{
+  opacity:0.75;
+  pointer-events:auto;
 }
 .card .del-btn:hover{
-  background:rgba(255,80,80,0.35); color:#fff; transform:scale(1.08);
+  opacity:1;
+  color:#ffcccc;
+  background:rgba(255,80,80,0.10);
+  border-color:rgba(255,80,80,0.30);
+}
+.card .del-btn.armed{
+  opacity:1;
+  padding:0 12px;
+  min-width:78px;
+  color:#fff;
+  background:rgba(220,50,50,0.85);
+  border-color:rgba(255,120,120,0.6);
+  box-shadow:0 4px 16px -4px rgba(220,50,50,0.6);
 }
 
 .card::before{
@@ -257,8 +284,34 @@ main{
 </svg>
 
 <script>
-async function deleteRec(fp) {
-  if (!confirm(`确认删除机器授权？\n\n指纹：${fp}\n\n此操作不可撤销。`)) return;
+// 两步确认删除：第一次点 → 按钮变红胶囊"确认删除"，3 秒内再点才真删
+let _armedTimer = null;
+function _resetArmed(btn) {
+  if (!btn) return;
+  btn.classList.remove('armed');
+  btn.dataset.armed = '0';
+  btn.textContent = '···';
+}
+function armDelete(btn, fp) {
+  // 已 armed → 真删
+  if (btn.dataset.armed === '1') {
+    doDelete(btn, fp);
+    return;
+  }
+  // 首次点 → 进入 armed，3 秒无操作自动复位
+  // 先把其它 armed 按钮复位掉
+  document.querySelectorAll('.card .del-btn.armed').forEach(el => {
+    if (el !== btn) _resetArmed(el);
+  });
+  btn.classList.add('armed');
+  btn.dataset.armed = '1';
+  btn.textContent = '确认删除';
+  if (_armedTimer) clearTimeout(_armedTimer);
+  _armedTimer = setTimeout(() => _resetArmed(btn), 3000);
+}
+async function doDelete(btn, fp) {
+  if (_armedTimer) { clearTimeout(_armedTimer); _armedTimer = null; }
+  btn.textContent = '删除中…';
   try {
     const r = await fetch('/api/delete', {
       method:'POST',
@@ -266,14 +319,23 @@ async function deleteRec(fp) {
       body: JSON.stringify({fingerprint: fp})
     });
     const j = await r.json();
-    if (!j.ok) { alert('删除失败：' + (j.msg || '未知错误')); return; }
-    // 立即从 DOM 移掉，避免等下一轮刷新
+    if (!j.ok) {
+      alert('删除失败：' + (j.msg || '未知错误'));
+      _resetArmed(btn);
+      return;
+    }
     const card = document.querySelector(`.card[data-fp="${fp}"]`);
     if (card) card.remove();
   } catch(e) {
     alert('删除失败：' + e);
+    _resetArmed(btn);
   }
 }
+// 点击卡片以外区域，取消所有 armed（避免误留）
+document.addEventListener('click', (e) => {
+  if (e.target.classList && e.target.classList.contains('del-btn')) return;
+  document.querySelectorAll('.card .del-btn.armed').forEach(_resetArmed);
+});
 
 const RING_R = 24;
 const RING_C = 2 * Math.PI * RING_R;
@@ -285,7 +347,7 @@ function cardHtml(rec) {
   const nice = code.replace(/(\d{3})(?=\d)/g, '$1 ');
   return `
     <div class="card" data-fp="${rec.fingerprint}" data-period="${period}">
-      <div class="del-btn" title="删除该机器授权" onclick="deleteRec('${rec.fingerprint}')">×</div>
+      <div class="del-btn" data-armed="0" title="删除该机器授权" onclick="armDelete(this, '${rec.fingerprint}')">···</div>
       <div class="row">
         <div class="fp">${rec.fingerprint}</div>
         <div class="who">${rec.issued_to || '未署名'}</div>
