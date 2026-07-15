@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Build Dedupe Pic EXE
 
 on:
   push:
