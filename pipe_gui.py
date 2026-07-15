@@ -642,7 +642,7 @@ def show_license_error_dialog(info: dict) -> None:
 
 class PipeGUI:
     APP_TITLE = "pic-clear 图形界面"
-    APP_VERSION = "v0.1.5"
+    APP_VERSION = "v0.1.6"
     APP_COMPANY = "山东数旗信息科技有限公司"
     REFRESH_MS = 5000
 
