@@ -533,6 +533,85 @@ def _scale_geometry(w: int, h: int, scale: float) -> str:
     return f"{int(round(w * scale))}x{int(round(h * scale))}"
 
 
+def _parse_geometry_str(geo: str) -> tuple[int, int, int | None, int | None] | None:
+    """把 Tk geometry 字符串（'WxH' 或 'WxH+X+Y'）解析成 (w, h, x, y)。
+    只解析像素数字；解析失败返回 None。x/y 可为负（多屏场景）。"""
+    if not geo or not isinstance(geo, str):
+        return None
+    try:
+        # 常见形式：820x720 或 820x720+100+50 或 820x720-100+50（多屏）
+        import re
+        m = re.match(r"^\s*(\d+)x(\d+)(?:([+-]\d+)([+-]\d+))?\s*$", geo)
+        if not m:
+            return None
+        w = int(m.group(1))
+        h = int(m.group(2))
+        x = int(m.group(3)) if m.group(3) else None
+        y = int(m.group(4)) if m.group(4) else None
+        return (w, h, x, y)
+    except Exception:
+        return None
+
+
+def _compute_default_geometry(root: "tk.Tk", scale: float,
+                              base_w: int = 820, base_h: int = 720,
+                              min_w: int = 760, min_h: int = 560,
+                              max_w_ratio: float = 0.80,
+                              max_h_ratio: float = 0.85) -> str:
+    """按屏幕大小 + DPI scale，算出主窗口首次打开的合理 WxH。
+
+    规则：
+      - 从 base_w/base_h * scale 出发（保持原有默认视觉体积）
+      - 上限：屏幕宽度 * max_w_ratio、屏幕高度 * max_h_ratio
+        —— 防止在小笔记本上撑出屏幕，或者主机没桌面任务栏空间
+      - 下限：min_w/min_h * scale
+        —— 防止超小屏幕（比如 800x600 老机器）算出的默认值过小
+    """
+    try:
+        sw = int(root.winfo_screenwidth())
+        sh = int(root.winfo_screenheight())
+    except Exception:
+        sw, sh = 1920, 1080
+
+    want_w = int(base_w * scale)
+    want_h = int(base_h * scale)
+
+    max_w = int(sw * max_w_ratio)
+    max_h = int(sh * max_h_ratio)
+    want_w = min(want_w, max_w)
+    want_h = min(want_h, max_h)
+
+    min_w_scaled = int(min_w * scale)
+    min_h_scaled = int(min_h * scale)
+    want_w = max(want_w, min_w_scaled)
+    want_h = max(want_h, min_h_scaled)
+
+    return f"{want_w}x{want_h}"
+
+
+def _sanitize_saved_geometry(root: "tk.Tk", geo: str) -> str | None:
+    """校验 saved geometry：
+      - 必须能解析
+      - 宽/高必须在合理范围（>= 400px 且 <= 屏幕物理尺寸）
+      - 位置越界（比如外接屏拔了）也判为不合理
+    合理返回原字符串，不合理返回 None。"""
+    parsed = _parse_geometry_str(geo)
+    if not parsed:
+        return None
+    w, h, x, y = parsed
+    if w < 400 or h < 300:
+        return None
+    try:
+        sw = int(root.winfo_screenwidth())
+        sh = int(root.winfo_screenheight())
+    except Exception:
+        sw, sh = 99999, 99999
+    if w > sw or h > sh:
+        return None
+    # 位置越界不致命，Tk 自己会拉回来；这里只做温和校验
+    return geo
+
+
 def _enable_hidpi_awareness() -> None:
     """Windows 高 DPI 感知：让系统知道我们自己管缩放，别帮我们做模糊拉伸。
     要在 tk.Tk() 之前调用效果最好。"""
@@ -821,7 +900,7 @@ def show_license_error_dialog(info: dict) -> None:
 
 class PipeGUI:
     APP_TITLE = "pic-clear 图形界面"
-    APP_VERSION = "v0.1.8"
+    APP_VERSION = "v0.1.9"
     APP_COMPANY = "山东数旗信息科技有限公司"
     REFRESH_MS = 5000
 
@@ -830,7 +909,18 @@ class PipeGUI:
         self.root.title(f"{self.APP_TITLE}  {self.APP_VERSION}")
         # 高分屏字号 / 尺寸自适应：main() 里已经调用 _apply_dpi_scaling 并把倍率挂到 root 上
         self._ui_scale = float(getattr(self.root, "__ui_scale__", 1.0))
-        self.root.geometry(_scale_geometry(820, 720, self._ui_scale))
+
+        # 提前加载配置：window_geometry 需要在设 geometry 之前用到
+        self._loaded_config = _load_config()
+
+        # 主窗口初始 geometry：优先用上次保存的（若合理），否则按屏幕自适应
+        saved_geo = self._loaded_config.get("window_geometry") if self._loaded_config else None
+        if saved_geo:
+            saved_geo = _sanitize_saved_geometry(self.root, saved_geo)
+        if saved_geo:
+            self.root.geometry(saved_geo)
+        else:
+            self.root.geometry(_compute_default_geometry(self.root, self._ui_scale))
         self.root.minsize(int(760 * self._ui_scale), int(560 * self._ui_scale))
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -867,8 +957,7 @@ class PipeGUI:
         self._log_toplevel: "tk.Toplevel | None" = None
         self._log_widgets: dict = {}
 
-        # 加载上次的配置（如果有），下面填进各个 tk 变量
-        self._loaded_config = _load_config()
+        # _loaded_config 已在 __init__ 顶部加载（用于 window_geometry），此处直接复用
 
         self._build_ui()
         self._refresh_env()
@@ -1335,7 +1424,7 @@ class PipeGUI:
 
     def _dump_current_config(self) -> dict:
         """把当前表单状态收集成 dict，用于保存。"""
-        return {
+        cfg = {
             "data_drive": self._drive_var.get(),
             "src": self._src_var.get(),
             "out_root": self._out_var.get(),
@@ -1351,6 +1440,18 @@ class PipeGUI:
             "watch_interval": float(self._watch_interval_var.get()),
             "selected_subs": [name for name, v in self._sub_vars if v.get()],
         }
+        # 记住主窗口当前几何位置，下次打开还原
+        try:
+            geo = self.root.winfo_geometry()  # 形如 '820x720+100+50'
+            if geo:
+                cfg["window_geometry"] = geo
+        except Exception:
+            pass
+        # 沿用配置里已有的一次性开关（比如"以后不再提示"），避免被覆盖
+        old = getattr(self, "_loaded_config", None) or {}
+        if "hide_close_hint" in old:
+            cfg["hide_close_hint"] = old["hide_close_hint"]
+        return cfg
 
     def _auto_pick_drive(self):
         drives = list_drives()
@@ -1775,6 +1876,11 @@ class PipeGUI:
         # 用户点右上角 ×：
         #   - 当前配置为"最小化到托盘"  → 最小化 + 首次弹提示（可勾选"以后不再提示"）
         #   - 未开启                    → 彻底退出
+        # 无论哪种，都先把当前主窗口 geometry 存下来，方便下次原样打开
+        try:
+            _save_config(self._dump_current_config())
+        except Exception:
+            pass
         if self._minimize_to_tray_var.get():
             self.hide_to_tray()
             self._maybe_show_close_hint()
