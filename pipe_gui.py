@@ -426,6 +426,70 @@ def _tip_icon(parent: "tk.Widget", text: str) -> "tk.Label":
     return lbl
 
 
+# --- DPI 自适应 -------------------------------------------------------------
+
+# Tk 的默认 scaling 系数（对应 72dpi 到 96dpi 的换算：96/72 = 1.333...）。
+# 用户屏幕真实 scale 除以这个基线，就是我们要为 geometry 补的额外倍率。
+_TK_DEFAULT_SCALING = 96.0 / 72.0
+
+
+def _apply_dpi_scaling(root: "tk.Tk", *, min_scale: float = 1.0,
+                       max_scale: float = 3.0) -> float:
+    """把 Tk 的字号和 pixel 尺度按屏幕 DPI 放大。
+
+    - 通过 winfo_fpixels("1i") 拿到"1 英寸多少像素"，即真实 DPI
+    - Tk scaling 单位是"点/像素"，正确公式是 dpi / 72
+    - 结果做上下限 clamp，防止极端 DPI（比如虚拟机报 300+）把 UI 撑爆
+    - 返回值是"用户实际 scale ÷ Tk 默认 scale"，调用方可以把硬编码 geometry
+      按这个倍率放大，效果跟 font 放大保持一致
+
+    典型返回值：
+      100% 屏（96dpi）  → 1.00
+      125% 屏（120dpi） → 1.25
+      150% 屏（144dpi） → 1.50
+      200% 屏（192dpi） → 2.00
+    """
+    try:
+        dpi = float(root.winfo_fpixels("1i"))
+    except Exception:
+        dpi = 96.0
+    if dpi <= 0:
+        dpi = 96.0
+    scaling = dpi / 72.0
+    # clamp Tk scaling 自身（防止 fpixels 报离谱数字）
+    scaling = max(1.0, min(scaling, max_scale * _TK_DEFAULT_SCALING))
+    try:
+        root.tk.call("tk", "scaling", scaling)
+    except Exception:
+        pass
+    # 返回给调用方的倍率是"相对 Tk 默认"，clamp 到 [min_scale, max_scale]
+    factor = scaling / _TK_DEFAULT_SCALING
+    factor = max(min_scale, min(factor, max_scale))
+    return factor
+
+
+def _scale_geometry(w: int, h: int, scale: float) -> str:
+    """把默认 geometry 按 scale 放大，返回 tk 认识的 'WxH' 字符串。"""
+    return f"{int(round(w * scale))}x{int(round(h * scale))}"
+
+
+def _enable_hidpi_awareness() -> None:
+    """Windows 高 DPI 感知：让系统知道我们自己管缩放，别帮我们做模糊拉伸。
+    要在 tk.Tk() 之前调用效果最好。"""
+    if os.name != "nt":
+        return
+    try:
+        from ctypes import windll
+        # Per-monitor DPI aware（值 2），比 Process DPI aware（值 1）更好
+        # 老 Windows 不支持就退回 1
+        try:
+            windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
+
 # --- 授权信息辅助 -----------------------------------------------------------
 
 def _resolve_license_path() -> Path:
@@ -512,20 +576,16 @@ def show_license_error_dialog(info: dict) -> None:
     关闭窗口后 sys.exit(3)。"""
     root = tk.Tk()
     root.title("pic-clear 未授权")
-    root.geometry("560x400")
     root.resizable(False, False)
     try:
         root.attributes("-topmost", True)
     except Exception:
         pass
 
-    # 高 DPI
-    if os.name == "nt":
-        try:
-            from ctypes import windll
-            windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
+    # 高 DPI：先声明 DPI 感知，再按屏幕 DPI 放大 Tk 缩放和 geometry
+    _enable_hidpi_awareness()
+    scale = _apply_dpi_scaling(root)
+    root.geometry(_scale_geometry(560, 400, scale))
 
     pad = {"padx": 16, "pady": 6}
 
@@ -582,15 +642,17 @@ def show_license_error_dialog(info: dict) -> None:
 
 class PipeGUI:
     APP_TITLE = "pic-clear 图形界面"
-    APP_VERSION = "v0.1.3"
+    APP_VERSION = "v0.1.5"
     APP_COMPANY = "山东数旗信息科技有限公司"
     REFRESH_MS = 5000
 
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"{self.APP_TITLE}  {self.APP_VERSION}")
-        self.root.geometry("820x720")
-        self.root.minsize(760, 560)
+        # 高分屏字号 / 尺寸自适应：main() 里已经调用 _apply_dpi_scaling 并把倍率挂到 root 上
+        self._ui_scale = float(getattr(self.root, "__ui_scale__", 1.0))
+        self.root.geometry(_scale_geometry(820, 720, self._ui_scale))
+        self.root.minsize(int(760 * self._ui_scale), int(560 * self._ui_scale))
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # 状态
@@ -1561,7 +1623,7 @@ class PipeGUI:
         w = tk.Toplevel(self.root)
         self._status_toplevel = w
         w.title("pic-clear 运行状态")
-        w.geometry("720x520")
+        w.geometry(_scale_geometry(720, 520, getattr(self, "_ui_scale", 1.0)))
         w.protocol("WM_DELETE_WINDOW", lambda: (w.withdraw()))
 
         info = tk.Text(w, font=("Consolas", 10))
@@ -1666,7 +1728,7 @@ class PipeGUI:
         w = tk.Toplevel(self.root)
         self._log_toplevel = w
         w.title("pic-clear 日志")
-        w.geometry("900x560")
+        w.geometry(_scale_geometry(900, 560, getattr(self, "_ui_scale", 1.0)))
         w.protocol("WM_DELETE_WINDOW", lambda: (w.withdraw()))
 
         # 顶部：日志种类切换 + 当前 job 信息
@@ -1947,13 +2009,12 @@ def main() -> int:
 
     root = tk.Tk()
     try:
-        # Windows 高 DPI 适配
-        if os.name == "nt":
-            try:
-                from ctypes import windll
-                windll.shcore.SetProcessDpiAwareness(1)
-            except Exception:
-                pass
+        # Windows 高 DPI 适配：先跟系统声明"我们自己管缩放"，
+        # 再让 Tk 按屏幕 DPI 放大字号和 pixel 尺度
+        _enable_hidpi_awareness()
+        scale = _apply_dpi_scaling(root)
+        # 把 scale 挂到 root 上，供后续窗口（状态浮层、日志浮层）复用
+        root.__ui_scale__ = scale
         app = PipeGUI(root)
         # 把授权信息传进 app，用于『关于』Tab 展示
         app.license_info = license_info
