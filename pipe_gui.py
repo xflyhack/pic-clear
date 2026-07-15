@@ -821,7 +821,7 @@ def show_license_error_dialog(info: dict) -> None:
 
 class PipeGUI:
     APP_TITLE = "pic-clear 图形界面"
-    APP_VERSION = "v0.1.7"
+    APP_VERSION = "v0.1.8"
     APP_COMPANY = "山东数旗信息科技有限公司"
     REFRESH_MS = 5000
 
@@ -1772,10 +1772,77 @@ class PipeGUI:
         self.root.focus_force()
 
     def on_close(self):
+        # 用户点右上角 ×：
+        #   - 当前配置为"最小化到托盘"  → 最小化 + 首次弹提示（可勾选"以后不再提示"）
+        #   - 未开启                    → 彻底退出
         if self._minimize_to_tray_var.get():
             self.hide_to_tray()
+            self._maybe_show_close_hint()
         else:
             self.quit_all()
+
+    def _maybe_show_close_hint(self):
+        """第一次点 ×（且勾了"最小化到托盘"）时弹提示，告诉用户程序没退出。
+        用户可以勾"以后不再提示"，勾选后写入配置文件，永久静默。"""
+        cfg = getattr(self, "_loaded_config", None) or {}
+        if cfg.get("hide_close_hint"):
+            return
+
+        # 用一个自定义 Toplevel，因为 messagebox 不支持塞复选框
+        try:
+            top = tk.Toplevel(self.root)
+        except Exception:
+            return
+        top.title("pic-clear 已最小化到托盘")
+        try:
+            top.transient(self.root)
+        except Exception:
+            pass
+        try:
+            top.attributes("-topmost", True)
+        except Exception:
+            pass
+        scale = getattr(self, "_ui_scale", 1.0)
+        top.geometry(_scale_geometry(520, 300, scale))
+        top.resizable(False, False)
+
+        tk.Label(top, text="ⓘ  程序已最小化到系统托盘",
+                 font=("Microsoft YaHei", 14, "bold"),
+                 foreground="#0066cc").pack(pady=(18, 6))
+
+        msg = (
+            "点击右上角 × 只是把窗口收起来了，程序仍在后台运行。\n"
+            "\n"
+            "• 屏幕右下角通知区域（时间旁边）有 pic-clear 图标，\n"
+            "  右键 → 显示主窗口 / 退出\n"
+            "• 如果看不到图标，点通知区域的 ∧ 展开\n"
+            "• 快捷键 Ctrl+Alt+P 可随时呼出主窗口\n"
+            "\n"
+            "如果你希望 × 直接退出，请在主界面『后台 & 快捷键』Tab 里，\n"
+            "取消勾选『关闭时最小化到托盘』。"
+        )
+        tk.Label(top, text=msg, font=("Microsoft YaHei", 10),
+                 justify="left", wraplength=int(480 * scale),
+                 foreground="#333").pack(padx=18, pady=(0, 8), anchor="w")
+
+        hide_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="以后不再提示", variable=hide_var).pack(
+            anchor="w", padx=18, pady=(0, 6))
+
+        def _confirm():
+            if hide_var.get():
+                try:
+                    cfg2 = _load_config()
+                    cfg2["hide_close_hint"] = True
+                    _save_config(cfg2)
+                    # 同步到内存里的缓存，避免同一会话再次弹
+                    self._loaded_config = cfg2
+                except Exception:
+                    pass
+            top.destroy()
+
+        ttk.Button(top, text="知道了", command=_confirm, width=12).pack(pady=(4, 14))
+        top.protocol("WM_DELETE_WINDOW", _confirm)
 
     def quit_all(self):
         try:
@@ -1790,6 +1857,15 @@ class PipeGUI:
         except Exception:
             pass
         self.root.destroy()
+        # 兜底强杀：pystray 的托盘线程 + keyboard 的低级钩子线程即使调了
+        # stop / unhook_all_hotkeys，也可能还在 Windows 消息队列里等下一个
+        # 事件。给 400ms 收尾时间，然后 os._exit(0) 直接结束进程，
+        # 避免任务管理器里残留 pipe_gui.exe。
+        try:
+            import threading
+            threading.Timer(0.4, lambda: os._exit(0)).start()
+        except Exception:
+            os._exit(0)
 
     # ---------- 状态浮层 ----------
 
