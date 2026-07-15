@@ -123,16 +123,27 @@ header h1{
   -webkit-background-clip:text;background-clip:text;color:transparent;
 }
 header .sub{color:var(--text-dim);font-size:13px}
-header .brand{
-  margin-top:4px;
-  font-size:11px;
-  letter-spacing:1px;
-  color:var(--text-dim);
-  opacity:0.55;
-  background:linear-gradient(90deg,var(--hi),var(--hi-2));
+
+/* 永远浮在页面最底部的版权胶囊 */
+.footer-brand{
+  position:fixed; left:50%; bottom:14px;
+  transform:translateX(-50%);
+  z-index:50; pointer-events:none;
+  padding:6px 16px;
+  border-radius:100px;
+  font-size:11px; letter-spacing:1.5px; font-weight:500;
+  background:rgba(22,26,38,0.55);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border:1px solid var(--glass-border);
+  box-shadow:0 8px 24px -10px rgba(0,0,0,0.6);
+  background-image:linear-gradient(90deg,var(--hi),var(--hi-2));
   -webkit-background-clip:text; background-clip:text; color:transparent;
-  font-weight:500;
+  opacity:0.85;
 }
+/* 底部内容要留出安全边距，避免最后一张卡被浮层挡住 */
+main{ padding-bottom:80px !important }
+
 header .meta{color:var(--text-dim);font-size:12px}
 
 /* 添加机器按钮 */
@@ -409,7 +420,6 @@ main{
   <div>
     <h1>pic-clear · TOTP 面板</h1>
     <div class="sub">共享密钥离线动态口令 · 每 30 秒刷新</div>
-    <div class="brand">© 山东数旗信息科技有限公司</div>
   </div>
   <div style="display:flex;align-items:center;gap:16px;">
     <div class="btn-add" onclick="openAddModal()">
@@ -450,6 +460,8 @@ main{
 <main id="grid">
   <div class="empty">加载中...</div>
 </main>
+
+<div class="footer-brand">© 山东数旗信息科技有限公司</div>
 
 <div class="toast" id="toast">已复制</div>
 
