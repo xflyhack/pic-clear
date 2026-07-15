@@ -53,6 +53,7 @@ def load_all_records() -> list[dict]:
             code = "------"
         out.append({
             "fingerprint": rec.get("fingerprint", p.stem),
+            "machine_id": rec.get("machine_id") or "",
             "issued_to": rec.get("issued_to") or "",
             "issuer": rec.get("issuer") or "pic-clear",
             "created_at": rec.get("created_at") or "",
@@ -320,6 +321,18 @@ main{
 .card .who{
   font-size:14px;color:var(--text);opacity:0.85;font-weight:500;
 }
+.card .mid{
+  margin-top:6px;
+  display:inline-block;
+  padding:3px 10px;
+  border-radius:8px;
+  font-family:'SF Mono','JetBrains Mono','Consolas',monospace;
+  font-size:12px;
+  color:#7ce7ff;
+  background:rgba(124,231,255,0.08);
+  border:1px solid rgba(124,231,255,0.18);
+  letter-spacing:0.5px;
+}
 
 .code-wrap{
   display:flex;align-items:center;justify-content:space-between;
@@ -406,6 +419,10 @@ main{
     <input type="text" id="inp_fp" placeholder="E062-9731-46AC-1C0D" spellcheck="false" autocomplete="off">
     <div class="hint">由用户在堡垒机跑 exe 打印，格式一般是 XXXX-XXXX-XXXX-XXXX</div>
 
+    <label>机器 ID / IP <span class="req">*</span></label>
+    <input type="text" id="inp_machine_id" placeholder="10.0.0.12 / bastion-01" autocomplete="off">
+    <div class="hint">必填。一般填机器 IP，也可填主机名，用来在面板上快速识别这是哪台机器</div>
+
     <label>颁发给（添加人 / 使用人） <span class="req">*</span></label>
     <input type="text" id="inp_issued_to" placeholder="张三 / xflyhack" autocomplete="off">
     <div class="hint">必填。用来在卡片和 CSV 里标识这台机器归谁</div>
@@ -439,6 +456,7 @@ main{
 function openAddModal() {
   const m = document.getElementById('addModal');
   document.getElementById('inp_fp').value = '';
+  document.getElementById('inp_machine_id').value = '';
   document.getElementById('inp_issued_to').value = '';
   document.getElementById('addErr').textContent = '';
   document.getElementById('addOkBtn').removeAttribute('disabled');
@@ -454,6 +472,7 @@ document.addEventListener('keydown', (e) => {
 });
 async function submitAdd() {
   const fp = document.getElementById('inp_fp').value.trim().toUpperCase();
+  const mid = document.getElementById('inp_machine_id').value.trim();
   const who = document.getElementById('inp_issued_to').value.trim();
   const err = document.getElementById('addErr');
   err.textContent = '';
@@ -462,6 +481,8 @@ async function submitAdd() {
   if (!/^[A-Za-z0-9-]{1,64}$/.test(fp)) {
     err.textContent = '⚠ 指纹格式错误，只允许字母/数字/短横线'; return;
   }
+  if (!mid) { err.textContent = '⚠ 机器 ID / IP 必填'; return; }
+  if (mid.length > 64) { err.textContent = '⚠ 机器 ID / IP 不能超过 64 字符'; return; }
   if (!who) { err.textContent = '⚠ 颁发给必填'; return; }
 
   const btn = document.getElementById('addOkBtn');
@@ -471,7 +492,7 @@ async function submitAdd() {
     const r = await fetch('/api/add', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({fingerprint: fp, issued_to: who})
+      body: JSON.stringify({fingerprint: fp, machine_id: mid, issued_to: who})
     });
     const j = await r.json();
     if (!j.ok) {
@@ -558,6 +579,7 @@ function cardHtml(rec) {
         <div class="fp">${rec.fingerprint}</div>
         <div class="who">${rec.issued_to || '未署名'}</div>
       </div>
+      ${rec.machine_id ? `<div class="mid">${rec.machine_id}</div>` : ''}
       <div class="code-wrap">
         <div class="code" data-code="${code}">${nice}</div>
         <div class="ring">
@@ -706,6 +728,7 @@ class Handler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length) if length > 0 else b""
             data = json.loads(raw.decode("utf-8")) if raw else {}
             fp = str(data.get("fingerprint", "")).strip().upper()
+            machine_id = str(data.get("machine_id", "")).strip()
             issued_to = str(data.get("issued_to", "")).strip()
         except Exception as e:
             return self._json(400, {"ok": False, "msg": f"参数解析失败: {e}"})
@@ -713,6 +736,10 @@ class Handler(BaseHTTPRequestHandler):
         import re as _re
         if not fp or not _re.fullmatch(r"[A-Za-z0-9-]{1,64}", fp):
             return self._json(400, {"ok": False, "msg": "指纹格式非法（仅允许字母/数字/短横线，长度 ≤64）"})
+        if not machine_id:
+            return self._json(400, {"ok": False, "msg": "机器 ID / IP 必填"})
+        if len(machine_id) > 64:
+            return self._json(400, {"ok": False, "msg": "机器 ID / IP 不能超过 64 字符"})
         if not issued_to:
             return self._json(400, {"ok": False, "msg": "颁发给必填"})
         if len(issued_to) > 64:
@@ -727,6 +754,7 @@ class Handler(BaseHTTPRequestHandler):
             secret = otp_utils.generate_secret()
             rec = {
                 "fingerprint": fp,
+                "machine_id": machine_id,
                 "issued_to": issued_to,
                 "issuer": otp_utils.DEFAULT_ISSUER,
                 "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -746,6 +774,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._json(500, {"ok": False, "msg": f"写入失败: {e}"})
         return self._json(200, {"ok": True, "fingerprint": fp,
+                                 "machine_id": machine_id,
                                  "issued_to": issued_to, "secret": secret})
 
     def _handle_delete(self):
