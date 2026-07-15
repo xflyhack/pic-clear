@@ -124,25 +124,39 @@ header h1{
 }
 header .sub{color:var(--text-dim);font-size:13px}
 
-/* 永远浮在页面最底部的版权胶囊 */
+/* 永远贴在页面最底部的版权 footer（整条通栏 + 顶部渐变分隔线） */
 .footer-brand{
-  position:fixed; left:50%; bottom:14px;
-  transform:translateX(-50%);
-  z-index:50; pointer-events:none;
-  padding:6px 16px;
-  border-radius:100px;
-  font-size:11px; letter-spacing:1.5px; font-weight:500;
-  background:rgba(22,26,38,0.55);
-  backdrop-filter: blur(14px) saturate(140%);
-  -webkit-backdrop-filter: blur(14px) saturate(140%);
-  border:1px solid var(--glass-border);
-  box-shadow:0 8px 24px -10px rgba(0,0,0,0.6);
-  background-image:linear-gradient(90deg,var(--hi),var(--hi-2));
-  -webkit-background-clip:text; background-clip:text; color:transparent;
+  position:fixed; left:0; right:0; bottom:0;
+  z-index:50;
+  height:56px;
+  display:flex; align-items:center; justify-content:center;
+  font-size:14px; letter-spacing:2.5px; font-weight:500;
+  background:linear-gradient(180deg,
+    rgba(10,12,18,0.55) 0%,
+    rgba(6,8,14,0.85) 60%,
+    rgba(4,6,10,0.95) 100%);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  border-top:1px solid rgba(255,255,255,0.06);
+  box-shadow:0 -6px 24px -10px rgba(0,0,0,0.7);
+}
+/* 顶部再叠一条细渐变高光线，突出分层感 */
+.footer-brand::before{
+  content:""; position:absolute; top:0; left:10%; right:10%; height:1px;
+  background:linear-gradient(90deg,
+    transparent 0%,
+    rgba(124,231,255,0.35) 30%,
+    rgba(164,139,255,0.45) 70%,
+    transparent 100%);
   opacity:0.85;
 }
-/* 底部内容要留出安全边距，避免最后一张卡被浮层挡住 */
-main{ padding-bottom:80px !important }
+.footer-brand .txt{
+  background:linear-gradient(90deg,var(--hi),var(--hi-2));
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  text-shadow:0 0 20px rgba(124,231,255,0.15);
+}
+/* 底部内容要留出 footer 高度 + 呼吸边距，避免最后一张卡被挡住 */
+main{ padding-bottom:96px !important }
 
 header .meta{color:var(--text-dim);font-size:12px}
 
@@ -461,7 +475,7 @@ main{
   <div class="empty">加载中...</div>
 </main>
 
-<div class="footer-brand">© 山东数旗信息科技有限公司</div>
+<div class="footer-brand"><span class="txt">© 山东数旗信息科技有限公司</span></div>
 
 <div class="toast" id="toast">已复制</div>
 
