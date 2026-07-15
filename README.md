@@ -12,7 +12,7 @@
 
 👉 **[https://github.com/xflyhack/pic-clear/releases/latest](https://github.com/xflyhack/pic-clear/releases/latest)**
 
-页面右侧 `Assets` 区域会列出全部 6 个 exe（`extract_frames.exe` / `dedupe_pic.exe` / `pipeline.exe` / `pipe_gui.exe` / `summary_stats_gui.exe` / `gen_license_gui.exe`），点每个 exe 后面的 ⬇ 图标就能下载。
+页面右侧 `Assets` 区域会列出全部 8 个 exe（`extract_frames.exe` / `dedupe_pic.exe` / `pipeline.exe` / `pipe_gui.exe` / `extract_gui.exe` / `dedupe_gui.exe` / `summary_stats_gui.exe` / `gen_license_gui.exe`），点每个 exe 后面的 ⬇ 图标就能下载。
 
 私有仓库需要登录 GitHub 账号才能看到 Assets 区域。
 
@@ -38,9 +38,11 @@
 | **`dedupe_pic.exe`** | 对图片目录做近似去重（dHash）+ YOLO 保护（人/车）+ 前后帧车运动保护 | ~57 MB（含 yolov8n）|
 | **`pipeline.exe`** | 编排层：一键跑抽帧 + 去重，后台 detach，可查状态/停/看日志 | ~10-20 MB |
 | **`pipe_gui.exe`** | `pipeline.exe` 的图形前端，双击运行，托盘 + 全局快捷键 + 主窗实时进度 + 日志 tail，不习惯命令行的同事用 | ~15-25 MB |
+| **`extract_gui.exe`** | **抽帧专用 GUI**（只切帧不去重），选源目录 + 一级子目录多选 + fps，后台线程实时日志 + 托盘 + `Ctrl+Alt+E` | ~20-30 MB |
+| **`dedupe_gui.exe`** | **去重专用 GUI**（只去重不切帧），选目标目录 + 单/一级/递归模式 + threshold/motion + 强制重跑 + 托盘 + `Ctrl+Alt+D` | ~20-30 MB |
 | **`summary_stats_gui.exe`** | 图形版统计汇总工具，扫 `machine_id_*.csv`，选磁盘 + 目录树钻取 + 汇总 + 导出 CSV | ~15-25 MB |
 
-5 个业务 exe **共用同一份 `license.lic`**，同一台机器只需申请一次授权。
+7 个业务 exe **共用同一份 `license.lic`**，同一台机器只需申请一次授权。
 
 ### 签发工具（1 个，作者用）
 
@@ -75,7 +77,8 @@ h265/mp4 视频目录
 - **不会命令行 → `pipe_gui.exe`**：双击打开 GUI，选盘 + 选源目录 + 选子目录 + 点『运行』，主窗直接看每个子目录的抽帧/去重实时进度，点『查看日志』可以像 `tail -f` 一样实时跟 worker 日志。详见 [`docs/pipe_gui_exe.md`](docs/pipe_gui_exe.md)。
 - **会命令行 → `pipeline.exe`**：CLI 提交任务，`pipeline.exe status/logs/stop` 查看和管理。详见 [`docs/pipeline_exe.md`](docs/pipeline_exe.md)。
 - **想极简（老派）→ `scripts_bat/*.bat`**：把 exe 放到 `C:\Windows\System32`，双击 bat 一键跑。详见 [`scripts_bat/README.md`](scripts_bat/README.md)。
-- **想单独抽帧 / 单独去重**：直接调 `extract_frames.exe` / `dedupe_pic.exe`，见下面的分节说明。
+- **想单独抽帧 / 单独去重（GUI）**：新增 `extract_gui.exe`（只切帧）和 `dedupe_gui.exe`（只去重）双击就能用，界面里选目录 + 参数 + 点『开始』。两者与 `pipe_gui.exe` 完全独立，共用同一份 `license.lic`。
+- **想单独抽帧 / 单独去重（命令行）**：直接调 `extract_frames.exe` / `dedupe_pic.exe`，见下面的分节说明。
 - **想看统计 / 看每台机器删了多少张 → `summary_stats_gui.exe`**：双击打开 GUI，选磁盘 + 目录树钻取到 `data_source` 或某天的目录，点『开始汇总』看当前剩余 / 累计删除 / 按机器分。也能导出 CSV 给老板看。
 - **作者要签发 license.lic**：命令行版 `python gen_license.py`（见"作者签发流程"章节），或图形版 `gen_license_gui.exe`（见 [`docs/gen_license_gui.md`](docs/gen_license_gui.md)）。
 

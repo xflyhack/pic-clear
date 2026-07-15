@@ -1,7 +1,7 @@
 name: Create Release Notes
 
 # 打 tag（v*）时创建/更新 GitHub Release 的说明和标题。
-# 6 个 exe 会由各自的 build-*-exe workflow 在 tag 触发时附加到这个 release 上。
+# 8 个 exe 会由各自的 build-*-exe workflow 在 tag 触发时附加到这个 release 上。
 #
 # 用法：
 #   git tag v0.1.2
@@ -46,7 +46,7 @@ jobs:
           body: |
             ## pic-clear ${{ steps.tag.outputs.value }}
 
-            **一次下载全部 6 个 Windows exe。** 每个 exe 独立打包、独立运行。
+            **一次下载全部 8 个 Windows exe。** 每个 exe 独立打包、独立运行。
 
             | exe | 作用 | 大小 |
             |---|---|---|
@@ -54,6 +54,8 @@ jobs:
             | `dedupe_pic.exe` | 图片近似去重 + YOLO 人/车保护 + 前后帧车运动保护 | ~57 MB |
             | `pipeline.exe` | 编排层：一键跑抽帧 + 去重，后台 detach | ~10-20 MB |
             | `pipe_gui.exe` | pipeline 图形前端：Tab 布局 / 主窗实时进度 / 日志 tail / 托盘 / 快捷键 | ~15-25 MB |
+            | `extract_gui.exe` | 抽帧专用 GUI：只做抽帧，选源+子目录多选+fps | ~20-30 MB |
+            | `dedupe_gui.exe` | 去重专用 GUI：只做去重，支持单目录/一级/递归+强制重跑 | ~20-30 MB |
             | `summary_stats_gui.exe` | 每机每天统计汇总，磁盘选择 + 目录钻取 + 导 CSV | ~15-25 MB |
             | `gen_license_gui.exe` | 图形版 license 签发工具（内置私钥），⚠ 作者用 | ~15-25 MB |
 
@@ -63,7 +65,7 @@ jobs:
 
             - 首次使用需要 license：先跑一次 `dedupe_pic.exe --fingerprint` 拿指纹，
               找作者用 `gen_license_gui.exe` 生成 `license.lic`，放到 exe 同目录
-            - 6 个 exe 共用同一份 `license.lic`
+            - 8 个 exe 共用同一份 `license.lic`
             - 详细说明看仓库 [`README.md`](../../blob/main/README.md) 和 [`docs/`](../../tree/main/docs)
 
             ### 自动生成的更新记录
