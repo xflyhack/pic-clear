@@ -15,7 +15,7 @@ gen_license_gui.py —— license.lic 签发工具（GUI 版）
 from __future__ import annotations
 
 # ---- 版本 / 版权 ----
-APP_VERSION = "v0.1.1"
+APP_VERSION = "v0.1.10"
 COPYRIGHT_TEXT = "本工具版权归山东数旗信息科技有限公司所有"
 
 import base64
