@@ -37,7 +37,7 @@ import pipeline  # noqa: E402
 
 
 APP_TITLE = "pic-clear 去重工具"
-APP_VERSION = "v0.2.1"
+APP_VERSION = "v0.2.2"
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "dedupe_gui.json"
 HOTKEY_DEFAULT = "ctrl+alt+d"
@@ -152,6 +152,18 @@ class DedupeGUI:
         self._hotkey_var = tk.StringVar(
             value=self._cfg.get("hotkey", HOTKEY_DEFAULT))
 
+        # 保护类别（COCO 80）
+        saved_pc = self._cfg.get("protect_classes")
+        if isinstance(saved_pc, list):
+            checked_set = set(saved_pc)
+            checked_set.add("person")  # 硬保护，永远勾
+        else:
+            checked_set = set(_pg.COCO_DEFAULT_PROTECT)
+        self._protect_class_vars: dict[str, tk.BooleanVar] = {
+            name: tk.BooleanVar(value=(name in checked_set))
+            for name in _pg.COCO_ZH.keys()
+        }
+
         # 运行时状态
         self._tray_icon = None
         self._tray_thread = None
@@ -176,6 +188,10 @@ class DedupeGUI:
         page = ttk.Frame(nb)
         nb.add(page, text="去重")
         self._build_main_tab(page)
+
+        protect_page = ttk.Frame(nb)
+        nb.add(protect_page, text="保护类别")
+        self._build_protect_tab(protect_page)
 
         about = ttk.Frame(nb)
         nb.add(about, text="关于")
@@ -269,6 +285,98 @@ class DedupeGUI:
         ttk.Entry(row, textvariable=self._hotkey_var, width=16).pack(side="left")
         ttk.Button(row, text="注册",
                    command=self._register_hotkey).pack(side="left", padx=4)
+
+    def _build_protect_tab(self, page: ttk.Frame):
+        """保护类别 Tab：COCO 80 类中文复选框。
+        规则：人=硬保护；车类=运动才保护；其它=软保护但静物永远不动等同永久保留。"""
+        pad = {"padx": 6, "pady": 4}
+
+        head = ttk.Frame(page); head.pack(fill="x", **pad)
+        ttk.Label(head,
+                  text="保护类别（YOLO 命中即保留；人=硬保护，车=运动才保护）",
+                  font=("Microsoft YaHei", 11, "bold"),
+                  foreground="#0066cc").pack(anchor="w")
+        ttk.Label(head, text=(
+            "• 人：命中即保留，永远不删\n"
+            "• 车（自行车/汽车/摩托车/公交车/火车/卡车）：相邻帧发生位移才保留，"
+            "静止不动可参与相似度去重\n"
+            "• 其它类别：也走『软保护』逻辑，静物永远不动即等同永久保留"),
+            font=("Microsoft YaHei", 9),
+            foreground="#555", justify="left").pack(anchor="w", pady=(2, 4))
+
+        btnbar = ttk.Frame(page); btnbar.pack(fill="x", **pad)
+        ttk.Button(btnbar, text="全选",
+                   command=lambda: self._protect_bulk("all")).pack(
+            side="left", padx=2)
+        ttk.Button(btnbar, text="全不选",
+                   command=lambda: self._protect_bulk("none")).pack(
+            side="left", padx=2)
+        ttk.Button(btnbar, text="恢复默认（7 类）",
+                   command=lambda: self._protect_bulk("default")).pack(
+            side="left", padx=2)
+        ttk.Button(btnbar, text="仅保留人和车",
+                   command=lambda: self._protect_bulk("person_and_vehicle")).pack(
+            side="left", padx=2)
+
+        # 复选框滚动区
+        canvas_frame = ttk.Frame(page)
+        canvas_frame.pack(fill="both", expand=True, **pad)
+        canvas = tk.Canvas(canvas_frame, borderwidth=0, highlightthickness=0)
+        vbar = ttk.Scrollbar(canvas_frame, orient="vertical",
+                             command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        vbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(canvas)
+        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_config(_e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        inner.bind("<Configure>", _on_inner_config)
+
+        def _on_canvas_config(e):
+            canvas.itemconfig(inner_id, width=e.width)
+        canvas.bind("<Configure>", _on_canvas_config)
+
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
+
+        for group_title, class_list in _pg.COCO_GROUPS:
+            gf = ttk.LabelFrame(inner, text=group_title)
+            gf.pack(fill="x", padx=6, pady=4)
+            cols = 4
+            for idx, cname in enumerate(class_list):
+                r, c = divmod(idx, cols)
+                zh = _pg.COCO_ZH.get(cname, cname)
+                text = f"{zh}  ({cname})"
+                cb = ttk.Checkbutton(gf, text=text,
+                                     variable=self._protect_class_vars[cname])
+                cb.grid(row=r, column=c, sticky="w", padx=6, pady=2)
+                if cname == "person":
+                    self._protect_class_vars[cname].set(True)
+                    cb.configure(state="disabled")
+
+    def _protect_bulk(self, mode: str) -> None:
+        """『全选/全不选/恢复默认/仅人和车』快捷按钮实现。person 永远保持勾选。"""
+        if mode == "all":
+            for _, v in self._protect_class_vars.items():
+                v.set(True)
+        elif mode == "none":
+            for name, v in self._protect_class_vars.items():
+                v.set(name == "person")
+        elif mode == "default":
+            for name, v in self._protect_class_vars.items():
+                v.set(name in _pg.COCO_DEFAULT_PROTECT)
+        elif mode == "person_and_vehicle":
+            for name, v in self._protect_class_vars.items():
+                v.set(name == "person" or name in _pg.COCO_VEHICLE_SET)
+
+    def _get_selected_protect_arg(self) -> str:
+        names = [n for n, v in self._protect_class_vars.items() if v.get()]
+        if "person" not in names:
+            names.insert(0, "person")
+        return ",".join(names)
 
     def _build_about_tab(self, page: ttk.Frame):
         pad = {"padx": 12, "pady": 6}
@@ -392,6 +500,10 @@ class DedupeGUI:
                     cmd.append("--hard-delete")
                 if self._scene_protect_var.get():
                     cmd.append("--scene-protect")
+                # 保护类别（COCO 中文 tab 里勾的），拼成 --protect a,b,c
+                protect_arg = self._get_selected_protect_arg()
+                if protect_arg:
+                    cmd.extend(["--protect", protect_arg])
                 self._log(f"[命令] {' '.join(cmd)}")
 
                 creationflags = 0
@@ -481,6 +593,8 @@ class DedupeGUI:
             "force_rerun": bool(self._force_rerun_var.get()),
             "minimize_to_tray": bool(self._minimize_to_tray_var.get()),
             "hotkey": self._hotkey_var.get(),
+            "protect_classes": [n for n, v in
+                                self._protect_class_vars.items() if v.get()],
         }
         try:
             geo = self.root.winfo_geometry()

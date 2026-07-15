@@ -41,7 +41,7 @@ import pipeline  # noqa: E402
 
 
 APP_TITLE = "pic-clear 抽帧工具"
-APP_VERSION = "v0.2.1"
+APP_VERSION = "v0.2.2"
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "extract_gui.json"
 HOTKEY_DEFAULT = "ctrl+alt+e"

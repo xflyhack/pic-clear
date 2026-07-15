@@ -681,6 +681,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
         "daily_remain_limit": args.daily_remain_limit,
         "scene_protect": bool(args.scene_protect),
         "watch_interval": float(args.watch_interval),
+        "protect": (args.protect or "").strip() or None,
     }
     (job_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -898,6 +899,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
     daily_remain_limit = int(manifest.get("daily_remain_limit", 80000))
     scene_protect = bool(manifest.get("scene_protect", False))
     watch_interval = float(manifest.get("watch_interval", 3.0))
+    protect_arg = manifest.get("protect")  # 老 manifest 没有则为 None，走 dedupe_pic 默认
     if watch_interval <= 0:
         watch_interval = 3.0
 
@@ -978,6 +980,8 @@ def cmd_worker(args: argparse.Namespace) -> int:
                            "--report", str(report_csv)]
                     if scene_protect:
                         cmd.append("--scene-protect")
+                    if protect_arg:
+                        cmd.extend(["--protect", protect_arg])
                     if apply_delete:
                         cmd.append("--apply")
                         if hard_delete:
@@ -1355,6 +1359,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="场景保护：纯色屏/渐变屏等异常帧强制保留（推荐开）")
     sp.add_argument("--watch-interval", type=float, default=3.0,
                     help="watcher 扫描 _done.marker 的间隔秒。默认 3.0")
+    sp.add_argument("--protect", default=None,
+                    help=(
+                        "传给 dedupe_pic.exe 的 --protect 参数（COCO 英文类名，逗号分隔）。"
+                        "留空则用 dedupe_pic 自己的默认值（person,bicycle,car,motorcycle,bus,train,truck）。"
+                        "人硬保护；车类要相邻帧运动才保留；其它类别静止不动等于永久保留。"
+                    ))
 
     # worker (internal)
     wp = sub.add_parser("worker", parents=[common_out], help="[内部] 后台执行体，不要手动调")

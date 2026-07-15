@@ -460,6 +460,101 @@ def _tip_icon(parent: "tk.Widget", text: str) -> "tk.Label":
     return lbl
 
 
+# --- COCO 80 类中英文映射 + 分组 ---------------------------------------------
+#
+# 用途：pipe_gui 和 dedupe_gui 的『保护类别』Tab 用中文标签渲染复选框，
+# 用户勾选后再按英文名拼成 dedupe_pic.exe 的 --protect 参数。
+#
+# 保护规则（写死在 dedupe_pic.py，GUI 不动这个规则）：
+#   - person             → 硬保护，命中即保留（不管有没有动）
+#   - bicycle / car / motorcycle / bus / train / truck  → 软保护，相邻帧
+#                          位置发生变化才保留，静止则可参与去重
+#   - 其它 COCO 类别     → 也走"软保护"，但静态物品永远不会动，勾选后
+#                          等同于永久保留（用户要自己清楚这一点）
+
+# 保持顺序与 detector.COCO_NAMES 完全一致（后者不能改，模型输出下标绑定）
+COCO_ZH: dict[str, str] = {
+    "person": "人",
+    "bicycle": "自行车", "car": "汽车", "motorcycle": "摩托车",
+    "airplane": "飞机", "bus": "公交车", "train": "火车",
+    "truck": "卡车", "boat": "船", "traffic light": "红绿灯",
+    "fire hydrant": "消防栓", "stop sign": "停车标志",
+    "parking meter": "停车计时器", "bench": "长椅",
+    "bird": "鸟", "cat": "猫", "dog": "狗", "horse": "马",
+    "sheep": "羊", "cow": "牛", "elephant": "大象", "bear": "熊",
+    "zebra": "斑马", "giraffe": "长颈鹿",
+    "backpack": "背包", "umbrella": "雨伞", "handbag": "手提包",
+    "tie": "领带", "suitcase": "行李箱",
+    "frisbee": "飞盘", "skis": "滑雪板", "snowboard": "单板滑雪",
+    "sports ball": "运动球", "kite": "风筝",
+    "baseball bat": "棒球棒", "baseball glove": "棒球手套",
+    "skateboard": "滑板", "surfboard": "冲浪板", "tennis racket": "网球拍",
+    "bottle": "瓶子", "wine glass": "酒杯", "cup": "杯子",
+    "fork": "叉子", "knife": "刀", "spoon": "勺子", "bowl": "碗",
+    "banana": "香蕉", "apple": "苹果", "sandwich": "三明治",
+    "orange": "橙子", "broccoli": "西兰花", "carrot": "胡萝卜",
+    "hot dog": "热狗", "pizza": "披萨", "donut": "甜甜圈", "cake": "蛋糕",
+    "chair": "椅子", "couch": "沙发", "potted plant": "盆栽",
+    "bed": "床", "dining table": "餐桌", "toilet": "马桶",
+    "tv": "电视", "laptop": "笔记本", "mouse": "鼠标", "remote": "遥控器",
+    "keyboard": "键盘", "cell phone": "手机",
+    "microwave": "微波炉", "oven": "烤箱", "toaster": "烤面包机",
+    "sink": "水槽", "refrigerator": "冰箱",
+    "book": "书本", "clock": "时钟", "vase": "花瓶", "scissors": "剪刀",
+    "teddy bear": "泰迪熊", "hair drier": "吹风机", "toothbrush": "牙刷",
+}
+
+# 分组显示，让 80 个复选框不堆成一坨
+COCO_GROUPS: list[tuple[str, list[str]]] = [
+    ("人（硬保护）", ["person"]),
+    ("交通工具（默认车类软保护，运动才保留）", [
+        "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+        "truck", "boat",
+    ]),
+    ("交通设施", [
+        "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
+    ]),
+    ("动物", [
+        "bird", "cat", "dog", "horse", "sheep", "cow",
+        "elephant", "bear", "zebra", "giraffe",
+    ]),
+    ("配件 / 随身物品", [
+        "backpack", "umbrella", "handbag", "tie", "suitcase",
+    ]),
+    ("运动器材", [
+        "frisbee", "skis", "snowboard", "sports ball", "kite",
+        "baseball bat", "baseball glove", "skateboard", "surfboard",
+        "tennis racket",
+    ]),
+    ("餐具 / 食物", [
+        "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl",
+        "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
+        "hot dog", "pizza", "donut", "cake",
+    ]),
+    ("家具", [
+        "chair", "couch", "potted plant", "bed", "dining table", "toilet",
+    ]),
+    ("电器", [
+        "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
+        "microwave", "oven", "toaster", "sink", "refrigerator",
+    ]),
+    ("其它物品", [
+        "book", "clock", "vase", "scissors", "teddy bear", "hair drier",
+        "toothbrush",
+    ]),
+]
+
+# 默认勾选：跟 dedupe_pic.py --protect 的默认值完全一致
+COCO_DEFAULT_PROTECT: list[str] = [
+    "person", "bicycle", "car", "motorcycle", "bus", "train", "truck",
+]
+
+# 「车类」软保护集合：勾了这些的默认逻辑跟 dedupe_pic.py 一致
+COCO_VEHICLE_SET: set[str] = {
+    "bicycle", "car", "motorcycle", "bus", "train", "truck",
+}
+
+
 # --- DPI 自适应 -------------------------------------------------------------
 
 # Tk 的默认 scaling 系数（对应 72dpi 到 96dpi 的换算：96/72 = 1.333...）。
@@ -935,7 +1030,7 @@ def show_license_error_dialog(info: dict) -> None:
 
 class PipeGUI:
     APP_TITLE = "pic-clear"
-    APP_VERSION = "v0.2.1"
+    APP_VERSION = "v0.2.2"
     APP_COMPANY = "山东数旗信息科技有限公司"
     REFRESH_MS = 5000
 
@@ -984,6 +1079,14 @@ class PipeGUI:
         self._watch_interval_var = tk.DoubleVar(value=3.0)
         self._hotkey_var = tk.StringVar(value="ctrl+alt+p")
 
+        # 保护类别（COCO 80）：class_name -> BooleanVar
+        # 默认按 COCO_DEFAULT_PROTECT 勾选；『关闭时最小化』等一样，_apply_loaded_config
+        # 会用配置文件覆盖。
+        self._protect_class_vars: dict[str, tk.BooleanVar] = {
+            name: tk.BooleanVar(value=(name in COCO_DEFAULT_PROTECT))
+            for name in COCO_ZH.keys()
+        }
+
         self._sub_vars: list[tuple[str, tk.BooleanVar]] = []
         # 子目录进度 Label 引用：name -> Label
         self._sub_progress_labels: dict[str, "ttk.Label"] = {}
@@ -1019,11 +1122,13 @@ class PipeGUI:
 
         tab_home = ttk.Frame(self._nb)
         tab_dedup = ttk.Frame(self._nb)
+        tab_protect = ttk.Frame(self._nb)
         tab_extract = ttk.Frame(self._nb)
         tab_bg = ttk.Frame(self._nb)
         tab_about = ttk.Frame(self._nb)
         self._nb.add(tab_home, text="  主页  ")
         self._nb.add(tab_dedup, text="  去重参数  ")
+        self._nb.add(tab_protect, text="  保护类别  ")
         self._nb.add(tab_extract, text="  抽帧 & 编排  ")
         self._nb.add(tab_bg, text="  后台 & 快捷键  ")
         self._nb.add(tab_about, text="  关于  ")
@@ -1033,6 +1138,9 @@ class PipeGUI:
 
         # ============= Tab 2：去重参数 =============
         self._build_tab_dedup(tab_dedup, pad)
+
+        # ============= Tab 2.5：保护类别（COCO 80 类中文勾选） =============
+        self._build_tab_protect(tab_protect, pad)
 
         # ============= Tab 3：抽帧 & 编排 =============
         self._build_tab_extract(tab_extract, pad)
@@ -1203,6 +1311,110 @@ class PipeGUI:
                   "即抽即删，中间不会堆积占磁盘。"),
         )
         note.pack(fill="x", padx=14, pady=(4, 8), anchor="w")
+
+    def _build_tab_protect(self, tab: "ttk.Frame", pad: dict):
+        """保护类别 Tab：COCO 80 类中文复选框，用户勾了的类别会被传给
+        dedupe_pic.exe 的 --protect 参数。
+
+        规则说明（也显示在 UI 顶部）：
+          - 人  → 硬保护，命中即保留（永不删）
+          - 车  → 软保护，相邻帧位置发生变化才保留，静止则可去重
+          - 其它类别 → 也走软保护逻辑，但静态物品永远不动，勾了等于永久保留
+        """
+        # 顶部说明
+        head = ttk.Frame(tab); head.pack(fill="x", **pad)
+        ttk.Label(head, text="保护类别（YOLO 检测到勾选项就保护，人=硬保护，车=运动才保护）",
+                  font=("Microsoft YaHei", 11, "bold"),
+                  foreground="#0066cc").pack(anchor="w")
+        ttk.Label(head, text=(
+            "• 人：命中即保留，永远不删\n"
+            "• 车（自行车/汽车/摩托车/公交车/火车/卡车）：相邻帧发生位移才保留，"
+            "静止不动可参与相似度去重\n"
+            "• 其它类别：也走『软保护』逻辑，但静物永远不会动，勾选后等同于永久保留"),
+            font=("Microsoft YaHei", 9),
+            foreground="#555", justify="left").pack(anchor="w", pady=(2, 4))
+
+        # 快捷按钮条
+        btnbar = ttk.Frame(tab); btnbar.pack(fill="x", **pad)
+        ttk.Button(btnbar, text="全选",
+                   command=lambda: self._protect_bulk("all")).pack(
+            side="left", padx=2)
+        ttk.Button(btnbar, text="全不选",
+                   command=lambda: self._protect_bulk("none")).pack(
+            side="left", padx=2)
+        ttk.Button(btnbar, text="恢复默认（7 类）",
+                   command=lambda: self._protect_bulk("default")).pack(
+            side="left", padx=2)
+        ttk.Button(btnbar, text="仅保留人和车",
+                   command=lambda: self._protect_bulk("person_and_vehicle")).pack(
+            side="left", padx=2)
+
+        # 复选框区：滚动 + 分组
+        canvas_frame = ttk.Frame(tab)
+        canvas_frame.pack(fill="both", expand=True, **pad)
+        canvas = tk.Canvas(canvas_frame, borderwidth=0, highlightthickness=0)
+        vbar = ttk.Scrollbar(canvas_frame, orient="vertical",
+                             command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        vbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(canvas)
+        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_config(_e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        inner.bind("<Configure>", _on_inner_config)
+
+        def _on_canvas_config(e):
+            canvas.itemconfig(inner_id, width=e.width)
+        canvas.bind("<Configure>", _on_canvas_config)
+
+        # 鼠标滚轮支持（Windows）
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
+
+        # 分组渲染
+        for group_title, class_list in COCO_GROUPS:
+            gf = ttk.LabelFrame(inner, text=group_title)
+            gf.pack(fill="x", padx=6, pady=4)
+            # 每行 4 列
+            cols = 4
+            for idx, cname in enumerate(class_list):
+                r, c = divmod(idx, cols)
+                zh = COCO_ZH.get(cname, cname)
+                text = f"{zh}  ({cname})"
+                cb = ttk.Checkbutton(gf, text=text,
+                                     variable=self._protect_class_vars[cname])
+                cb.grid(row=r, column=c, sticky="w", padx=6, pady=2)
+                # person 是硬保护，禁止取消勾选
+                if cname == "person":
+                    self._protect_class_vars[cname].set(True)
+                    cb.configure(state="disabled")
+                    _add_tip(cb, "人是硬保护，命中即保留，不允许取消。")
+
+    def _protect_bulk(self, mode: str) -> None:
+        """『全选/全不选/恢复默认/仅人和车』快捷按钮实现。person 永远保持勾选。"""
+        if mode == "all":
+            for name, v in self._protect_class_vars.items():
+                v.set(True)
+        elif mode == "none":
+            for name, v in self._protect_class_vars.items():
+                v.set(name == "person")  # person 强制勾
+        elif mode == "default":
+            for name, v in self._protect_class_vars.items():
+                v.set(name in COCO_DEFAULT_PROTECT)
+        elif mode == "person_and_vehicle":
+            for name, v in self._protect_class_vars.items():
+                v.set(name == "person" or name in COCO_VEHICLE_SET)
+
+    def _get_selected_protect_arg(self) -> str:
+        """把当前勾选的类别拼成 --protect 参数需要的字符串。
+        person 是硬保护，永远包含。空返回空字符串，让 pipeline 走 dedupe_pic 默认。"""
+        names = [name for name, v in self._protect_class_vars.items() if v.get()]
+        if "person" not in names:
+            names.insert(0, "person")  # 兜底保证 person 一定在
+        return ",".join(names)
 
     def _build_tab_bg(self, tab: "ttk.Frame", pad: dict):
         """后台 & 快捷键 tab"""
@@ -1450,6 +1662,14 @@ class PipeGUI:
         if cfg.get("hotkey"):
             self._hotkey_var.set(cfg["hotkey"])
 
+        # 保护类别（老配置没有 protect_classes 字段则保持默认 7 类）
+        pc = cfg.get("protect_classes")
+        if isinstance(pc, list):
+            for name, var in self._protect_class_vars.items():
+                var.set(name in pc)
+            # person 无论配置里有没有，都强制勾选
+            self._protect_class_vars["person"].set(True)
+
         # 源目录填好了就顺手扫一次子目录（并勾选上次选过的）
         if src and Path(src).is_dir():
             self._rescan_subs()
@@ -1475,6 +1695,8 @@ class PipeGUI:
             "daily_remain_limit": int(self._daily_remain_limit_var.get()),
             "watch_interval": float(self._watch_interval_var.get()),
             "selected_subs": [name for name, v in self._sub_vars if v.get()],
+            "protect_classes": [name for name, v in
+                                self._protect_class_vars.items() if v.get()],
         }
         # 记住主窗口当前几何位置，下次打开还原
         try:
@@ -1735,6 +1957,7 @@ class PipeGUI:
             daily_remain_limit=int(self._daily_remain_limit_var.get()),
             scene_protect=bool(self._scene_protect_var.get()),
             watch_interval=float(self._watch_interval_var.get()),
+            protect=self._get_selected_protect_arg(),
             fingerprint=False,
         )
 
