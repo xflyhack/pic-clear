@@ -345,10 +345,11 @@ def _find_camera_dirs(
     camera_name: str,
     log=None,
 ) -> list[Path]:
-    """递归找所有名为 camera_name 的目录。
-    - 用 pathlib 的 .name 兼容 Windows 正/反斜杠混排
-    - 匹配不区分大小写，防止 Camera/CAMERA 漏掉
-    - 前 20 层目录打调试日志，便于排查 "扫不到" 的疑难杂症
+    """递归找所有目录名**包含** camera_name 的目录。
+    - 大小写不敏感的 substring 匹配
+      例：关键字 'camera' 命中 'camera' / 'camera01' / 'DMS_camera01_frames'
+    - 命中后 dirs[:] = [] 剪掉子树，不再深挖，避免嵌套 camera 名字重复处理
+    - 只打命中日志，避免海量 walk 日志淹没界面
     """
     result: list[Path] = []
     target = camera_name.lower()
@@ -356,13 +357,13 @@ def _find_camera_dirs(
     for dirpath, dirs, _files in os.walk(in_root):
         walked += 1
         name = Path(dirpath).name
-        if walked <= 20 and log is not None:
-            log(f"  [walk] {dirpath}  name={name!r}  subdirs={dirs[:5]}")
-        if name.lower() == target:
+        if target in name.lower():
             result.append(Path(dirpath))
-            dirs[:] = []
+            if log is not None:
+                log(f"  [命中] {dirpath}")
+            dirs[:] = []  # 剪枝：这一支不再往下挖
     if log is not None:
-        log(f"  [walk] 总共遍历 {walked} 个目录，命中 {len(result)} 个")
+        log(f"  [扫描] 总共遍历 {walked} 个目录，命中 {len(result)} 个")
     return result
 
 

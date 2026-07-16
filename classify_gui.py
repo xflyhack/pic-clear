@@ -33,7 +33,7 @@ from classify_pic import (
 
 
 APP_TITLE = "pic-clear 二次分类工具"
-APP_VERSION = "v0.4.17"
+APP_VERSION = "v0.4.18"
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "classify_gui.json"
 
