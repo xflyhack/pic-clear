@@ -54,6 +54,41 @@ def _config_path() -> Path:
     return Path(os.path.expanduser("~")) / ".pic-clear" / CONFIG_NAME
 
 
+def _log_dir() -> Path:
+    return Path(os.path.expanduser("~")) / ".pic-clear" / "extract_gui_logs"
+
+
+def _new_log_path() -> Path:
+    """本次启动的日志文件路径：extract_gui_YYYYMMDD_HHMM.log。"""
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    d = _log_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"extract_gui_{ts}.log"
+
+
+def _latest_prev_log(exclude: Path) -> Path | None:
+    """找上次留下的最新日志文件（时间戳最大，排除本次刚建的）。"""
+    d = _log_dir()
+    if not d.is_dir():
+        return None
+    candidates = sorted(
+        (p for p in d.glob("extract_gui_*.log") if p != exclude),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _tail_lines(path: Path, n: int = 200) -> list[str]:
+    """读文件末尾 n 行；文件不大直接 readlines，够用。"""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        return lines[-n:]
+    except Exception:
+        return []
+
+
 def _load_config() -> dict:
     p = _config_path()
     if not p.is_file():
@@ -156,6 +191,17 @@ class ExtractGUI:
         self._progress_var = tk.StringVar(value="就绪")
         self._total_videos = 0
         self._done_videos = 0
+
+        # 日志文件（本次启动新建一份，不覆盖历史）
+        self._log_path = _new_log_path()
+        try:
+            self._log_file = self._log_path.open("a", encoding="utf-8")
+        except Exception:
+            self._log_file = None
+        self._log_file_lock = threading.Lock()
+
+        # 智能自动滚动：手动往上翻则暂停跟随，滚回底部自动恢复
+        self._auto_scroll_var = tk.BooleanVar(value=True)
 
         self._build_ui()
         self.root.after(200, self._drain_log_queue)
@@ -268,11 +314,35 @@ class ExtractGUI:
         ttk.Label(row, text="进度：").pack(side="left")
         ttk.Label(row, textvariable=self._progress_var,
                   foreground="#0066cc").pack(side="left")
+        # 日志控制条（右侧）：自动滚 + 打开日志文件夹
+        ttk.Button(row, text="打开日志文件夹",
+                   command=self._open_log_dir).pack(side="right", padx=4)
+        ttk.Checkbutton(row, text="自动滚到底",
+                        variable=self._auto_scroll_var).pack(side="right", padx=4)
+        ttk.Label(row, text=f"  日志：{self._log_path.name}",
+                  foreground="#888").pack(side="right", padx=4)
 
-        self._log_text = tk.Text(page, height=10,
-                                 font=("Consolas", 9))
-        self._log_text.pack(fill="both", expand=False, padx=6, pady=(2, 6))
+        # 日志区：Text + 纵向滚动条（放在同一个 Frame 里）
+        log_wrap = ttk.Frame(page)
+        log_wrap.pack(fill="both", expand=True, padx=6, pady=(2, 6))
+        self._log_text = tk.Text(log_wrap, height=16,
+                                 font=("Consolas", 9), wrap="none")
+        self._log_vsb = ttk.Scrollbar(log_wrap, orient="vertical",
+                                      command=self._on_log_scrollbar)
+        self._log_text.configure(yscrollcommand=self._on_log_yview)
+        self._log_text.grid(row=0, column=0, sticky="nsew")
+        self._log_vsb.grid(row=0, column=1, sticky="ns")
+        log_wrap.rowconfigure(0, weight=1)
+        log_wrap.columnconfigure(0, weight=1)
+        # 鼠标滚轮 / 键盘翻页触发时判定是否在底部（暂停自动滚）
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>",
+                    "<Prior>", "<Next>", "<Up>", "<Down>",
+                    "<Key-Home>", "<Key-End>"):
+            self._log_text.bind(seq, self._on_log_user_scroll, add="+")
         self._log_text.config(state="disabled")
+
+        # 载入上次日志末尾 200 行，方便接着看
+        self._preload_prev_log_tail()
 
         # 托盘 / 快捷键
         row = ttk.Frame(page); row.pack(fill="x", **pad)
@@ -527,20 +597,107 @@ class ExtractGUI:
     # ---------- 日志 ----------
 
     def _log(self, msg: str):
-        ts = datetime.now().strftime("%H:%M:%S")
-        self._log_queue.put(f"[{ts}] {msg}\n")
+        """线程安全：把日志放进队列 + 同步 append 到当前日志文件。"""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{ts}] {msg}\n"
+        # 落盘（跨线程写文件加锁）
+        if self._log_file is not None:
+            try:
+                with self._log_file_lock:
+                    self._log_file.write(line)
+                    self._log_file.flush()
+            except Exception:
+                pass
+        # 主线程刷 UI
+        self._log_queue.put(line)
 
     def _drain_log_queue(self):
         try:
+            appended = False
             while True:
                 line = self._log_queue.get_nowait()
                 self._log_text.config(state="normal")
                 self._log_text.insert("end", line)
-                self._log_text.see("end")
                 self._log_text.config(state="disabled")
+                appended = True
         except queue.Empty:
             pass
+        # 只有勾选『自动滚到底』才追到最新
+        if appended and self._auto_scroll_var.get():
+            self._log_text.see("end")
         self.root.after(200, self._drain_log_queue)
+
+    # ---- 智能滚动 & 日志文件辅助 ----
+
+    def _on_log_yview(self, first: str, last: str) -> None:
+        """Text 的 yscrollcommand：同步滚动条位置 + 到底部时恢复自动滚。"""
+        # 同步滚动条 UI
+        try:
+            self._log_vsb.set(first, last)
+        except Exception:
+            pass
+        # 若滚回底部，自动恢复跟随
+        try:
+            lnum = float(last)
+        except Exception:
+            return
+        if lnum >= 0.9999 and not self._auto_scroll_var.get():
+            self._auto_scroll_var.set(True)
+
+    def _on_log_scrollbar(self, *args) -> None:
+        """用户拖动滚动条：正常滚动 + 判定是否离开底部。"""
+        self._log_text.yview(*args)
+        try:
+            _, last = self._log_text.yview()
+            if last < 0.9999:
+                self._auto_scroll_var.set(False)
+        except Exception:
+            pass
+
+    def _on_log_user_scroll(self, _event=None) -> None:
+        """鼠标滚轮 / 键盘导致的滚动：稍后判定是否已离开底部。"""
+        self.root.after(1, self._maybe_pause_autoscroll)
+
+    def _maybe_pause_autoscroll(self) -> None:
+        try:
+            _, last = self._log_text.yview()
+            if last < 0.9999:
+                self._auto_scroll_var.set(False)
+            else:
+                self._auto_scroll_var.set(True)
+        except Exception:
+            pass
+
+    def _preload_prev_log_tail(self) -> None:
+        """启动时把上次日志末尾若干行填进 Text，方便接着看。"""
+        prev = _latest_prev_log(exclude=self._log_path)
+        if prev is None:
+            return
+        lines = _tail_lines(prev, 200)
+        if not lines:
+            return
+        self._log_text.config(state="normal")
+        self._log_text.insert("end",
+            f"===== 上次日志 tail 200 行：{prev.name} =====\n")
+        for line in lines:
+            self._log_text.insert("end", line)
+        self._log_text.insert("end",
+            f"===== 上次日志结束 · 当前日志：{self._log_path.name} =====\n")
+        self._log_text.see("end")
+        self._log_text.config(state="disabled")
+
+    def _open_log_dir(self) -> None:
+        d = _log_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            if os.name == "nt":
+                os.startfile(str(d))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(d)])
+            else:
+                subprocess.Popen(["xdg-open", str(d)])
+        except Exception as e:
+            self._log(f"[错误] 打开日志目录失败：{e}")
 
     # ---------- 配置 ----------
 
