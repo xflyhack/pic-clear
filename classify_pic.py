@@ -32,7 +32,7 @@ import os
 import shutil
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -456,19 +456,62 @@ def process_all(
                 )
 
 
+
+def _in_root_top_segments(in_root: Path) -> Path:
+    """把输入根路径转成输出下的顶层子路径。
+    去掉盘符/前导分隔符/UNC 主机段，保留有意义的目录名。
+    例:
+      Z:\\切帧结果\\测试\\分类测试1\\camera → Path("切帧结果/测试/分类测试1/camera")
+      \\\\host\\share\\a\\b               → Path("a/b")
+      /Users/xxx/data                → Path("Users/xxx/data")
+    """
+    raw = str(in_root).replace("\\", "/")
+    # 去掉盘符 X:
+    if len(raw) >= 2 and raw[1] == ":":
+        raw = raw[2:]
+    # 去掉 UNC \\host\share 或 //host/share 前两段
+    parts = [p for p in raw.split("/") if p]
+    if raw.startswith("//") or (len(parts) >= 2 and str(in_root).startswith("\\\\")):
+        parts = parts[2:]  # 去掉 host + share
+    if not parts:
+        return Path(".")
+    return Path(*parts)
+
+
 def run(
     cfg: ClassifyConfig,
     log: LogFn = _default_log,
     cancel: CancelFn | None = None,
 ) -> Stats:
     in_root_str = str(cfg.in_root)
-    log(f"[输入] 原始路径: {in_root_str!r}")
+    # ---- 诊断日志（v0.4.22 新增，帮排查路径问题）----
+    log(f"[诊断] 原始输入字符串 = {in_root_str!r}")
+    try:
+        log(f"[诊断] os.path.isdir  = {os.path.isdir(in_root_str)}")
+    except Exception as _e:
+        log(f"[诊断] os.path.isdir  报错: {_e}")
+    try:
+        log(f"[诊断] os.path.exists = {os.path.exists(in_root_str)}")
+    except Exception as _e:
+        log(f"[诊断] os.path.exists 报错: {_e}")
+    try:
+        _entries = os.listdir(in_root_str)
+        log(f"[诊断] os.listdir     = {_entries[:5]}  (共 {len(_entries)} 项)")
+    except Exception as _e:
+        log(f"[诊断] os.listdir     报错: {_e}")
+    # -----------------------------------------------
     if not os.path.isdir(in_root_str):
-        # 兜底再试 os.path.exists，UNC/中文情况下有时 isdir 抽风
         if os.path.exists(in_root_str):
             log(f"[警告] isdir=False 但 exists=True，继续尝试遍历")
         else:
             raise FileNotFoundError(f"输入目录不存在: {in_root_str}")
+    # 输出保留输入根的完整层级
+    top_prefix = _in_root_top_segments(cfg.in_root)
+    log(f"[输出] 顶层前缀     = {top_prefix}")
+    real_out = cfg.out_root / top_prefix
+    real_out.mkdir(parents=True, exist_ok=True)
+    # 把 cfg 的 out_root 替换为带顶层前缀后的实际输出根
+    cfg = _dc_replace(cfg, out_root=real_out)
     cfg.out_root.mkdir(parents=True, exist_ok=True)
 
     from detector import YoloDetector, resolve_model_path
