@@ -33,6 +33,8 @@ from classify_pic import (
 
 
 APP_TITLE = "pic-clear 二次分类工具"
+APP_VERSION = "v0.4.17"
+APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "classify_gui.json"
 
 # GUI 里给用户显示的桶列表（跟 classify_pic 里保持一致）
@@ -72,7 +74,7 @@ def _save_config(cfg: dict) -> None:
 class ClassifyApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
-        root.title(APP_TITLE)
+        root.title(f"{APP_TITLE}  {APP_VERSION}")
         root.geometry("980x760")
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
@@ -112,8 +114,13 @@ class ClassifyApp:
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         pad = {"padx": 8, "pady": 4}
-        outer = ttk.Frame(self.root)
-        outer.pack(fill="both", expand=True, padx=8, pady=8)
+        nb = ttk.Notebook(self.root)
+        nb.pack(fill="both", expand=True, padx=8, pady=8)
+        outer = ttk.Frame(nb)
+        nb.add(outer, text="  分类  ")
+        about = ttk.Frame(nb)
+        nb.add(about, text="  关于  ")
+        self._build_about_tab(about)
 
         # 顶部：路径 + 参数
         top = ttk.LabelFrame(outer, text="路径与基本参数")
@@ -368,6 +375,33 @@ class ClassifyApp:
 
     def _clear_log(self) -> None:
         self.log.delete("1.0", END)
+
+    # -------------------------------------------------- 关于 tab
+    def _build_about_tab(self, page: ttk.Frame) -> None:
+        pad = {"padx": 12, "pady": 6}
+        ttk.Label(page, text=APP_TITLE,
+                  font=("Microsoft YaHei", 16, "bold")).pack(pady=(24, 4))
+        ttk.Label(page, text=f"版本  {APP_VERSION}",
+                  foreground="#0a7").pack(pady=2)
+        ttk.Label(page, text=APP_COMPANY,
+                  foreground="#c0392b",
+                  font=("Microsoft YaHei", 10, "bold")).pack(pady=(4, 12))
+        ttk.Label(
+            page,
+            text=("对已去重图片二次分类：\n"
+                  "  · 舱外活体检测（骑行/滑板/三轮）\n"
+                  "  · 人体关键点（步行/站立）\n"
+                  "  · 前备箱防夹检测\n"
+                  "  · 前机盖开关检测（少样本 embedding）\n"
+                  "  · 遮挡（少样本 embedding）"),
+            foreground="#555", justify="left",
+        ).pack(anchor="w", **pad)
+        ttk.Label(
+            page,
+            text=("配置文件：%USERPROFILE%\\.pic-clear\\classify_gui.json\n"
+                  "license.lic / otp.secret 与其他 exe 共用"),
+            foreground="#888", justify="left", font=("Consolas", 9),
+        ).pack(anchor="w", **pad)
 
     # -------------------------------------------------- 配置持久化
     def _dump_config(self) -> dict:
