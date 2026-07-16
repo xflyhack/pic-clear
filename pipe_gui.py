@@ -984,7 +984,7 @@ def show_license_error_dialog(info: dict) -> None:
     - 底部『退出』按钮
     关闭窗口后 sys.exit(3)。"""
     root = tk.Tk()
-    root.title("pic-clear 未授权")
+    root.title("pic-clear 编排工具 - 未授权")
     _apply_window_icon(root)
     root.resizable(False, False)
     try:
@@ -1134,7 +1134,7 @@ def show_otp_dialog(secret: str) -> bool:
         return True
 
     root = tk.Tk()
-    root.title("pic-clear 动态口令")
+    root.title("pic-clear 编排工具 - 动态口令")
     _apply_window_icon(root)
     root.resizable(False, False)
     try:
@@ -1272,7 +1272,7 @@ def require_otp_or_die() -> None:
 
 
 class PipeGUI:
-    APP_TITLE = "pic-clear"
+    APP_TITLE = "pic-clear 编排工具"
     APP_VERSION = "v0.3.0"
     APP_COMPANY = "山东数旗信息科技有限公司"
     REFRESH_MS = 5000
@@ -2544,7 +2544,7 @@ class PipeGUI:
             top = tk.Toplevel(self.root)
         except Exception:
             return
-        top.title("pic-clear 已最小化到托盘")
+        top.title("pic-clear 编排工具 - 已最小化到托盘")
         _apply_window_icon(top)
         try:
             top.transient(self.root)
@@ -2629,7 +2629,7 @@ class PipeGUI:
             return
         w = tk.Toplevel(self.root)
         self._status_toplevel = w
-        w.title("pic-clear 运行状态")
+        w.title("pic-clear 编排工具 - 运行状态")
         _apply_window_icon(w)
         w.geometry(_scale_geometry(720, 520, getattr(self, "_ui_scale", 1.0)))
         w.protocol("WM_DELETE_WINDOW", lambda: (w.withdraw()))
@@ -2735,7 +2735,7 @@ class PipeGUI:
             return
         w = tk.Toplevel(self.root)
         self._log_toplevel = w
-        w.title("pic-clear 日志")
+        w.title("pic-clear 编排工具 - 日志")
         _apply_window_icon(w)
         w.geometry(_scale_geometry(900, 560, getattr(self, "_ui_scale", 1.0)))
         w.protocol("WM_DELETE_WINDOW", lambda: (w.withdraw()))
