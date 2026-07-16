@@ -965,6 +965,90 @@ def probe_license_status() -> dict:
     return info
 
 
+def render_license_info(root, parent, info: dict | None) -> None:
+    """把授权信息渲染到给定的父容器（ttk.Frame）里。
+    先清空 parent 已有子控件，再依次显示 状态 / 发放给 / 过期 / 备注 / 指纹 / lic 路径。
+    这是给 extract_gui / dedupe_gui 等复用的公共实现，与 pipe_gui 关于 tab 一致。
+    """
+    from tkinter import ttk
+    import tkinter as tk
+    for w in parent.winfo_children():
+        w.destroy()
+    if not info:
+        info = probe_license_status()
+
+    payload = info.get("payload") or {}
+    issued_to = payload.get("issued_to", "-")
+    expire = str(payload.get("expire_date", "never")).strip()
+    expire_disp = "永久" if expire.lower() in ("never", "", "none") else expire
+    note = payload.get("note", "") or ""
+    lic_path = info.get("license_path")
+    fp = info.get("fingerprint", "?")
+    ok = bool(info.get("ok"))
+
+    row = ttk.Frame(parent); row.pack(fill="x", padx=10, pady=(6, 3))
+    ttk.Label(row, text="状态：", width=12, foreground="#555").pack(side="left")
+    ttk.Label(row,
+              text=("✔ 已授权" if ok else "✘ 未授权"),
+              foreground=("#0a7f2e" if ok else "#c0392b"),
+              font=("Microsoft YaHei", 10, "bold")).pack(side="left")
+    if info.get("msg"):
+        ttk.Label(row, text=f"   ({info['msg']})",
+                  foreground="#888",
+                  font=("Microsoft YaHei", 9)).pack(side="left")
+
+    row = ttk.Frame(parent); row.pack(fill="x", padx=10, pady=3)
+    ttk.Label(row, text="发放给：", width=12, foreground="#555").pack(side="left")
+    ttk.Label(row, text=issued_to,
+              font=("Microsoft YaHei", 10)).pack(side="left")
+
+    row = ttk.Frame(parent); row.pack(fill="x", padx=10, pady=3)
+    ttk.Label(row, text="过期日期：", width=12, foreground="#555").pack(side="left")
+    ttk.Label(row, text=expire_disp,
+              font=("Microsoft YaHei", 10)).pack(side="left")
+
+    if note:
+        row = ttk.Frame(parent); row.pack(fill="x", padx=10, pady=3)
+        ttk.Label(row, text="备注：", width=12, foreground="#555").pack(side="left")
+        ttk.Label(row, text=note,
+                  font=("Microsoft YaHei", 10)).pack(side="left")
+
+    row = ttk.Frame(parent); row.pack(fill="x", padx=10, pady=(8, 3))
+    ttk.Label(row, text="本机指纹：", width=12, foreground="#555").pack(side="left")
+    fp_entry = tk.Entry(row, font=("Consolas", 11, "bold"),
+                        relief="flat", readonlybackground="#f5f5f5",
+                        foreground="#0057b7", width=22)
+    fp_entry.insert(0, fp)
+    fp_entry.config(state="readonly")
+    fp_entry.pack(side="left")
+
+    copy_msg = tk.StringVar(value="")
+
+    def do_copy():
+        if _copy_to_clipboard(root, fp):
+            copy_msg.set("✓ 已复制")
+        else:
+            copy_msg.set("✗ 复制失败")
+        root.after(2000, lambda: copy_msg.set(""))
+
+    ttk.Button(row, text="复制", command=do_copy, width=6).pack(side="left", padx=6)
+    ttk.Label(row, textvariable=copy_msg,
+              foreground="#0a7f2e",
+              font=("Microsoft YaHei", 9)).pack(side="left")
+
+    if lic_path:
+        row = ttk.Frame(parent); row.pack(fill="x", padx=10, pady=(8, 8))
+        ttk.Label(row, text="license.lic 路径：",
+                  foreground="#888",
+                  font=("Microsoft YaHei", 9)).pack(side="left")
+        path_entry = tk.Entry(row, font=("Consolas", 9),
+                              relief="flat", readonlybackground="#f5f5f5",
+                              foreground="#666")
+        path_entry.insert(0, str(lic_path))
+        path_entry.config(state="readonly")
+        path_entry.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+
 def _copy_to_clipboard(root: "tk.Misc", text: str) -> bool:
     """跨会话可靠复制：clear + append + update，返回是否成功。"""
     try:

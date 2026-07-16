@@ -424,12 +424,11 @@ class DedupeGUI:
                   foreground="#c0392b",
                   font=("Microsoft YaHei", 10, "bold")).pack(pady=(4, 20))
 
-        info = getattr(self, "_license_info", {}) or {}
-        text = "授权：" + info.get("msg", "未知")
-        if info.get("fingerprint"):
-            text += f"\n本机指纹：{info.get('fingerprint')}"
-        ttk.Label(page, text=text, justify="left",
-                  foreground="#333").pack(**pad, anchor="w")
+        # 授权信息（占位，由 _refresh_about_license 填充）
+        self._about_lic_frame = ttk.LabelFrame(page, text="授权信息")
+        self._about_lic_frame.pack(fill="x", padx=12, pady=8)
+        ttk.Label(self._about_lic_frame, text="加载中…",
+                  foreground="#888").pack(padx=10, pady=8, anchor="w")
 
         exe = _find_dedupe_exe()
         if exe:
@@ -441,6 +440,21 @@ class DedupeGUI:
                       foreground="#c0392b").pack(anchor="w", **pad)
 
     # ---------- 目录选择 ----------
+
+
+    def _refresh_about_license(self):
+        """由 main() 在拿到 license_info 后调用，把授权信息填进关于 Tab。"""
+        info = getattr(self, "_license_info", None)
+        frame = getattr(self, "_about_lic_frame", None)
+        if frame is None:
+            return
+        try:
+            _pg.render_license_info(self.root, frame, info)
+        except Exception as e:
+            for w in frame.winfo_children():
+                w.destroy()
+            ttk.Label(frame, text=f"（渲染失败：{e}）",
+                      foreground="#c0392b").pack(padx=10, pady=8, anchor="w")
 
     def _browse_target(self):
         init = self._target_var.get() or os.path.expanduser("~")
@@ -868,6 +882,10 @@ def main() -> int:
         root.__ui_scale__ = scale
         app = DedupeGUI(root)
         app._license_info = license_info
+        try:
+            app._refresh_about_license()
+        except Exception:
+            pass
         root.update_idletasks()
         root.deiconify()
         root.mainloop()
