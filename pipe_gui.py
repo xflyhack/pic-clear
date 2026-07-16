@@ -1344,22 +1344,31 @@ def require_otp_or_die() -> None:
         return
     secret = _read_otp_secret()
     if not secret:
-        # 强制要求 OTP：找不到 otp.secret 直接终止启动
-        secret_path = _resolve_otp_secret_path()
-        msg = (
-            "缺少动态口令密钥文件 otp.secret\n\n"
-            f"预期位置：{secret_path}\n\n"
-            "请联系管理员在 OTP 后台生成密钥，把 otp.secret 放到 exe 同目录后重试。"
-        )
-        print(f"[OTP] {msg}", file=sys.stderr)
+        # 找不到 otp.secret：自动生成一份写到 exe 同目录，用户不用手动创建
         try:
-            from tkinter import Tk, messagebox
-            _r = Tk(); _r.withdraw()
-            messagebox.showerror("pic-clear 启动失败：缺少 otp.secret", msg)
-            _r.destroy()
-        except Exception:
-            pass
-        sys.exit(4)
+            from otp_utils import generate_secret as _gen
+        except Exception as e:
+            print(f"[OTP] 加载 otp_utils 失败：{e}", file=sys.stderr)
+            sys.exit(4)
+        secret_path = _resolve_otp_secret_path()
+        try:
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            new_secret = _gen()
+            secret_path.write_text(new_secret + "\n", encoding="utf-8")
+            print(f"[OTP] 已自动生成 otp.secret → {secret_path}", flush=True)
+            secret = new_secret
+        except Exception as e:
+            print(f"[OTP] 无法写入 otp.secret：{e}", file=sys.stderr)
+            try:
+                from tkinter import Tk, messagebox
+                _r = Tk(); _r.withdraw()
+                messagebox.showerror(
+                    "pic-clear 启动失败",
+                    f"无法自动生成 otp.secret：{e}\n\n路径：{secret_path}")
+                _r.destroy()
+            except Exception:
+                pass
+            sys.exit(4)
     if _otp_session_alive():
         return
     ok = False
