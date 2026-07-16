@@ -100,8 +100,7 @@ DEFAULT_FRONT_KEYWORDS: tuple[str, ...] = (
 class ClassifyConfig:
     in_root: Path
     out_root: Path
-    camera_dir_name: str = "camera"
-    filter_keywords: tuple[str, ...] = ()          # 子目录名包含即跳过
+    filter_keywords: tuple[str, ...] = ()          # 目录名包含即跳过整棵子树
     front_keywords: tuple[str, ...] = DEFAULT_FRONT_KEYWORDS
     image_extensions: tuple[str, ...] = DEFAULT_IMAGE_EXT
 
@@ -340,137 +339,121 @@ def _parse_bucket_thres(pairs: list[str]) -> dict[str, float]:
     return out
 
 
-def _find_camera_dirs(
-    in_root: Path,
-    camera_name: str,
-    log=None,
-) -> list[Path]:
-    """递归找所有目录名**包含** camera_name 的目录。
-    - 大小写不敏感的 substring 匹配
-      例：关键字 'camera' 命中 'camera' / 'camera01' / 'DMS_camera01_frames'
-    - 命中后 dirs[:] = [] 剪掉子树，不再深挖，避免嵌套 camera 名字重复处理
-    - 只打命中日志，避免海量 walk 日志淹没界面
+def _should_skip_dir(name: str, filter_keywords: tuple[str, ...]) -> bool:
+    """目录名包含任一过滤关键字 → 跳过整棵子树。"""
+    lower = name.lower()
+    return any(k and k.lower() in lower for k in filter_keywords)
+
+
+def process_all(
+    cfg: ClassifyConfig,
+    yolo, pose, embed,
+    stats: Stats,
+    writer,
+    log: LogFn,
+    cancel: CancelFn | None,
+) -> None:
+    """直接遍历 in_root 下所有图片，按规则分类、镜像复制。
+
+    输出结构：
+      out_root/
+        <原相对路径>/*.jpg          ← 每张图先镜像复制到这里
+        舱外活体检测/<原相对路径>/*.jpg
+        人体关键点/<原相对路径>/*.jpg
+        人体关键点/前备箱防夹检测/<原相对路径>/*.jpg
+        人体关键点/前机盖开关检测/*.jpg
+        遮挡/<原相对路径>/*.jpg
     """
-    result: list[Path] = []
-    target = camera_name.lower()
-    walked = 0
-    for dirpath, dirs, _files in os.walk(in_root):
-        walked += 1
-        name = Path(dirpath).name
-        if target in name.lower():
-            result.append(Path(dirpath))
-            if log is not None:
-                log(f"  [命中] {dirpath}")
-            dirs[:] = []  # 剪枝：这一支不再往下挖
-    if log is not None:
-        log(f"  [扫描] 总共遍历 {walked} 个目录，命中 {len(result)} 个")
-    return result
-
-
-def process_camera_dir(
-    camera_in: Path,
-    cfg: ClassifyConfig,
-    yolo, pose, embed,
-    stats: Stats,
-    writer,
-    log: LogFn,
-    cancel: CancelFn | None,
-) -> None:
-    rel_camera = camera_in.relative_to(cfg.in_root)
-    camera_out = cfg.out_root / rel_camera
-    camera_out.mkdir(parents=True, exist_ok=True)
-    log(f"[camera] {camera_in} → {camera_out}")
-
-    for sub in sorted(p for p in camera_in.iterdir() if p.is_dir()):
+    in_root = cfg.in_root
+    for dirpath, dirs, files in os.walk(in_root):
         if cancel and cancel():
             return
-        sub_name = sub.name
-        if sub_name in BUCKET_NAMES:
-            continue
-        if _has_keyword(sub_name, cfg.filter_keywords):
-            stats.skipped_filter += 1
-            log(f"  [跳过] {sub_name}（命中过滤关键字）")
-            continue
-        _process_sub_dir(
-            sub, camera_in, camera_out, cfg,
-            yolo, pose, embed, stats, writer, log, cancel,
-        )
+        # 就地修改 dirs，让 walk 跳过：
+        # - 名字命中过滤关键字的子目录
+        # - 输出桶目录（防止用户不小心把 out_root 放进了 in_root 循环处理）
+        pruned = []
+        for d in list(dirs):
+            if d in BUCKET_NAMES:
+                dirs.remove(d)
+                continue
+            if _should_skip_dir(d, cfg.filter_keywords):
+                pruned.append(d)
+                dirs.remove(d)
+        if pruned:
+            stats.skipped_filter += len(pruned)
+            log(f"  [跳过] {Path(dirpath).relative_to(in_root)} 下过滤: {pruned}")
 
+        # 处理这一层的图片
+        for name in files:
+            if cancel and cancel():
+                return
+            if cfg.limit and stats.scanned >= cfg.limit:
+                return
+            dot = name.rfind(".")
+            if dot < 0:
+                continue
+            if name[dot + 1:].lower() not in {
+                e.lower().lstrip(".") for e in cfg.image_extensions
+            }:
+                continue
+            img = Path(dirpath) / name
+            stats.scanned += 1
 
-def _process_sub_dir(
-    sub: Path,
-    camera_in: Path,
-    camera_out: Path,
-    cfg: ClassifyConfig,
-    yolo, pose, embed,
-    stats: Stats,
-    writer,
-    log: LogFn,
-    cancel: CancelFn | None,
-) -> None:
-    for img in _iter_images(sub, cfg.image_extensions):
-        if cancel and cancel():
-            return
-        if cfg.limit and stats.scanned >= cfg.limit:
-            return
-        stats.scanned += 1
+            rel_in = img.relative_to(in_root)
 
-        rel_in = img.relative_to(cfg.in_root)
-        rel_to_camera = img.relative_to(camera_in)
-
-        # 1) 镜像复制
-        try:
-            _copy_overwrite(img, camera_out / rel_to_camera)
-            stats.copied_original += 1
-        except Exception as e:
-            stats.errors += 1
-            log(f"  [错误] 镜像复制失败 {img}: {e}")
-            continue
-
-        # 2) 分类
-        r = classify_one(img, rel_in, yolo, pose, embed, cfg)
-        if r.error:
-            stats.errors += 1
-        if BUCKET_LIVENESS in r.buckets:
-            stats.liveness += 1
-        if BUCKET_KEYPOINT in r.buckets:
-            stats.keypoint += 1
-        if BUCKET_FRUNK in r.buckets:
-            stats.frunk += 1
-        if BUCKET_HOOD in r.buckets:
-            stats.hood += 1
-        if BUCKET_OCCLUSION in r.buckets:
-            stats.occlusion += 1
-
-        for bucket in r.buckets:
-            dst = _bucket_path_for(bucket, camera_out) / rel_to_camera
+            # 1) 镜像复制到 out_root/<rel>
             try:
-                _copy_overwrite(img, dst)
-                stats.copied_bucket += 1
+                _copy_overwrite(img, cfg.out_root / rel_in)
+                stats.copied_original += 1
             except Exception as e:
                 stats.errors += 1
-                log(f"  [错误] 桶复制失败 {img} -> {dst}: {e}")
+                log(f"  [错误] 镜像复制失败 {img}: {e}")
+                continue
 
-        if writer is not None:
-            embed_str = ";".join(
-                f"{b}:{sim:.2f}({name})"
-                for b, (sim, name) in sorted(r.embed_matches.items())
-            )
-            writer.writerow([
-                str(rel_in), "|".join(r.buckets),
-                f"{r.person_conf:.3f}", r.vehicle_hit,
-                r.kp_visible,
-                embed_str,
-                r.error,
-            ])
+            # 2) 分类判定
+            r = classify_one(img, rel_in, yolo, pose, embed, cfg)
+            if r.error:
+                stats.errors += 1
+            if BUCKET_LIVENESS in r.buckets:
+                stats.liveness += 1
+            if BUCKET_KEYPOINT in r.buckets:
+                stats.keypoint += 1
+            if BUCKET_FRUNK in r.buckets:
+                stats.frunk += 1
+            if BUCKET_HOOD in r.buckets:
+                stats.hood += 1
+            if BUCKET_OCCLUSION in r.buckets:
+                stats.occlusion += 1
 
-        if stats.scanned % 200 == 0:
-            log(
-                f"  [进度] {stats.scanned} 张  "
-                f"活体={stats.liveness} 关节={stats.keypoint} "
-                f"前备箱={stats.frunk} 前机盖={stats.hood} "
-                f"遮挡={stats.occlusion}"
-            )
+            for bucket in r.buckets:
+                dst = _bucket_path_for(bucket, cfg.out_root) / rel_in
+                try:
+                    _copy_overwrite(img, dst)
+                    stats.copied_bucket += 1
+                except Exception as e:
+                    stats.errors += 1
+                    log(f"  [错误] 桶复制失败 {img} -> {dst}: {e}")
+
+            if writer is not None:
+                embed_str = ";".join(
+                    f"{b}:{sim:.2f}({sample})"
+                    for b, (sim, sample) in sorted(r.embed_matches.items())
+                )
+                writer.writerow([
+                    str(rel_in), "|".join(r.buckets),
+                    f"{r.person_conf:.3f}", r.vehicle_hit,
+                    r.kp_visible,
+                    embed_str,
+                    r.error,
+                ])
+
+            if stats.scanned % 200 == 0:
+                log(
+                    f"  [进度] {stats.scanned} 张  "
+                    f"活体={stats.liveness} 关节={stats.keypoint} "
+                    f"前备箱={stats.frunk} 前机盖={stats.hood} "
+                    f"遮挡={stats.occlusion}"
+                )
 
 
 def run(
@@ -517,10 +500,7 @@ def run(
     else:
         log("[提示] 未提供 rules 目录，embedding 匹配全部跳过")
 
-    camera_dirs = _find_camera_dirs(cfg.in_root, cfg.camera_dir_name, log=log)
-    log(f"[扫描] 找到 {len(camera_dirs)} 个 {cfg.camera_dir_name}/ 目录")
-    if not camera_dirs:
-        return Stats()
+    log(f"[扫描] 从输入根开始遍历: {cfg.in_root}")
 
     stats = Stats()
     start = time.time()
@@ -536,16 +516,9 @@ def run(
             "embed_matches",
             "error",
         ])
-        for cam in camera_dirs:
-            if cancel and cancel():
-                log("[取消] 收到停止信号")
-                break
-            process_camera_dir(
-                cam, cfg, yolo, pose, embed, stats, writer, log, cancel,
-            )
-            if cfg.limit and stats.scanned >= cfg.limit:
-                log(f"[限制] 已达 --limit={cfg.limit}")
-                break
+        process_all(cfg, yolo, pose, embed, stats, writer, log, cancel)
+        if cfg.limit and stats.scanned >= cfg.limit:
+            log(f"[限制] 已达 --limit={cfg.limit}")
 
     elapsed = time.time() - start
     log("=" * 60)
@@ -573,7 +546,6 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--in-root", required=True, type=Path)
     p.add_argument("--out-root", required=True, type=Path)
-    p.add_argument("--camera-name", type=str, default="camera")
     p.add_argument("--filter-keywords", type=str, default="")
     p.add_argument("--front-keywords", type=str,
                    default=",".join(DEFAULT_FRONT_KEYWORDS))
@@ -647,7 +619,6 @@ def main() -> int:
     cfg = ClassifyConfig(
         in_root=a.in_root.resolve(),
         out_root=a.out_root.resolve(),
-        camera_dir_name=a.camera_name,
         filter_keywords=tuple(
             s.strip() for s in a.filter_keywords.split(",") if s.strip()
         ),

@@ -4,7 +4,7 @@ classify_gui.py — classify_pic.py 的 tkinter GUI 前端。
 
 主要功能：
   - 选输入 / 输出 / 样例(rules) 目录
-  - 配置 camera 目录名、过滤关键字、前视关键字
+  - 配置过滤关键字、前视关键字
   - 显示已加载样例统计（点"刷新样例"按钮增量更新）
   - 每桶单独 embedding 相似度阈值
   - 后台线程跑 classify_pic.run()，日志 tail 到窗口
@@ -33,7 +33,7 @@ from classify_pic import (
 
 
 APP_TITLE = "pic-clear 二次分类工具"
-APP_VERSION = "v0.4.19"
+APP_VERSION = "v0.4.20"
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "classify_gui.json"
 
@@ -85,7 +85,6 @@ class ClassifyApp:
         self.in_var = StringVar()
         self.out_var = StringVar()
         self.rules_var = StringVar()
-        self.camera_var = StringVar(value="camera")
         self.filter_var = StringVar(value="")
         self.front_var = StringVar(value=",".join(DEFAULT_FRONT_KEYWORDS))
         self.ext_var = StringVar(value=",".join(DEFAULT_IMAGE_EXT))
@@ -161,7 +160,6 @@ class ClassifyApp:
                 )
             row += 1
 
-        add_text_row(top, "camera 目录名", self.camera_var, "默认 camera")
         add_text_row(top, "过滤关键字",     self.filter_var, "逗号分隔，子目录名包含即跳过")
         add_text_row(top, "前视关键字",     self.front_var,  "规则 4，逗号分隔")
         add_text_row(top, "图片后缀",       self.ext_var,    "逗号分隔")
@@ -339,7 +337,6 @@ class ClassifyApp:
         return ClassifyConfig(
             in_root=Path(in_root).expanduser().resolve(),
             out_root=Path(out_root).expanduser().resolve(),
-            camera_dir_name=self.camera_var.get().strip() or "camera",
             filter_keywords=tuple(
                 s.strip() for s in self.filter_var.get().split(",") if s.strip()
             ),
@@ -448,7 +445,6 @@ class ClassifyApp:
             "in_root": self.in_var.get(),
             "out_root": self.out_var.get(),
             "rules_dir": self.rules_var.get(),
-            "camera_dir_name": self.camera_var.get(),
             "filter_keywords": self.filter_var.get(),
             "front_keywords": self.front_var.get(),
             "image_extensions": self.ext_var.get(),
@@ -477,7 +473,6 @@ class ClassifyApp:
         _set(self.in_var, "in_root")
         _set(self.out_var, "out_root")
         _set(self.rules_var, "rules_dir")
-        _set(self.camera_var, "camera_dir_name")
         _set(self.filter_var, "filter_keywords")
         _set(self.front_var, "front_keywords")
         _set(self.ext_var, "image_extensions")
