@@ -762,14 +762,10 @@ _TAB_STYLE_APPLIED = False
 
 
 def apply_tab_style(root) -> None:
-    """给全局 ttk.Notebook 换一套更清晰的选项卡样式：
+    """轻量样式：只给选项卡加内边距，避免挤在一起。
 
-    - 每个 tab 加内边距（横 18px，纵 8px），彼此间也有间距
-    - 选中态更醒目：底色白 + 上边框加粗蓝色高亮
-    - 未选中态：淡灰底 + 深灰字，跟主区分离
-    - 悬停态：略深底色
-
-    只需在任意一个 Tk 根窗口里调一次，全 app 的 Notebook 都跟着变。
+    保留系统原生主题（Windows 下 vista、macOS 下 aqua），不强改颜色、
+    不切换 theme，避免风格与系统脱节。
     """
     global _TAB_STYLE_APPLIED
     if _TAB_STYLE_APPLIED:
@@ -777,31 +773,8 @@ def apply_tab_style(root) -> None:
     try:
         from tkinter import ttk
         style = ttk.Style(root)
-        # 用 'default' theme 才能自由改颜色；系统默认 aqua/vista 有些配置无效
-        try:
-            if style.theme_use() in ("aqua", "vista", "xpnative"):
-                style.theme_use("clam")
-        except Exception:
-            pass
-        # Notebook 主体：给顶部留一点呼吸空间
-        style.configure("TNotebook",
-                        background="#f0f0f0",
-                        borderwidth=0,
-                        tabmargins=[6, 6, 6, 0])
-        # 每个 Tab：内边距 + 圆角感（靠 padding 实现视觉分离）
-        style.configure("TNotebook.Tab",
-                        padding=[18, 8],
-                        background="#dddddd",
-                        foreground="#333333",
-                        borderwidth=1,
-                        font=("Microsoft YaHei", 10))
-        # 相邻 tab 之间的间隔（clam 主题支持 focuscolor 但间隔靠 layout margin）
-        style.map("TNotebook.Tab",
-                  background=[("selected", "#ffffff"),
-                              ("active", "#eaeaea")],
-                  foreground=[("selected", "#0057b7"),
-                              ("active", "#111111")],
-                  expand=[("selected", [1, 1, 1, 0])])
+        # 只调 padding：横向留白让 tab 之间有明显间距
+        style.configure("TNotebook.Tab", padding=[14, 6])
         _TAB_STYLE_APPLIED = True
     except Exception:
         pass
