@@ -1,0 +1,120 @@
+name: Build Classify GUI EXE
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # softprops/action-gh-release 需要写权限
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pyarmor
+
+      # ------------------------------------------------------------------
+      # 导出 3 个 onnx（yolov8n / yolov8n-pose / mobilenetv3_embed）
+      # 只有 CI 装 ultralytics + torch + torchvision + onnxscript，
+      # 用户端 exe 不依赖这些，只需要 onnxruntime。
+      # ------------------------------------------------------------------
+      - name: Install export-only deps
+        run: |
+          pip install ultralytics onnx onnxslim torch torchvision onnxscript
+
+      - name: Export yolov8n.onnx & yolov8n-pose.onnx & mobilenetv3_embed.onnx
+        run: |
+          python export_onnx.py
+          dir yolov8n.onnx yolov8n-pose.onnx mobilenetv3_embed.onnx
+
+      - name: Obfuscate Python sources with PyArmor
+        # 把 4 个业务 .py + licensing 加密成字节码。
+        # 加密后 dist_obf/ 里同名文件覆盖原文件，PyInstaller 打包用加密版本。
+        run: |
+          pyarmor gen --output dist_obf ^
+            classify_gui.py classify_pic.py detector.py pose_detector.py embed_detector.py licensing.py otp_utils.py
+          dir dist_obf
+          copy /Y dist_obf\classify_gui.py     classify_gui.py
+          copy /Y dist_obf\classify_pic.py     classify_pic.py
+          copy /Y dist_obf\detector.py         detector.py
+          copy /Y dist_obf\pose_detector.py    pose_detector.py
+          copy /Y dist_obf\embed_detector.py   embed_detector.py
+          copy /Y dist_obf\licensing.py        licensing.py
+          copy /Y dist_obf\otp_utils.py        otp_utils.py
+        shell: cmd
+
+      - name: Build single-file exe (windowed, no console)
+        run: |
+          pyinstaller --onefile --windowed --name classify_gui ^
+            --icon "icon.ico" ^
+            --add-data "icon.ico;." ^
+            --add-data "icon.png;." ^
+            --add-data "yolov8n.onnx;." ^
+            --add-data "yolov8n-pose.onnx;." ^
+            --add-data "mobilenetv3_embed.onnx;." ^
+            --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
+            --hidden-import onnxruntime ^
+            --hidden-import PIL ^
+            --hidden-import PIL.Image ^
+            --hidden-import PIL.ImageFile ^
+            --hidden-import numpy ^
+            --hidden-import json ^
+            --hidden-import base64 ^
+            --hidden-import hashlib ^
+            --hidden-import socket ^
+            --hidden-import subprocess ^
+            --hidden-import datetime ^
+            --hidden-import threading ^
+            --hidden-import queue ^
+            --hidden-import ctypes ^
+            --hidden-import ctypes.wintypes ^
+            --hidden-import concurrent ^
+            --hidden-import concurrent.futures ^
+            --hidden-import concurrent.futures.thread ^
+            --hidden-import cryptography ^
+            --hidden-import cryptography.hazmat.primitives.asymmetric.padding ^
+            --hidden-import cryptography.hazmat.primitives.hashes ^
+            --hidden-import cryptography.hazmat.primitives.serialization ^
+            --hidden-import tkinter ^
+            --hidden-import tkinter.ttk ^
+            --hidden-import tkinter.filedialog ^
+            --hidden-import tkinter.messagebox ^
+            --hidden-import tkinter.scrolledtext ^
+            --hidden-import detector ^
+            --hidden-import pose_detector ^
+            --hidden-import embed_detector ^
+            --hidden-import classify_pic ^
+            --hidden-import licensing ^
+            --hidden-import otp_utils ^
+            classify_gui.py
+        shell: cmd
+
+      - name: Show exe size
+        run: dir dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: classify-gui-windows-exe
+          path: dist/classify_gui.exe
+          if-no-files-found: error
+
+      - name: Attach exe to GitHub Release (only on tag push)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/classify_gui.exe
+          fail_on_unmatched_files: true

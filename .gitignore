@@ -14,6 +14,9 @@ dedupe_failed*.csv
 # 模型文件不进 git，由 CI 现场下载/导出
 yolov8n.pt
 yolov8n.onnx
+yolov8n-pose.pt
+yolov8n-pose.onnx
+mobilenetv3_embed.onnx
 license.lic
 dist_obf/
 
