@@ -18,12 +18,12 @@ import queue
 import sys
 import threading
 from pathlib import Path
+import tkinter as tk
 from tkinter import (
     Tk, StringVar, IntVar, DoubleVar, END, DISABLED, NORMAL,
     filedialog, messagebox,
 )
 from tkinter import ttk
-from tkinter.scrolledtext import ScrolledText
 
 import classify_pic
 from classify_pic import (
@@ -33,7 +33,7 @@ from classify_pic import (
 
 
 APP_TITLE = "pic-clear 二次分类工具"
-APP_VERSION = "v0.4.18"
+APP_VERSION = "v0.4.19"
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "classify_gui.json"
 
@@ -118,9 +118,14 @@ class ClassifyApp:
         nb.pack(fill="both", expand=True, padx=8, pady=8)
         outer = ttk.Frame(nb)
         nb.add(outer, text="  分类  ")
+        log_page = ttk.Frame(nb)
+        nb.add(log_page, text="  日志  ")
         about = ttk.Frame(nb)
         nb.add(about, text="  关于  ")
+        self._nb = nb
+        self._log_page = log_page
         self._build_about_tab(about)
+        self._build_log_tab(log_page)
 
         # 顶部：路径 + 参数
         top = ttk.LabelFrame(outer, text="路径与基本参数")
@@ -219,9 +224,13 @@ class ClassifyApp:
         self.stop_btn.pack(side="left", padx=4)
         ttk.Button(btn, text="清空日志", command=self._clear_log).pack(side="left", padx=4)
 
-        # 日志
-        self.log = ScrolledText(outer, height=18, wrap="word", font=("Menlo", 11))
-        self.log.pack(fill="both", expand=True)
+        # 分类页底部：一段小提示，正式日志在"日志" tab
+        hint = ttk.Label(
+            outer,
+            text="完整日志请切到上方\"日志\" tab 查看（支持上下 / 左右滚动条）",
+            foreground="#888",
+        )
+        hint.pack(anchor="w", pady=(4, 0))
 
     # ---------------------------------------------------------- handlers
     def _pick(self, var: StringVar, is_dir: bool) -> None:
@@ -370,11 +379,41 @@ class ClassifyApp:
         self.root.after(150, self._drain_log)
 
     def _log(self, msg: str) -> None:
+        self.log.configure(state="normal")
         self.log.insert(END, msg + "\n")
         self.log.see(END)
+        self.log.configure(state="disabled")
 
     def _clear_log(self) -> None:
+        self.log.configure(state="normal")
         self.log.delete("1.0", END)
+        self.log.configure(state="disabled")
+
+    # -------------------------------------------------- 日志 tab
+    def _build_log_tab(self, page: ttk.Frame) -> None:
+        toolbar = ttk.Frame(page)
+        toolbar.pack(fill="x", padx=6, pady=(6, 2))
+        ttk.Button(toolbar, text="清空日志", command=self._clear_log).pack(
+            side="left", padx=4
+        )
+        ttk.Button(toolbar, text="跳到底部",
+                   command=lambda: self.log.see(END)).pack(side="left", padx=4)
+
+        wrap = ttk.Frame(page)
+        wrap.pack(fill="both", expand=True, padx=6, pady=(2, 6))
+        self.log = tk.Text(
+            wrap, height=28, wrap="none",
+            font=("Consolas", 10),
+        )
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=self.log.yview)
+        hsb = ttk.Scrollbar(wrap, orient="horizontal", command=self.log.xview)
+        self.log.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.log.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+        self.log.configure(state="disabled")
 
     # -------------------------------------------------- 关于 tab
     def _build_about_tab(self, page: ttk.Frame) -> None:
