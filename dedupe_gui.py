@@ -151,6 +151,13 @@ class DedupeGUI:
             value=bool(self._cfg.get("minimize_to_tray", True)))
         self._hotkey_var = tk.StringVar(
             value=self._cfg.get("hotkey", HOTKEY_DEFAULT))
+        # 并发 + 锁 TTL + Marker 根
+        self._dedupe_jobs_var = tk.IntVar(
+            value=int(self._cfg.get("dedupe_jobs", 1)))
+        self._lock_ttl_var = tk.IntVar(
+            value=int(self._cfg.get("lock_ttl", 900)))
+        self._markers_root_var = tk.StringVar(
+            value=self._cfg.get("markers_root", ""))
 
         # 保护类别（COCO 80）
         saved_pc = self._cfg.get("protect_classes")
@@ -218,6 +225,34 @@ class DedupeGUI:
             side="left", fill="x", expand=True)
         ttk.Button(row, text="浏览...", command=self._browse_target).pack(
             side="left", padx=4)
+
+        # Marker 根
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="Marker 根：", width=14).pack(side="left")
+        ttk.Entry(row, textvariable=self._markers_root_var, width=60).pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(row, text="浏览...", command=self._browse_markers_root).pack(
+            side="left", padx=4)
+        ttk.Label(page,
+                  text="  去重锁/完成标记集中放到这里，按图片目录层级建镜像；"
+                       "多机共享盘时所有机器指向同一位置",
+                  foreground="#666").pack(anchor="w", padx=20)
+
+        # 并发数 + 锁 TTL
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="并发数：", width=14).pack(side="left")
+        ttk.Spinbox(row, from_=1, to=16, increment=1, width=8,
+                    textvariable=self._dedupe_jobs_var).pack(side="left")
+        ttk.Label(row, text="  同时跑多少个 dedupe_pic.exe，默认 1；"
+                            "多机共享盘并发也安全",
+                  foreground="#666").pack(side="left", padx=8)
+
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="去重锁 TTL(s)：", width=14).pack(side="left")
+        ttk.Spinbox(row, from_=30, to=86400, increment=60, width=10,
+                    textvariable=self._lock_ttl_var).pack(side="left")
+        ttk.Label(row, text="  多机共享盘时锁过期自动抢占，默认 900（15 分钟）",
+                  foreground="#666").pack(side="left", padx=8)
 
         # 处理范围
         row = ttk.Frame(page); row.pack(fill="x", **pad)
@@ -412,6 +447,12 @@ class DedupeGUI:
         if p:
             self._target_var.set(p)
 
+    def _browse_markers_root(self):
+        init = self._markers_root_var.get() or os.path.expanduser("~")
+        p = filedialog.askdirectory(initialdir=init, title="选择 Marker 根")
+        if p:
+            self._markers_root_var.set(p)
+
     # ---------- 环境检查 ----------
 
     def _check_environment(self):
@@ -447,35 +488,59 @@ class DedupeGUI:
                                    "扫描不到需要去重的目录（含图片文件）。")
             return
 
+        # markers_root 必填
+        mr = self._markers_root_var.get().strip()
+        if not mr:
+            messagebox.showerror("配置缺失",
+                                 "请先设置『Marker 根』目录。多机共享盘时所有机器应指向同一位置。")
+            return
+        markers_root = Path(mr)
+        try:
+            markers_root.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            messagebox.showerror("创建失败", f"无法创建 Marker 根目录：{e}")
+            return
+
+        # 计算 (target, marker_dir) 对：marker_dir = markers_root / rel(target - target_p)
+        pairs: list[tuple[Path, Path]] = []
+        for d in dirs:
+            try:
+                rel = d.relative_to(target_p)
+            except Exception:
+                rel = Path(d.name)
+            marker_dir = markers_root / rel if str(rel) != "." else markers_root
+            pairs.append((d, marker_dir))
+
         # 过滤已完成 marker（除非强制重跑）
         if not self._force_rerun_var.get():
-            skipped = [d for d in dirs if (d / DEDUP_DONE_MARKER).exists()]
-            dirs = [d for d in dirs if not (d / DEDUP_DONE_MARKER).exists()]
+            skipped = [(d, md) for d, md in pairs if (md / DEDUP_DONE_MARKER).exists()]
+            pairs = [(d, md) for d, md in pairs if not (md / DEDUP_DONE_MARKER).exists()]
             if skipped:
-                self._log(f"[跳过] {len(skipped)} 个目录已有 "
-                          f"{DEDUP_DONE_MARKER}，如需强制重跑请勾选左下选项")
-            if not dirs:
+                self._log(f"[跳过] {len(skipped)} 个目录已有 {DEDUP_DONE_MARKER}，"
+                          "如需强制重跑请勾选左下选项")
+            if not pairs:
                 messagebox.showinfo(
                     "无需处理",
-                    f"所有目录都已存在 {DEDUP_DONE_MARKER}。\n"
+                    f"所有目录在 markers 里都已有 {DEDUP_DONE_MARKER}。\n"
                     "如果想强制重跑，请勾选『强制重跑』后再点开始。")
                 return
 
         # 保存配置
         _save_config(self._dump_cfg())
 
-        self._total_dirs = len(dirs)
+        self._total_dirs = len(pairs)
         self._done_dirs = 0
         self._push_progress()
 
         # 启动后台线程
         self._worker_stop_flag.clear()
         self._worker_thread = threading.Thread(
-            target=self._worker_run, args=(exe, dirs), daemon=True)
+            target=self._worker_run, args=(exe, pairs), daemon=True)
         self._worker_thread.start()
         self._run_btn.config(state="disabled")
         self._stop_btn.config(state="normal")
-        self._log(f"[启动] 共 {len(dirs)} 个目录待去重")
+        jobs = int(self._dedupe_jobs_var.get())
+        self._log(f"[启动] 共 {len(pairs)} 个目录待去重，并发={jobs}")
 
     def _on_stop(self):
         if not messagebox.askyesno("确认", "确定要停止当前去重任务吗？"):
@@ -483,67 +548,87 @@ class DedupeGUI:
         self._worker_stop_flag.set()
         self._log("[停止] 已请求停止，等当前目录跑完就退出")
 
-    def _worker_run(self, exe: str, dirs: list[Path]):
-        try:
-            for d in dirs:
+    def _worker_run(self, exe: str, pairs: list[tuple[Path, Path]]):
+        """并发跑 dedupe_pic.exe，每个目录一个子进程。
+
+        pairs: [(target_dir, marker_dir), ...]
+        marker_dir 由外层算好（markers_root 下对应的镜像位置），
+        dedupe_pic.exe 靠 --marker-dir 抢 _dedup.lock、写 _dedup_done.marker。
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        jobs = max(1, int(self._dedupe_jobs_var.get()))
+        lock_ttl = int(self._lock_ttl_var.get())
+        force = bool(self._force_rerun_var.get())
+        protect_arg = self._get_selected_protect_arg()
+        # 完成一个记一个的锁（tk 主线程 after 也够，用 python threading.Lock）
+        done_lock = threading.Lock()
+
+        def _run_one(pair: tuple[Path, Path]) -> tuple[Path, int]:
+            d, marker_dir = pair
+            if self._worker_stop_flag.is_set():
+                return d, -1
+            tag = d.name
+            self._log(f"[{tag}] 开始（marker={marker_dir}）")
+            cmd = [exe, str(d),
+                   "--threshold", str(int(self._threshold_var.get())),
+                   "--motion-threshold", str(float(self._motion_var.get())),
+                   "--marker-dir", str(marker_dir),
+                   "--lock-ttl", str(lock_ttl)]
+            if self._apply_var.get():
+                cmd.append("--apply")
+            if self._hard_delete_var.get():
+                cmd.append("--hard-delete")
+            if self._scene_protect_var.get():
+                cmd.append("--scene-protect")
+            if force:
+                cmd.append("--force")
+            if protect_arg:
+                cmd.extend(["--protect", protect_arg])
+
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = 0x08000000  # CREATE_NO_WINDOW
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace",
+                    creationflags=creationflags)
+            except FileNotFoundError:
+                self._log(f"[{tag}] [错误] 找不到 exe：{exe}")
+                return d, 127
+
+            for line in proc.stdout:  # type: ignore[union-attr]
+                line = line.rstrip()
+                if line:
+                    self._log(f"[{tag}] {line}")
                 if self._worker_stop_flag.is_set():
-                    self._log("[中止] 用户请求停止，跳过剩余目录")
-                    break
-                self._log(f"[去重] {d}")
-                cmd = [exe, str(d),
-                       "--threshold", str(int(self._threshold_var.get())),
-                       "--motion-threshold",
-                       str(float(self._motion_var.get()))]
-                if self._apply_var.get():
-                    cmd.append("--apply")
-                if self._hard_delete_var.get():
-                    cmd.append("--hard-delete")
-                if self._scene_protect_var.get():
-                    cmd.append("--scene-protect")
-                # 保护类别（COCO 中文 tab 里勾的），拼成 --protect a,b,c
-                protect_arg = self._get_selected_protect_arg()
-                if protect_arg:
-                    cmd.extend(["--protect", protect_arg])
-                self._log(f"[命令] {' '.join(cmd)}")
-
-                creationflags = 0
-                if os.name == "nt":
-                    creationflags = 0x08000000  # CREATE_NO_WINDOW
-
-                try:
-                    proc = subprocess.Popen(
-                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, encoding="utf-8", errors="replace",
-                        creationflags=creationflags)
-                except FileNotFoundError:
-                    self._log(f"[错误] 找不到 exe：{exe}")
-                    continue
-
-                for line in proc.stdout:  # type: ignore[union-attr]
-                    line = line.rstrip()
-                    if line:
-                        self._log(line)
-                    if self._worker_stop_flag.is_set():
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            pass
-                        break
-
-                rc = proc.wait()
-                self._log(f"[完成] {d.name}  退出码={rc}")
-                if rc == 0:
-                    # 写 marker 方便下次跳过
                     try:
-                        (d / DEDUP_DONE_MARKER).write_text(
-                            "done", encoding="utf-8")
+                        proc.terminate()
                     except Exception:
                         pass
+                    break
+            rc = proc.wait()
+            self._log(f"[{tag}] 完成 rc={rc}")
+            with done_lock:
                 self._done_dirs += 1
-                self._push_progress()
+            self._push_progress()
+            return d, rc
 
+        try:
+            with ThreadPoolExecutor(max_workers=jobs,
+                                    thread_name_prefix="dedupe") as ex:
+                futures = [ex.submit(_run_one, p) for p in pairs]
+                # 若停止旗触发，取消未开始的
+                for fut in futures:
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        self._log(f"[异常] {type(e).__name__}: {e}")
+                    if self._worker_stop_flag.is_set():
+                        for f in futures:
+                            f.cancel()
             if not self._worker_stop_flag.is_set():
-                self._log(f"[全部完成] 共处理 {len(dirs)} 个目录")
+                self._log(f"[全部完成] 共处理 {len(pairs)} 个目录")
         except Exception as e:
             self._log(f"[异常] {type(e).__name__}: {e}")
         finally:
@@ -591,6 +676,9 @@ class DedupeGUI:
             "hard_delete": bool(self._hard_delete_var.get()),
             "scene_protect": bool(self._scene_protect_var.get()),
             "force_rerun": bool(self._force_rerun_var.get()),
+            "dedupe_jobs": int(self._dedupe_jobs_var.get()),
+            "lock_ttl": int(self._lock_ttl_var.get()),
+            "markers_root": self._markers_root_var.get(),
             "minimize_to_tray": bool(self._minimize_to_tray_var.get()),
             "hotkey": self._hotkey_var.get(),
             "protect_classes": [n for n, v in

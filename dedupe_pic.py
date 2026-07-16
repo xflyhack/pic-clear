@@ -19,6 +19,7 @@ import io
 import csv
 import os
 import shutil
+import socket
 import sys
 import time
 from dataclasses import dataclass
@@ -97,6 +98,74 @@ def _disable_windows_quickedit() -> None:
 
 
 _disable_windows_quickedit()
+
+
+# --------------------- 去重锁 & marker（多机安全） ------------------------
+
+_DEDUP_LOCK_NAME = "_dedup.lock"
+_DEDUP_DONE_NAME = "_dedup_done.marker"
+_HOSTNAME = socket.gethostname()
+
+
+def _dedup_lock_payload() -> str:
+    return f"{_HOSTNAME}|{os.getpid()}|{int(time.time())}"
+
+
+def _dedup_lock_is_stale(lock_path: Path, ttl_seconds: float) -> bool:
+    try:
+        content = lock_path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        return True
+    parts = content.split("|")
+    if len(parts) < 3:
+        return True
+    try:
+        ts = int(parts[2])
+    except Exception:
+        return True
+    return (time.time() - ts) > ttl_seconds
+
+
+def _acquire_dedup_lock(lock_path: Path, ttl_seconds: float) -> bool:
+    """原子抢占去重锁。返回 True=抢到、False=别人占用且未过期。"""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _dedup_lock_payload().encode("utf-8")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    try:
+        fd = os.open(str(lock_path), flags, 0o644)
+    except FileExistsError:
+        if _dedup_lock_is_stale(lock_path, ttl_seconds):
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                return False
+            try:
+                fd = os.open(str(lock_path), flags, 0o644)
+            except Exception:
+                return False
+        else:
+            return False
+    except Exception:
+        return False
+    try:
+        os.write(fd, payload)
+    finally:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+    return True
+
+
+def _release_dedup_lock(lock_path: Path) -> None:
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 
 
 # ----------------------------- dHash ---------------------------------------
@@ -708,6 +777,27 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="强制永久删除，即使指定了 --trash-dir 也直接 unlink。",
     )
+    p.add_argument(
+        "--marker-dir",
+        type=Path,
+        default=None,
+        help=(
+            "去重锁与完成标记的存放目录（一般由上层调度传入，"
+            "指向 markers_root 下与本 root 对应的镜像路径）。"
+            "未指定则不写锁/标记，跟老行为一致。"
+        ),
+    )
+    p.add_argument(
+        "--lock-ttl",
+        type=float,
+        default=900.0,
+        help="去重锁 TTL（秒），默认 900（15 分钟）。多机共享盘用。",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="忽略 _dedup_done.marker，强制重跑（等价于 dedupe_gui 的 强制重跑）。",
+    )
     return p.parse_args()
 
 
@@ -763,6 +853,45 @@ def main() -> int:
     _check_license_or_die()
 
     args = parse_args()
+
+    # ---- marker/lock 集中管理（多机安全） ----
+    # 只有上层传了 --marker-dir 才启用；否则跟老行为一致。
+    marker_dir: Path | None = args.marker_dir
+    lock_path: Path | None = None
+    done_marker: Path | None = None
+    if marker_dir is not None:
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = marker_dir / _DEDUP_LOCK_NAME
+        done_marker = marker_dir / _DEDUP_DONE_NAME
+
+        # 已完成：--force 不加就直接跳过
+        if done_marker.is_file() and not args.force:
+            print(f"[跳过] 已存在 {_DEDUP_DONE_NAME}（marker_dir={marker_dir}），不重跑。"
+                  " 加 --force 可强制重跑。")
+            return 0
+
+        # 抢锁：抢不到就退，交给别人
+        if not _acquire_dedup_lock(lock_path, float(args.lock_ttl)):
+            print(f"[跳过] 其他机器/进程正在去重（lock={lock_path}），未过期，放弃。")
+            return 0
+
+    try:
+        rc = _run_dedupe(args)
+    finally:
+        if lock_path is not None:
+            _release_dedup_lock(lock_path)
+
+    if rc == 0 and done_marker is not None:
+        try:
+            done_marker.write_text("done", encoding="utf-8")
+        except Exception:
+            pass
+
+    return rc
+
+
+def _run_dedupe(args: argparse.Namespace) -> int:
+    """去重主体逻辑（原 main 尾部）。"""
 
     if not args.root.exists():
         print(f"[ERROR] 根目录不存在: {args.root}", file=sys.stderr)

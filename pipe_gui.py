@@ -1294,6 +1294,12 @@ class PipeGUI:
         self._threshold_var = tk.IntVar(value=3)
         self._motion_var = tk.DoubleVar(value=0.12)
         self._fps_var = tk.DoubleVar(value=1.0)
+        # 抽帧 / 去重并发 + 各自锁 TTL + marker 根目录
+        self._extract_jobs_var = tk.IntVar(value=1)
+        self._extract_lock_ttl_var = tk.IntVar(value=900)
+        self._dedupe_jobs_var = tk.IntVar(value=1)
+        self._dedupe_lock_ttl_var = tk.IntVar(value=900)
+        self._markers_root_var = tk.StringVar()
         # 新增：跟 run_all.bat 对齐的三个参数
         self._scene_protect_var = tk.BooleanVar(value=True)
         self._daily_remain_limit_var = tk.IntVar(value=80000)
@@ -1421,6 +1427,15 @@ class PipeGUI:
         _tip_icon(row, "抽帧结果和 job 状态放这里，默认 <数据盘>\\切帧结果").pack(side="left", padx=(6, 0))
         ttk.Button(row, text="浏览...", command=self._browse_out).pack(side="left", padx=6)
 
+        row = ttk.Frame(f_data); row.pack(fill="x", padx=6, pady=3)
+        ttk.Label(row, text="Marker 根：", width=10).pack(side="left")
+        ttk.Entry(row, textvariable=self._markers_root_var, width=60).pack(side="left", fill="x", expand=True)
+        _tip_icon(row, "抽帧/去重的锁与完成标记（_extract.lock / _done.marker /\n"
+                       "_dedup.lock / _dedup_done.marker）集中放到这里，\n"
+                       "按视频层级建镜像子目录。默认 <数据盘>\\pic-clear-markers。\n"
+                       "多机共享盘时所有机器都应指向同一位置。").pack(side="left", padx=(6, 0))
+        ttk.Button(row, text="浏览...", command=self._browse_markers_root).pack(side="left", padx=6)
+
         # 子目录选择（本页核心）
         f_subs = ttk.LabelFrame(tab, text="▶ 子目录（勾选要处理的，右侧显示实时进度）")
         f_subs.pack(fill="both", expand=True, **pad)
@@ -1513,6 +1528,52 @@ class PipeGUI:
         ttk.Label(row, text="抽帧 fps：", width=14).pack(side="left")
         ttk.Spinbox(row, from_=0.1, to=30.0, increment=0.5,
                     textvariable=self._fps_var, width=6, format="%.1f").pack(side="left")
+
+        # 抽帧并发数
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=6)
+        _tip_icon(row, "一台机器同时抽多少个视频（视频粒度并发）。\n"
+                       "默认 1（串行，兼容老行为）。\n"
+                       "推荐 4-8；CPU 多且盘快可到 16。\n"
+                       "太大反而会因磁盘竞争变慢。\n"
+                       "多机共享盘并发抽也安全：每个视频抽前会原子创建\n"
+                       "_extract.lock 抢占，别的机器/进程看到锁就跳过。"
+                       ).pack(side="left", padx=(0, 4))
+        ttk.Label(row, text="抽帧并发数：", width=14).pack(side="left")
+        ttk.Spinbox(row, from_=1, to=32, increment=1,
+                    textvariable=self._extract_jobs_var, width=6).pack(side="left")
+
+        # 抽帧锁 TTL
+        row = ttk.Frame(f); row.pack(fill="x", padx=6, pady=6)
+        _tip_icon(row, "抽帧锁 TTL（秒）。多机共享盘时，一台机器抽某视频前\n"
+                       "会原子创建 _extract.lock；锁存在超过 TTL 就视为对方\n"
+                       "崩了/断网，可抢占继续抽。\n"
+                       "默认 900（15 分钟），够抽一个短视频。\n"
+                       "值应 >= 你手上最长视频的抽帧耗时。"
+                       ).pack(side="left", padx=(0, 4))
+        ttk.Label(row, text="抽帧锁 TTL(s)：", width=14).pack(side="left")
+        ttk.Spinbox(row, from_=30, to=86400, increment=60,
+                    textvariable=self._extract_lock_ttl_var, width=8).pack(side="left")
+
+        # 去重并发数
+        f2 = ttk.LabelFrame(tab, text="▶ 去重")
+        f2.pack(fill="x", **pad)
+        row = ttk.Frame(f2); row.pack(fill="x", padx=6, pady=6)
+        _tip_icon(row, "watcher 同时跑多少个 dedupe_pic.exe（目录粒度）。\n"
+                       "默认 1（串行）。dedupe 内部 YOLO 会用多核，\n"
+                       "并发 2-3 通常够；太大会互抢 CPU。\n"
+                       "多机共享盘并发也安全（每个目录抢 _dedup.lock）。"
+                       ).pack(side="left", padx=(0, 4))
+        ttk.Label(row, text="去重并发数：", width=14).pack(side="left")
+        ttk.Spinbox(row, from_=1, to=16, increment=1,
+                    textvariable=self._dedupe_jobs_var, width=6).pack(side="left")
+
+        row = ttk.Frame(f2); row.pack(fill="x", padx=6, pady=6)
+        _tip_icon(row, "去重锁 TTL（秒）。多机共享盘时用于抢占同一视频目录的去重。\n"
+                       "锁存在超过 TTL 视为对方崩了。默认 900（15 分钟）。"
+                       ).pack(side="left", padx=(0, 4))
+        ttk.Label(row, text="去重锁 TTL(s)：", width=14).pack(side="left")
+        ttk.Spinbox(row, from_=30, to=86400, increment=60,
+                    textvariable=self._dedupe_lock_ttl_var, width=8).pack(side="left")
 
         f = ttk.LabelFrame(tab, text="▶ 编排")
         f.pack(fill="x", **pad)
@@ -1877,6 +1938,13 @@ class PipeGUI:
         elif self._drive_var.get():
             self._out_var.set(str(pipeline.default_out_root(self._drive_var.get())))
 
+        # Marker 根：历史值优先，否则按数据盘默认
+        mr = cfg.get("markers_root", "")
+        if mr:
+            self._markers_root_var.set(mr)
+        elif self._drive_var.get():
+            self._markers_root_var.set(str(pipeline.default_markers_root(self._drive_var.get())))
+
         # 各种阈值
         if "threshold" in cfg:
             try: self._threshold_var.set(int(cfg["threshold"]))
@@ -1886,6 +1954,21 @@ class PipeGUI:
             except Exception: pass
         if "fps" in cfg:
             try: self._fps_var.set(float(cfg["fps"]))
+            except Exception: pass
+        if "extract_jobs" in cfg:
+            try: self._extract_jobs_var.set(int(cfg["extract_jobs"]))
+            except Exception: pass
+        if "extract_lock_ttl" in cfg:
+            try: self._extract_lock_ttl_var.set(int(cfg["extract_lock_ttl"]))
+            except Exception: pass
+        elif "lock_ttl" in cfg:  # 兼容旧配置字段名
+            try: self._extract_lock_ttl_var.set(int(cfg["lock_ttl"]))
+            except Exception: pass
+        if "dedupe_jobs" in cfg:
+            try: self._dedupe_jobs_var.set(int(cfg["dedupe_jobs"]))
+            except Exception: pass
+        if "dedupe_lock_ttl" in cfg:
+            try: self._dedupe_lock_ttl_var.set(int(cfg["dedupe_lock_ttl"]))
             except Exception: pass
 
         # 复选框
@@ -1933,6 +2016,11 @@ class PipeGUI:
             "threshold": int(self._threshold_var.get()),
             "motion": float(self._motion_var.get()),
             "fps": float(self._fps_var.get()),
+            "extract_jobs": int(self._extract_jobs_var.get()),
+            "extract_lock_ttl": int(self._extract_lock_ttl_var.get()),
+            "dedupe_jobs": int(self._dedupe_jobs_var.get()),
+            "dedupe_lock_ttl": int(self._dedupe_lock_ttl_var.get()),
+            "markers_root": self._markers_root_var.get(),
             "apply": bool(self._apply_var.get()),
             "hard_delete": bool(self._hard_delete_var.get()),
             "minimize_to_tray": bool(self._minimize_to_tray_var.get()),
@@ -1975,6 +2063,9 @@ class PipeGUI:
         # 默认 out_root
         if not self._out_var.get():
             self._out_var.set(str(pipeline.default_out_root(drive)))
+        # 默认 markers_root
+        if not self._markers_root_var.get():
+            self._markers_root_var.set(str(pipeline.default_markers_root(drive)))
         # 尝试猜 src
         if not self._src_var.get():
             try:
@@ -1999,6 +2090,14 @@ class PipeGUI:
         p = filedialog.askdirectory(initialdir=init, title="选择输出根")
         if p:
             self._out_var.set(p)
+
+    def _browse_markers_root(self):
+        init = self._markers_root_var.get() or (
+            self._drive_var.get() + "\\" if os.name == "nt" else "/"
+        )
+        p = filedialog.askdirectory(initialdir=init, title="选择 Marker 根")
+        if p:
+            self._markers_root_var.set(p)
 
     def _rescan_subs(self):
         for w in self._subs_inner.winfo_children():
@@ -2204,6 +2303,11 @@ class PipeGUI:
             scene_protect=bool(self._scene_protect_var.get()),
             watch_interval=float(self._watch_interval_var.get()),
             protect=self._get_selected_protect_arg(),
+            extract_jobs=int(self._extract_jobs_var.get()),
+            extract_lock_ttl=float(self._extract_lock_ttl_var.get()),
+            dedupe_jobs=int(self._dedupe_jobs_var.get()),
+            dedupe_lock_ttl=float(self._dedupe_lock_ttl_var.get()),
+            markers_root=self._markers_root_var.get() or None,
             fingerprint=False,
         )
 
@@ -2249,6 +2353,11 @@ class PipeGUI:
         self._threshold_var.set(3)
         self._motion_var.set(0.12)
         self._fps_var.set(1.0)
+        self._extract_jobs_var.set(1)
+        self._extract_lock_ttl_var.set(900)
+        self._dedupe_jobs_var.set(1)
+        self._dedupe_lock_ttl_var.set(900)
+        self._markers_root_var.set("")
         self._apply_var.set(True)
         self._hard_delete_var.set(True)
         self._minimize_to_tray_var.set(True)

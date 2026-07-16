@@ -205,6 +205,11 @@ def default_out_root(data_drive: str) -> Path:
     return Path(f"{data_drive}\\{DEFAULT_OUT_SUBDIR}")
 
 
+def default_markers_root(data_drive: str) -> Path:
+    """marker 根目录默认在数据盘的 pic-clear-markers 下。"""
+    return Path(f"{data_drive}\\pic-clear-markers")
+
+
 def jobs_root(out_root: Path) -> Path:
     return out_root / ".pipeline" / "jobs"
 
@@ -666,11 +671,19 @@ def cmd_submit(args: argparse.Namespace) -> int:
     job_dir = _job_dir(out_root, job_id)
     job_dir.mkdir(parents=True, exist_ok=True)
 
+    # --- 决定 markers_root ---
+    if getattr(args, "markers_root", None):
+        markers_root = Path(args.markers_root)
+    else:
+        markers_root = default_markers_root(data_drive)
+    markers_root.mkdir(parents=True, exist_ok=True)
+
     manifest = {
         "job_id": job_id,
         "created_at": _now_iso(),
         "src_root": str(src_root),
         "out_root": str(out_root),
+        "markers_root": str(markers_root),
         "subs": subs,
         "threshold": args.threshold,
         "fps": args.fps,
@@ -682,6 +695,10 @@ def cmd_submit(args: argparse.Namespace) -> int:
         "scene_protect": bool(args.scene_protect),
         "watch_interval": float(args.watch_interval),
         "protect": (args.protect or "").strip() or None,
+        "extract_jobs": int(getattr(args, "extract_jobs", 1) or 1),
+        "extract_lock_ttl": float(getattr(args, "extract_lock_ttl", 900.0) or 900.0),
+        "dedupe_jobs": int(getattr(args, "dedupe_jobs", 1) or 1),
+        "dedupe_lock_ttl": float(getattr(args, "dedupe_lock_ttl", 900.0) or 900.0),
     }
     (job_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -902,6 +919,18 @@ def cmd_worker(args: argparse.Namespace) -> int:
     protect_arg = manifest.get("protect")  # 老 manifest 没有则为 None，走 dedupe_pic 默认
     if watch_interval <= 0:
         watch_interval = 3.0
+    extract_jobs = max(1, int(manifest.get("extract_jobs", 1) or 1))
+    extract_lock_ttl = float(
+        manifest.get("extract_lock_ttl", manifest.get("lock_ttl", 900.0)) or 900.0
+    )
+    dedupe_jobs = max(1, int(manifest.get("dedupe_jobs", 1) or 1))
+    dedupe_lock_ttl = float(manifest.get("dedupe_lock_ttl", 900.0) or 900.0)
+    markers_root_str = manifest.get("markers_root")
+    if not markers_root_str:
+        _pipeline_log(job_dir, "[FATAL] manifest 缺 markers_root，无法继续")
+        return 2
+    markers_root = Path(markers_root_str)
+    markers_root.mkdir(parents=True, exist_ok=True)
 
     # 用 preflight 返回的绝对路径，保证跟 submit 时期望的位置一致
     extract_exe = resolved_workers.get("extract_frames") or resolve_worker_exe("extract_frames")
@@ -928,12 +957,17 @@ def cmd_worker(args: argparse.Namespace) -> int:
     out_root_manifest = Path(manifest["out_root"])
     # 各子目录的目标目录，watcher 只在这些目录里扫，避免误伤
     sub_dsts: list[Path] = []
+    sub_marker_roots: list[Path] = []
     for sub in subs:
         if sub == ".":
             sub_dsts.append(out_root_manifest / src_root.name)
+            sub_marker_roots.append(markers_root / src_root.name)
         else:
             sub_dsts.append(out_root_manifest / src_root.name / sub)
+            sub_marker_roots.append(markers_root / src_root.name / sub)
     for d in sub_dsts:
+        d.mkdir(parents=True, exist_ok=True)
+    for d in sub_marker_roots:
         d.mkdir(parents=True, exist_ok=True)
 
     status_lock = threading.Lock()
@@ -941,101 +975,107 @@ def cmd_worker(args: argparse.Namespace) -> int:
     producer_done = threading.Event()
     overall_rc = {"value": 0}
     daily_limit_hit = {"value": False}
+    from concurrent.futures import ThreadPoolExecutor
+    dedupe_executor = ThreadPoolExecutor(max_workers=dedupe_jobs,
+                                         thread_name_prefix="dedupe")
+    inflight: set[Path] = set()      # 正在跑或已排入 executor 的 target 目录
+    inflight_lock = threading.Lock()
 
     def save_status_locked():
         with status_lock:
             _save_status(job_dir, status)
 
+    def _dedupe_one(i: int, target: Path, marker_dir: Path) -> None:
+        """跑一个视频目录的去重（在 dedupe_executor 线程池里执行）。"""
+        _pipeline_log(job_dir, f"[watcher] 去重 {target}  (marker={marker_dir})")
+        report_csv = target / "dedupe_report.csv"
+        cmd = [dedupe_exe, str(target),
+               "--threshold", str(threshold),
+               "--motion-threshold", str(motion_threshold),
+               "--report", str(report_csv),
+               "--marker-dir", str(marker_dir),
+               "--lock-ttl", str(dedupe_lock_ttl)]
+        if scene_protect:
+            cmd.append("--scene-protect")
+        if protect_arg:
+            cmd.extend(["--protect", protect_arg])
+        if apply_delete:
+            cmd.append("--apply")
+            if hard_delete:
+                cmd.append("--hard-delete")
+            else:
+                cmd.extend(["--trash-dir", str(target / "_trash")])
+        rc = _run_child(cmd, job_dir)
+        if rc == 0:
+            with status_lock:
+                status.subs[i].videos_deduped += 1
+            _pipeline_log(job_dir, f"[watcher] [OK] {target}")
+            try:
+                cum = _append_stats(target, data_drive=args.data_drive or "Z:")
+            except Exception as e:
+                cum = -1
+                _pipeline_log(job_dir, f"[watcher] 统计失败: {e}")
+            if cum >= 0:
+                _pipeline_log(job_dir,
+                    f"[watcher] 当日累计剩余 {cum} / 阈值 {daily_remain_limit}")
+                if daily_remain_limit > 0 and cum >= daily_remain_limit:
+                    _pipeline_log(job_dir,
+                        f"[watcher] 已达当日剩余阈值 {daily_remain_limit}，"
+                        "停止 watcher + 抽帧")
+                    stop_watcher.set()
+                    daily_limit_hit["value"] = True
+                    with status_lock:
+                        status.last_message = (
+                            f"已达当日剩余阈值 {daily_remain_limit}，自动停止"
+                        )
+                    save_status_locked()
+        else:
+            _pipeline_log(job_dir, f"[watcher] [FAIL rc={rc}] {target}")
+            overall_rc["value"] = 1
+        save_status_locked()
+
     # ---- watcher 线程 ----
     def watcher_loop():
-        _pipeline_log(job_dir, "[watcher] 启动，开始扫描 _done.marker")
+        _pipeline_log(job_dir,
+            f"[watcher] 启动，扫描 markers_root，并发={dedupe_jobs}")
         while not stop_watcher.is_set():
             any_work = False
-            for i, sub_dst in enumerate(sub_dsts):
-                if not sub_dst.is_dir():
+            for i, sub_mr in enumerate(sub_marker_roots):
+                if not sub_mr.is_dir():
                     continue
                 # 递归找所有 _done.marker
                 try:
-                    markers = list(sub_dst.rglob("_done.marker"))
+                    markers = list(sub_mr.rglob("_done.marker"))
                 except Exception as e:
-                    _pipeline_log(job_dir, f"[watcher] rglob 失败 {sub_dst}: {e}")
+                    _pipeline_log(job_dir, f"[watcher] rglob 失败 {sub_mr}: {e}")
                     continue
                 for m in markers:
-                    target = m.parent
-                    dedup_marker = target / "_dedup_done.marker"
-                    running_marker = target / "_dedup_running.marker"
-                    if dedup_marker.exists() or running_marker.exists():
+                    marker_dir_i = m.parent
+                    # 已完成：跳过
+                    if (marker_dir_i / "_dedup_done.marker").is_file():
                         continue
-                    # 标记开始
+                    # marker 相对 sub_mr 的路径 → 套到 sub_dsts[i] 得到真实帧目录
                     try:
-                        running_marker.write_text("running", encoding="utf-8")
+                        rel = marker_dir_i.relative_to(sub_mr)
                     except Exception:
                         continue
+                    target = sub_dsts[i] / rel
+                    if not target.is_dir():
+                        continue
+                    with inflight_lock:
+                        if target in inflight:
+                            continue
+                        inflight.add(target)
                     any_work = True
-                    _pipeline_log(job_dir, f"[watcher] 去重 {target}")
-                    report_csv = target / "dedupe_report.csv"
-                    cmd = [dedupe_exe, str(target),
-                           "--threshold", str(threshold),
-                           "--motion-threshold", str(motion_threshold),
-                           "--report", str(report_csv)]
-                    if scene_protect:
-                        cmd.append("--scene-protect")
-                    if protect_arg:
-                        cmd.extend(["--protect", protect_arg])
-                    if apply_delete:
-                        cmd.append("--apply")
-                        if hard_delete:
-                            cmd.append("--hard-delete")
-                        else:
-                            cmd.extend(["--trash-dir", str(target / "_trash")])
-                    rc = _run_child(cmd, job_dir)
-                    try:
-                        running_marker.unlink()
-                    except Exception:
-                        pass
-                    if rc == 0:
-                        try:
-                            dedup_marker.write_text("done", encoding="utf-8")
-                        except Exception:
-                            pass
-                        # 更新对应子目录的视频计数
-                        with status_lock:
-                            status.subs[i].videos_deduped += 1
-                        _pipeline_log(job_dir, f"[watcher] [OK] {target}")
-                        # 追加统计，判日限
-                        try:
-                            cum = _append_stats(target, data_drive=args.data_drive or "Z:")
-                        except Exception as e:
-                            cum = -1
-                            _pipeline_log(job_dir, f"[watcher] 统计失败: {e}")
-                        if cum >= 0:
-                            _pipeline_log(job_dir,
-                                f"[watcher] 当日累计剩余 {cum} / 阈值 {daily_remain_limit}")
-                            if daily_remain_limit > 0 and cum >= daily_remain_limit:
-                                _pipeline_log(job_dir,
-                                    f"[watcher] 已达当日剩余阈值 {daily_remain_limit}，"
-                                    "停止 watcher + 抽帧")
-                                stop_watcher.set()
-                                daily_limit_hit["value"] = True
-                                # 记到 status 上，方便 pipeline.exe status 能看到
-                                with status_lock:
-                                    status.last_message = (
-                                        f"已达当日剩余阈值 {daily_remain_limit}，自动停止"
-                                    )
-                                save_status_locked()
-                                return
-                    else:
-                        _pipeline_log(job_dir, f"[watcher] [FAIL rc={rc}] {target}")
-                        overall_rc["value"] = 1
-                    save_status_locked()
+                    dedupe_executor.submit(_dedupe_one, i, target, marker_dir_i)
                     if stop_watcher.is_set():
                         return
 
             # 更新 videos_extracted 计数（不管 watcher 有没有活干都更新）
             with status_lock:
-                for i, sub_dst in enumerate(sub_dsts):
+                for i, sub_mr in enumerate(sub_marker_roots):
                     try:
-                        cnt = sum(1 for _ in sub_dst.rglob("_done.marker"))
+                        cnt = sum(1 for _ in sub_mr.rglob("_done.marker"))
                         status.subs[i].videos_extracted = cnt
                     except Exception:
                         pass
@@ -1067,10 +1107,19 @@ def cmd_worker(args: argparse.Namespace) -> int:
 
         sub_src = src_root if sub == "." else src_root / sub
         sub_dst = sub_dsts[i - 1]
+        # markers_root 下按 <src_root.name>/<sub> 建镜像子树，跟 sub_dst 的结构一致
+        if sub == ".":
+            sub_marker_root = markers_root / src_root.name
+        else:
+            sub_marker_root = markers_root / src_root.name / sub
+        sub_marker_root.mkdir(parents=True, exist_ok=True)
 
         rc = _run_child(
             [extract_exe, str(sub_src), str(sub_dst),
-             "--fps", str(fps), "--ext", ext],
+             "--fps", str(fps), "--ext", ext,
+             "--jobs", str(extract_jobs),
+             "--lock-ttl", str(extract_lock_ttl),
+             "--markers-root", str(sub_marker_root)],
             job_dir,
         )
         sub_status.extract_rc = rc
@@ -1095,6 +1144,9 @@ def cmd_worker(args: argparse.Namespace) -> int:
     _pipeline_log(job_dir, "[主线程] 抽帧完成，等待 watcher...")
 
     watcher_thread.join()
+    # 等待线程池里正在跑的 dedupe 收尾
+    _pipeline_log(job_dir, "[watcher] 等待去重线程池收尾...")
+    dedupe_executor.shutdown(wait=True)
 
     status.state = "done" if overall_rc["value"] == 0 else "failed"
     status.ended_at = _now_iso()
@@ -1345,6 +1397,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-t", "--threshold", type=int, default=3,
                     help="dedupe 相似阈值（Hamming 距离），默认 3")
     sp.add_argument("--fps", type=float, default=1.0, help="抽帧频率，默认 1.0")
+    sp.add_argument("--extract-jobs", type=int, default=1,
+                    help="抽帧并发数（视频粒度，透传给 extract_frames.exe --jobs）。默认 1")
+    sp.add_argument("--extract-lock-ttl", type=float, default=900.0,
+                    help="抽帧视频锁 TTL 秒（多机共享盘用），默认 900（15 分钟）")
+    sp.add_argument("--dedupe-jobs", type=int, default=1,
+                    help="去重并发数（目录粒度），默认 1")
+    sp.add_argument("--dedupe-lock-ttl", type=float, default=900.0,
+                    help="去重锁 TTL 秒，默认 900（15 分钟）")
+    sp.add_argument("--markers-root", type=str, default=None,
+                    help=(
+                        "marker/lock 集中存放的根目录（推荐指向多机共享盘，"
+                        "例如 Z:\\pic-clear-markers）。不传则默认 <数据盘>\\pic-clear-markers"
+                    ))
     sp.add_argument("--ext", default=".h265,.mp4",
                     help="视频扩展名（逗号分隔可多值）。默认 .h265,.mp4")
     sp.add_argument("-y", "--apply", action="store_true",

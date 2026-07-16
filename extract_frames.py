@@ -20,9 +20,12 @@ import argparse
 import io
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -126,6 +129,7 @@ class VideoTask:
     src_path: Path       # 视频源路径
     out_dir: Path        # 抽帧输出目录（视频同名文件夹）
     rel_path: Path       # 相对于 src_root 的路径（打印用）
+    marker_dir: Path     # marker/lock 存放目录（集中在 markers_root 下的镜像位置）
 
 
 def collect_tasks(
@@ -133,6 +137,7 @@ def collect_tasks(
     dst_root: Path,
     extensions: set[str],
     skip_dirs: set[str],
+    markers_root: Path,
 ) -> list[VideoTask]:
     """
     递归扫描 src_root，收集所有需要抽帧的视频任务。
@@ -161,11 +166,14 @@ def collect_tasks(
             rel_dir = Path(dirpath).relative_to(src_root)
             # 输出到 DST/<rel_dir>/<视频名不带后缀>/
             out_dir = dst_root / rel_dir / Path(name).stem
+            # marker 集中放到 markers_root 下的镜像位置，跟 out_dir 结构一致
+            marker_dir = markers_root / rel_dir / Path(name).stem
             tasks.append(
                 VideoTask(
                     src_path=src,
                     out_dir=out_dir,
                     rel_path=rel_dir / name,
+                    marker_dir=marker_dir,
                 )
             )
     return tasks
@@ -173,12 +181,86 @@ def collect_tasks(
 
 # --------------------------- 单个视频抽帧 -----------------------------------
 
+# 抽帧锁：多机共享盘下互斥，抽完删除，超过 TTL 视为对方崩溃可抢占。
+_LOCK_NAME = "_extract.lock"
+_HOSTNAME = socket.gethostname()
+
+
+def _lock_payload() -> str:
+    """锁内容：hostname|pid|开始时间戳。方便运维观察谁在抽。"""
+    return f"{_HOSTNAME}|{os.getpid()}|{int(time.time())}"
+
+
+def _lock_is_stale(lock_path: Path, ttl_seconds: float) -> bool:
+    """锁是否已过期（对方可能崩了 / 断网）。读不到内容也视为 stale。"""
+    try:
+        content = lock_path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        return True
+    parts = content.split("|")
+    if len(parts) < 3:
+        return True
+    try:
+        ts = int(parts[2])
+    except Exception:
+        return True
+    return (time.time() - ts) > ttl_seconds
+
+
+def _acquire_lock(lock_path: Path, ttl_seconds: float) -> bool:
+    """
+    原子抢占锁。返回 True 表示抢到，False 表示别人正在跑。
+    SMB/CIFS/NFS/本地 FS 都保证 O_CREAT|O_EXCL 的原子性。
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _lock_payload().encode("utf-8")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    try:
+        fd = os.open(str(lock_path), flags, 0o644)
+    except FileExistsError:
+        # 已存在：看看是不是过期锁
+        if _lock_is_stale(lock_path, ttl_seconds):
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                return False
+            # 再抢一次；这次还失败就让给别人
+            try:
+                fd = os.open(str(lock_path), flags, 0o644)
+            except Exception:
+                return False
+        else:
+            return False
+    except Exception:
+        return False
+    try:
+        os.write(fd, payload)
+    finally:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+    return True
+
+
+def _release_lock(lock_path: Path) -> None:
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
 def extract_one(
     task: VideoTask,
     ffmpeg: Path,
     fps: float,
     quality: int,
     skip_existing: bool,
+    lock_ttl: float = 900.0,
 ) -> tuple[str, int, str]:
     """
     对一个视频执行抽帧。返回 (stage, 帧数, 说明)。stage 有三种：
@@ -187,9 +269,13 @@ def extract_one(
                  或 ffmpeg 报可预期的"无帧可解码"错误。也写 marker（内容 'empty'），
                  下次轮询到会直接跳过，不再浪费时间重试
       - "failed" 真正的失败（ffmpeg 不存在 / 崩溃 / IO 错误等），不写 marker，下次会重试
+      - "locked" 别的机器/进程正在抽这个视频（多机并发），直接跳过，不写 marker
     """
     out_dir = task.out_dir
-    marker = out_dir / "_done.marker"
+    marker_dir = task.marker_dir
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    marker = marker_dir / "_done.marker"
+    lock_path = marker_dir / _LOCK_NAME
     if skip_existing and marker.is_file():
         existing = list(out_dir.glob("frame_*.jpg"))
         # 老 marker 里可能写着 'done' 或 'empty'，都当已处理，直接跳过
@@ -200,8 +286,15 @@ def extract_one(
         if content == "empty" or len(existing) == 0:
             return "empty", 0, "跳过（已完成，历史标记为 empty / 目录中无帧）"
         return "ok", len(existing), f"跳过（已完成，marker 存在，{len(existing)} 帧）"
-    if skip_existing and out_dir.is_dir():
-        # 存在半成品目录（有 frame_ 文件但没 marker）→ 判为上次未完成，清空重抽
+
+    # 抢锁：多机共享盘下同一视频只能被一台机器抽。
+    # 抢不到就直接返回 locked，交给其它进程处理。
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not _acquire_lock(lock_path, lock_ttl):
+        return "locked", 0, "跳过（其他机器/进程正在抽，锁存在且未过期）"
+
+    # 抢到锁之后再清理半成品（此时只有本进程会碰这个目录，安全）
+    if skip_existing:
         stale = list(out_dir.glob("frame_*.jpg"))
         if stale:
             for f in stale:
@@ -210,7 +303,21 @@ def extract_one(
                 except Exception:
                     pass
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        return _do_extract(task, ffmpeg, fps, quality, out_dir, marker)
+    finally:
+        _release_lock(lock_path)
+
+
+def _do_extract(
+    task: VideoTask,
+    ffmpeg: Path,
+    fps: float,
+    quality: int,
+    out_dir: Path,
+    marker: Path,
+) -> tuple[str, int, str]:
+    """真正跑 ffmpeg 的部分。已在锁保护内。"""
     out_pattern = str(out_dir / "frame_%06d.jpg")
 
     # ffmpeg 命令：
@@ -340,6 +447,30 @@ def parse_args() -> argparse.Namespace:
         "--ffmpeg", default=None,
         help="ffmpeg 可执行路径。默认自动查找 exe 同目录 / PATH",
     )
+    p.add_argument(
+        "-j", "--jobs", type=int, default=1,
+        help=(
+            "并发抽帧的视频数（线程池）。默认 1（串行）。"
+            "推荐 4-8；机器 CPU 多且盘快可以到 16。太大反而会因磁盘竞争变慢。"
+        ),
+    )
+    p.add_argument(
+        "--lock-ttl", type=float, default=900.0,
+        help=(
+            "视频锁 TTL（秒），默认 900（15 分钟）。"
+            "多机共享盘时，某台机器抽某视频前会原子创建 _extract.lock，"
+            "锁存在超过 TTL 视为对方崩了，可抢占。"
+            "值应 >= 你手上最长视频的抽帧耗时。"
+        ),
+    )
+    p.add_argument(
+        "--markers-root", type=Path, required=True,
+        help=(
+            "marker/lock 集中存放的根目录（推荐指向多机共享盘上的目录，"
+            "例如 Z:\\pic-clear-markers）。"
+            "会按视频输出的层级建镜像子目录。"
+        ),
+    )
     return p.parse_args()
 
 
@@ -433,11 +564,18 @@ def main() -> int:
     print(f"  ffmpeg    : {ffmpeg}")
     print(f"  已抽跳过  : {'否' if args.no_skip_existing else '是'}")
     print(f"  dry-run   : {'是' if args.dry_run else '否'}")
+    print(f"  并发数    : {args.jobs}")
+    print(f"  锁 TTL    : {int(args.lock_ttl)}s")
+    print(f"  markers   : {args.markers_root}")
+    print(f"  hostname  : {_HOSTNAME}")
     print("=" * 60)
 
     print("[扫描] 正在收集视频文件...", flush=True)
     t0 = time.time()
-    tasks = collect_tasks(args.src_root, args.dst_root, extensions, skip_dirs)
+    args.markers_root.mkdir(parents=True, exist_ok=True)
+    tasks = collect_tasks(
+        args.src_root, args.dst_root, extensions, skip_dirs, args.markers_root,
+    )
     print(
         f"[扫描] 找到 {len(tasks)} 个待处理视频，耗时 {time.time()-t0:.1f}s",
         flush=True,
@@ -458,44 +596,119 @@ def main() -> int:
     ok_cnt = 0
     empty_cnt = 0
     fail_cnt = 0
+    locked_cnt = 0
     total_frames = 0
     fails: list[tuple[VideoTask, str]] = []
     empties: list[tuple[VideoTask, str]] = []
     t_start = time.time()
+    print_lock = threading.Lock()
+    counter_lock = threading.Lock()
+    done_count = {"n": 0}
+    interrupted = {"v": False}
 
-    for i, task in enumerate(tasks, 1):
+    def _run_one(task: VideoTask) -> tuple[VideoTask, str, int, str, float]:
+        t0 = time.time()
+        try:
+            stage, n, msg = extract_one(
+                task, ffmpeg, args.fps, args.quality,
+                skip_existing=not args.no_skip_existing,
+                lock_ttl=args.lock_ttl,
+            )
+        except Exception as e:
+            return task, "failed", 0, f"内部异常: {type(e).__name__}: {e}", time.time() - t0
+        return task, stage, n, msg, time.time() - t0
+
+    def _handle_result(task: VideoTask, stage: str, n: int, msg: str, dt: float) -> None:
+        nonlocal ok_cnt, empty_cnt, fail_cnt, locked_cnt, total_frames
+        with counter_lock:
+            done_count["n"] += 1
+            idx = done_count["n"]
+            if stage == "ok":
+                ok_cnt += 1
+                total_frames += n
+            elif stage == "empty":
+                empty_cnt += 1
+                empties.append((task, msg))
+            elif stage == "locked":
+                locked_cnt += 1
+            else:
+                fail_cnt += 1
+                fails.append((task, msg))
+
         elapsed = time.time() - t_start
-        rate = (i - 1) / elapsed if elapsed > 0 else 0
-        remain = (len(tasks) - i + 1) / rate if rate > 0 else float("nan")
-        print(
-            f"\n[{i}/{len(tasks)}] {task.rel_path}   "
-            f"(已用 {_fmt_time(elapsed)}, 剩余 ~{_fmt_time(remain)})",
-            flush=True,
-        )
-        print(f"    → {task.out_dir}", flush=True)
+        rate = idx / elapsed if elapsed > 0 else 0
+        remain = (len(tasks) - idx) / rate if rate > 0 else float("nan")
+        tag = {"ok": "✓", "empty": "⊘", "locked": "◇", "failed": "✗"}.get(stage, "?")
+        with print_lock:
+            print(
+                f"[{idx}/{len(tasks)}] {tag} {task.rel_path}  "
+                f"帧={n} 耗时={dt:.1f}s  "
+                f"(已用 {_fmt_time(elapsed)}, 剩余 ~{_fmt_time(remain)})  {msg}",
+                flush=True,
+            )
 
-        print("    ...抽帧中，请稍候（ffmpeg 静默运行，视频越长等得越久）", flush=True)
-        stage, n, msg = extract_one(
-            task, ffmpeg, args.fps, args.quality,
-            skip_existing=not args.no_skip_existing,
-        )
-        if stage == "ok":
-            ok_cnt += 1
-            total_frames += n
-            print(f"    ✓ {msg}，帧数 {n}", flush=True)
-        elif stage == "empty":
-            empty_cnt += 1
-            empties.append((task, msg))
-            print(f"    ⊘ 跳过（无帧）: {msg}", flush=True)
-        else:
-            fail_cnt += 1
-            fails.append((task, msg))
-            print(f"    ✗ 失败: {msg}", flush=True)
+    jobs = max(1, int(args.jobs))
+    if jobs == 1:
+        # 单线程分支：保持老日志格式，方便对比
+        for i, task in enumerate(tasks, 1):
+            if interrupted["v"]:
+                break
+            elapsed = time.time() - t_start
+            rate = (i - 1) / elapsed if elapsed > 0 else 0
+            remain = (len(tasks) - i + 1) / rate if rate > 0 else float("nan")
+            print(
+                f"\n[{i}/{len(tasks)}] {task.rel_path}   "
+                f"(已用 {_fmt_time(elapsed)}, 剩余 ~{_fmt_time(remain)})",
+                flush=True,
+            )
+            print(f"    → {task.out_dir}", flush=True)
+            print("    ...抽帧中，请稍候（ffmpeg 静默运行，视频越长等得越久）", flush=True)
+            try:
+                stage, n, msg = extract_one(
+                    task, ffmpeg, args.fps, args.quality,
+                    skip_existing=not args.no_skip_existing,
+                    lock_ttl=args.lock_ttl,
+                )
+            except KeyboardInterrupt:
+                interrupted["v"] = True
+                print("\n[中断] 收到 Ctrl+C，本视频锁已释放，后续跳过。", flush=True)
+                break
+            if stage == "ok":
+                ok_cnt += 1
+                total_frames += n
+                print(f"    ✓ {msg}，帧数 {n}", flush=True)
+            elif stage == "empty":
+                empty_cnt += 1
+                empties.append((task, msg))
+                print(f"    ⊘ 跳过（无帧）: {msg}", flush=True)
+            elif stage == "locked":
+                locked_cnt += 1
+                print(f"    ◇ 跳过（其他机器/进程正在抽）: {msg}", flush=True)
+            else:
+                fail_cnt += 1
+                fails.append((task, msg))
+                print(f"    ✗ 失败: {msg}", flush=True)
+    else:
+        # 并发分支：完成一个打一行
+        print(f"\n[并发] 启动线程池 workers={jobs}，视频粒度并发抽帧", flush=True)
+        with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix="extract") as ex:
+            futures = {ex.submit(_run_one, t): t for t in tasks}
+            try:
+                for fut in as_completed(futures):
+                    task, stage, n, msg, dt = fut.result()
+                    _handle_result(task, stage, n, msg, dt)
+            except KeyboardInterrupt:
+                interrupted["v"] = True
+                with print_lock:
+                    print("\n[中断] 收到 Ctrl+C，取消未开始的任务，等待正在跑的收尾...",
+                          flush=True)
+                for f in futures:
+                    f.cancel()
 
     print()
     print("=" * 60)
     print(
-        f"[完成] 成功 {ok_cnt} / 空视频跳过 {empty_cnt} / 失败 {fail_cnt}，"
+        f"[完成] 成功 {ok_cnt} / 空视频 {empty_cnt} / 其他机器占用 {locked_cnt} / 失败 {fail_cnt}，"
         f"共生成 {total_frames} 帧，总耗时 {_fmt_time(time.time()-t_start)}"
     )
     if empties:

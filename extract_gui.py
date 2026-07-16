@@ -135,6 +135,9 @@ class ExtractGUI:
         self._src_var = tk.StringVar(value=self._cfg.get("src", ""))
         self._out_var = tk.StringVar(value=self._cfg.get("out_root", ""))
         self._fps_var = tk.DoubleVar(value=float(self._cfg.get("fps", 1.0)))
+        self._extract_jobs_var = tk.IntVar(value=int(self._cfg.get("extract_jobs", 1)))
+        self._lock_ttl_var = tk.IntVar(value=int(self._cfg.get("lock_ttl", 900)))
+        self._markers_root_var = tk.StringVar(value=self._cfg.get("markers_root", ""))
         self._minimize_to_tray_var = tk.BooleanVar(
             value=bool(self._cfg.get("minimize_to_tray", True)))
         self._hotkey_var = tk.StringVar(
@@ -207,12 +210,42 @@ class ExtractGUI:
         ttk.Button(row, text="浏览...", command=self._browse_out).pack(
             side="left", padx=4)
 
+        # Marker 根
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="Marker 根：", width=12).pack(side="left")
+        ttk.Entry(row, textvariable=self._markers_root_var, width=60).pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(row, text="浏览...", command=self._browse_markers_root).pack(
+            side="left", padx=4)
+        ttk.Label(page,
+                  text="  抽帧锁/完成标记集中放到这里，按视频层级建镜像；"
+                       "多机共享盘时所有机器指向同一位置",
+                  foreground="#666").pack(anchor="w", padx=18)
+
         # fps
         row = ttk.Frame(page); row.pack(fill="x", **pad)
         ttk.Label(row, text="抽帧率(fps)：", width=12).pack(side="left")
         ttk.Spinbox(row, from_=0.1, to=60.0, increment=0.5, width=8,
                     textvariable=self._fps_var).pack(side="left")
         ttk.Label(row, text="  默认 1 = 每秒 1 帧",
+                  foreground="#666").pack(side="left", padx=8)
+
+        # 抽帧并发数
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="并发数：", width=12).pack(side="left")
+        ttk.Spinbox(row, from_=1, to=32, increment=1, width=8,
+                    textvariable=self._extract_jobs_var).pack(side="left")
+        ttk.Label(row,
+                  text="  一台机器同时抽多少个视频，默认 1，多机共享盘并发也安全",
+                  foreground="#666").pack(side="left", padx=8)
+
+        # 视频锁 TTL
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="视频锁 TTL(s)：", width=12).pack(side="left")
+        ttk.Spinbox(row, from_=30, to=86400, increment=60, width=10,
+                    textvariable=self._lock_ttl_var).pack(side="left")
+        ttk.Label(row,
+                  text="  多机共享盘的抢占锁，默认 900（15 分钟）",
                   foreground="#666").pack(side="left", padx=8)
 
         # 子目录多选
@@ -293,6 +326,12 @@ class ExtractGUI:
         if p:
             self._out_var.set(p)
 
+    def _browse_markers_root(self):
+        init = self._markers_root_var.get() or os.path.expanduser("~")
+        p = filedialog.askdirectory(initialdir=init, title="选择 Marker 根")
+        if p:
+            self._markers_root_var.set(p)
+
     def _rescan_subs(self):
         for w in self._sub_frame.winfo_children():
             w.destroy()
@@ -350,6 +389,12 @@ class ExtractGUI:
         if not out:
             messagebox.showerror("参数错误", "输出根不能为空"); return
 
+        mr = self._markers_root_var.get().strip()
+        if not mr:
+            messagebox.showerror("参数错误",
+                                 "Marker 根不能为空。多机共享盘时所有机器应指向同一位置。")
+            return
+
         exe = _find_extract_exe()
         if not exe:
             messagebox.showerror(
@@ -360,21 +405,28 @@ class ExtractGUI:
         # 决定要处理的目录列表：勾选的子目录 → 每个子目录一次调用；
         # 若没有子目录，直接对整个 src 跑一次
         src_p = Path(src)
+        markers_root_p = Path(mr)
         if self._sub_vars:
             selected = [name for name, v in self._sub_vars if v.get()]
             if not selected:
                 messagebox.showerror("参数错误", "至少勾选一个子目录"); return
-            sub_pairs = [(src_p / name, Path(out) / src_p.name / name)
-                         for name in selected]
+            sub_pairs = [
+                (src_p / name,
+                 Path(out) / src_p.name / name,
+                 markers_root_p / src_p.name / name)
+                for name in selected
+            ]
         else:
-            sub_pairs = [(src_p, Path(out) / src_p.name)]
+            sub_pairs = [(src_p,
+                          Path(out) / src_p.name,
+                          markers_root_p / src_p.name)]
 
         # 保存配置
         _save_config(self._dump_cfg())
 
         # 汇总总视频数（用于进度百分比）
         self._total_videos = 0
-        for sub_src, _ in sub_pairs:
+        for sub_src, _dst, _mr in sub_pairs:
             self._total_videos += len(_list_videos(sub_src))
         self._done_videos = 0
         if self._total_videos == 0:
@@ -399,20 +451,24 @@ class ExtractGUI:
         self._worker_stop_flag.set()
         self._log("[停止] 已请求停止，等当前视频抽完就退出")
 
-    def _worker_run(self, exe: str, sub_pairs: list[tuple[Path, Path]]):
+    def _worker_run(self, exe: str, sub_pairs: list[tuple[Path, Path, Path]]):
         """在后台线程里按 sub_pairs 顺序调 extract_frames.exe。
         stdout 实时通过 _log_queue 回传给 GUI。"""
         try:
-            for sub_src, sub_dst in sub_pairs:
+            for sub_src, sub_dst, sub_mr in sub_pairs:
                 if self._worker_stop_flag.is_set():
                     self._log("[中止] 用户请求停止，跳过剩余目录")
                     break
                 sub_dst.mkdir(parents=True, exist_ok=True)
-                self._log(f"[抽帧] {sub_src} → {sub_dst}")
+                sub_mr.mkdir(parents=True, exist_ok=True)
+                self._log(f"[抽帧] {sub_src} → {sub_dst} (markers={sub_mr})")
 
                 cmd = [exe, str(sub_src), str(sub_dst),
                        "--fps", str(float(self._fps_var.get())),
-                       "--ext", ",".join(VIDEO_EXTS)]
+                       "--ext", ",".join(VIDEO_EXTS),
+                       "--jobs", str(int(self._extract_jobs_var.get())),
+                       "--lock-ttl", str(int(self._lock_ttl_var.get())),
+                       "--markers-root", str(sub_mr)]
                 self._log(f"[命令] {' '.join(cmd)}")
 
                 # Windows 下 CREATE_NO_WINDOW 让子进程不弹黑窗
@@ -493,6 +549,9 @@ class ExtractGUI:
             "src": self._src_var.get(),
             "out_root": self._out_var.get(),
             "fps": float(self._fps_var.get()),
+            "extract_jobs": int(self._extract_jobs_var.get()),
+            "lock_ttl": int(self._lock_ttl_var.get()),
+            "markers_root": self._markers_root_var.get(),
             "minimize_to_tray": bool(self._minimize_to_tray_var.get()),
             "hotkey": self._hotkey_var.get(),
             "selected_subs": [name for name, v in self._sub_vars if v.get()],

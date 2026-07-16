@@ -70,6 +70,46 @@ h265/mp4 视频目录
 
 **推荐用 `pipeline.exe` 或 `pipe_gui.exe` 一键跑完整个流程**，不用一个个手动调。
 
+## 并发 + 多机共享盘 + Marker 集中
+
+**抽帧和去重都支持"单机并发 + 多机互斥"**，并且所有锁 / 完成标记都集中放到一个
+`markers_root` 目录（推荐指向多机都能访问的共享盘，例如 `Z:\pic-clear-markers`）。
+
+### Marker 集中管理
+
+四种 marker 都不再落到视频/图片目录里，改按视频原始层级放到 `markers_root` 下：
+
+```
+Z:\pic-clear-markers\<src_name>\<sub>\<video_stem>\
+  _extract.lock            ← 抽帧锁
+  _done.marker             ← 抽帧完成
+  _dedup.lock              ← 去重锁
+  _dedup_done.marker       ← 去重完成
+```
+
+**多机部署**：10 台机器都把同一份共享盘挂成 Z 盘（或别的盘符），4 个 GUI 里都
+把 `Marker 根` 指到 `Z:\pic-clear-markers`，任一视频只会被抢到锁的那台机器处理。
+
+### 抽帧并发
+
+- **单机并发**：`extract_frames.exe --jobs N`（默认 1）。推荐 4-8，机器强+盘快可到 16。
+  GUI 对应『抽帧并发数』
+- **多机互斥**：每个视频抽前在 `markers_root/<rel>/` 原子创建 `_extract.lock`；
+  别的机器看到锁就跳过；崩溃/断网留下的锁 `--lock-ttl` 秒后（默认 900 = 15 分钟）
+  视为过期可被抢占。GUI 对应『抽帧锁 TTL(s)』
+- **中断安全**：kill 后靠锁自愈 + `_done.marker` 幂等，重跑接着来
+- **日志**：`[3/240] ✓ xxx/v3.mp4 帧=32 耗时=1.4s`
+
+### 去重并发
+
+- **单机并发**：`dedupe_gui` / `pipe_gui` 里配『去重并发数』（默认 1）。dedupe 内部
+  YOLO 会用多核，2-3 通常够；太大反而互抢 CPU
+- **多机互斥**：每个视频目录去重前在对应 marker 目录原子创建 `_dedup.lock`；
+  完成后写 `_dedup_done.marker`。别的机器看到 done 直接跳过、看到 lock 未过期跳过
+- **断点重删**：中断后重跑，靠 `_dedup_done.marker` 幂等；`_dedup.lock` TTL 过期
+  自动抢占；`dedupe_gui` 里勾『强制重跑』或加 `dedupe_pic --force` 忽略 done marker
+- **日志前缀**：`[目录名] 完成 rc=0`
+
 ## 你想怎么用？
 
 按角色选入口：
