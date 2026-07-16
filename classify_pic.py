@@ -461,8 +461,14 @@ def run(
     log: LogFn = _default_log,
     cancel: CancelFn | None = None,
 ) -> Stats:
-    if not cfg.in_root.is_dir():
-        raise FileNotFoundError(f"输入目录不存在: {cfg.in_root}")
+    in_root_str = str(cfg.in_root)
+    log(f"[输入] 原始路径: {in_root_str!r}")
+    if not os.path.isdir(in_root_str):
+        # 兜底再试 os.path.exists，UNC/中文情况下有时 isdir 抽风
+        if os.path.exists(in_root_str):
+            log(f"[警告] isdir=False 但 exists=True，继续尝试遍历")
+        else:
+            raise FileNotFoundError(f"输入目录不存在: {in_root_str}")
     cfg.out_root.mkdir(parents=True, exist_ok=True)
 
     from detector import YoloDetector, resolve_model_path
@@ -617,8 +623,8 @@ def main() -> int:
         _check_license_or_die()
     a = parse_args()
     cfg = ClassifyConfig(
-        in_root=a.in_root.resolve(),
-        out_root=a.out_root.resolve(),
+        in_root=a.in_root,
+        out_root=a.out_root,
         filter_keywords=tuple(
             s.strip() for s in a.filter_keywords.split(",") if s.strip()
         ),
