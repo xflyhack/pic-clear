@@ -173,6 +173,8 @@ class ExtractGUI:
         self._extract_jobs_var = tk.IntVar(value=int(self._cfg.get("extract_jobs", 1)))
         self._lock_ttl_var = tk.IntVar(value=int(self._cfg.get("lock_ttl", 900)))
         self._markers_root_var = tk.StringVar(value=self._cfg.get("markers_root", ""))
+        self._force_reextract_var = tk.BooleanVar(
+            value=bool(self._cfg.get("force_reextract", False)))
         self._minimize_to_tray_var = tk.BooleanVar(
             value=bool(self._cfg.get("minimize_to_tray", True)))
         self._hotkey_var = tk.StringVar(
@@ -295,6 +297,14 @@ class ExtractGUI:
                   text="  多机共享盘的抢占锁，默认 900（15 分钟）",
                   foreground="#666").pack(side="left", padx=8)
 
+        # 强制重切（默认不勾）：忽略已有 _done.marker，全部重抽
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Checkbutton(row, text="强制重切（忽略已完成标记，全部重抽）",
+                        variable=self._force_reextract_var).pack(side="left")
+        ttk.Label(row,
+                  text="  极端场景使用；会覆盖已完成的视频，默认不勾选",
+                  foreground="#a00").pack(side="left", padx=8)
+
         # 子目录多选
         row = ttk.Frame(page); row.pack(fill="x", **pad)
         ttk.Label(row, text="子目录多选（勾选要处理的一级子目录）：").pack(side="left")
@@ -323,16 +333,20 @@ class ExtractGUI:
         ttk.Label(row, text=f"  日志：{self._log_path.name}",
                   foreground="#888").pack(side="right", padx=4)
 
-        # 日志区：Text + 纵向滚动条（放在同一个 Frame 里）
+        # 日志区：Text + 纵/横滚动条（放在同一个 Frame 里）
         log_wrap = ttk.Frame(page)
         log_wrap.pack(fill="both", expand=True, padx=6, pady=(2, 6))
         self._log_text = tk.Text(log_wrap, height=16,
                                  font=("Consolas", 9), wrap="none")
         self._log_vsb = ttk.Scrollbar(log_wrap, orient="vertical",
                                       command=self._on_log_scrollbar)
-        self._log_text.configure(yscrollcommand=self._on_log_yview)
+        self._log_hsb = ttk.Scrollbar(log_wrap, orient="horizontal",
+                                      command=self._log_text.xview)
+        self._log_text.configure(yscrollcommand=self._on_log_yview,
+                                 xscrollcommand=self._log_hsb.set)
         self._log_text.grid(row=0, column=0, sticky="nsew")
         self._log_vsb.grid(row=0, column=1, sticky="ns")
+        self._log_hsb.grid(row=1, column=0, sticky="ew")
         log_wrap.rowconfigure(0, weight=1)
         log_wrap.columnconfigure(0, weight=1)
         # 鼠标滚轮 / 键盘翻页触发时判定是否在底部（暂停自动滚）
@@ -540,6 +554,9 @@ class ExtractGUI:
                        "--jobs", str(int(self._extract_jobs_var.get())),
                        "--lock-ttl", str(int(self._lock_ttl_var.get())),
                        "--markers-root", str(sub_mr)]
+                if bool(self._force_reextract_var.get()):
+                    cmd.append("--no-skip-existing")
+                    self._log("[警告] 已开启强制重切：所有视频将忽略已完成标记，覆盖重抽")
                 self._log(f"[命令] {' '.join(cmd)}")
 
                 # Windows 下 CREATE_NO_WINDOW 让子进程不弹黑窗
@@ -710,6 +727,7 @@ class ExtractGUI:
             "extract_jobs": int(self._extract_jobs_var.get()),
             "lock_ttl": int(self._lock_ttl_var.get()),
             "markers_root": self._markers_root_var.get(),
+            "force_reextract": bool(self._force_reextract_var.get()),
             "minimize_to_tray": bool(self._minimize_to_tray_var.get()),
             "hotkey": self._hotkey_var.get(),
             "selected_subs": [name for name, v in self._sub_vars if v.get()],
