@@ -124,6 +124,7 @@ class ClassifyConfig:
 
     limit: int = 0
     report_path: Path | None = None
+    camera_dir_name: str = "camera"  # 分水岭目录名，精确匹配
 
 
 @dataclass
@@ -178,16 +179,24 @@ def _iter_images(root: Path, extensions: tuple[str, ...]) -> Iterable[Path]:
 
 
 def _bucket_path_for(rule: str, camera_out: Path) -> Path:
+    """桶目录层级（v0.4.23 起）：
+       舱外活体检测/
+       舱外活体检测/人体关键点/
+       舱外活体检测/人体关键点/前备箱防夹检测/
+       舱外活体检测/人体关键点/动态手势/
+       舱外活体检测/人体关键点/前机盖开关检测/
+       遮挡/                    ← 与舱外活体检测同级
+    """
     if rule == BUCKET_LIVENESS:
         return camera_out / BUCKET_LIVENESS
     if rule == BUCKET_KEYPOINT:
-        return camera_out / BUCKET_KEYPOINT
+        return camera_out / BUCKET_LIVENESS / BUCKET_KEYPOINT
     if rule == BUCKET_FRUNK:
-        return camera_out / BUCKET_KEYPOINT / BUCKET_FRUNK
+        return camera_out / BUCKET_LIVENESS / BUCKET_KEYPOINT / BUCKET_FRUNK
     if rule == BUCKET_HOOD:
-        return camera_out / BUCKET_KEYPOINT / BUCKET_HOOD
+        return camera_out / BUCKET_LIVENESS / BUCKET_KEYPOINT / BUCKET_HOOD
     if rule == BUCKET_GESTURE:
-        return camera_out / BUCKET_KEYPOINT / BUCKET_GESTURE
+        return camera_out / BUCKET_LIVENESS / BUCKET_KEYPOINT / BUCKET_GESTURE
     if rule == BUCKET_OCCLUSION:
         return camera_out / BUCKET_OCCLUSION
     raise ValueError(f"unknown rule: {rule}")
@@ -345,6 +354,36 @@ def _should_skip_dir(name: str, filter_keywords: tuple[str, ...]) -> bool:
     return any(k and k.lower() in lower for k in filter_keywords)
 
 
+def _find_camera_dirs(in_root: Path, camera_name: str, filter_keywords: tuple[str, ...], log: LogFn) -> list[Path]:
+    """在 in_root 下精确匹配名字 == camera_name 的所有目录（找到就不再往下钻）。"""
+    hits: list[Path] = []
+    for dirpath, dirs, _files in os.walk(str(in_root)):
+        # 过滤子目录
+        for d in list(dirs):
+            if _should_skip_dir(d, filter_keywords):
+                dirs.remove(d)
+        if os.path.basename(dirpath) == camera_name:
+            hits.append(Path(dirpath))
+            dirs[:] = []   # 找到 camera 后不再深入，camera 之下由后续逻辑处理
+            continue
+    log(f"[扫描] 找到 {len(hits)} 个 {camera_name!r} 目录")
+    return hits
+
+
+def _resolve_camera_out(in_root: Path, out_root: Path, camera_dir: Path, same_root: bool) -> Path:
+    """决定当前 camera 目录对应的输出根。
+       - same_root=True：原地操作，输出就在 camera_dir 自己
+       - same_root=False：out_root / (camera_dir 相对 in_root)
+    """
+    if same_root:
+        return camera_dir
+    try:
+        rel = camera_dir.relative_to(in_root)
+    except ValueError:
+        rel = Path(camera_dir.name)
+    return out_root / rel
+
+
 def process_all(
     cfg: ClassifyConfig,
     yolo, pose, embed,
@@ -353,18 +392,42 @@ def process_all(
     log: LogFn,
     cancel: CancelFn | None,
 ) -> None:
-    """直接遍历 in_root 下所有图片，按规则分类、镜像复制。
+    """v0.4.23 起：用 camera 目录做分水岭，只在 camera 下分类分桶。
 
-    输出结构：
-      out_root/
-        <原相对路径>/*.jpg          ← 每张图先镜像复制到这里
-        舱外活体检测/<原相对路径>/*.jpg
-        人体关键点/<原相对路径>/*.jpg
-        人体关键点/前备箱防夹检测/<原相对路径>/*.jpg
-        人体关键点/前机盖开关检测/*.jpg
-        遮挡/<原相对路径>/*.jpg
+    输出结构（相对每个 camera_out）：
+      camera_out/舱外活体检测/<子目录>/*.jpg
+      camera_out/舱外活体检测/人体关键点/<子目录>/*.jpg
+      camera_out/舱外活体检测/人体关键点/前备箱防夹检测/<子目录>/*.jpg
+      camera_out/舱外活体检测/人体关键点/动态手势/<子目录>/*.jpg      (占位，暂不分类)
+      camera_out/舱外活体检测/人体关键点/前机盖开关检测/<子目录>/*.jpg
+      camera_out/遮挡/<子目录>/*.jpg
     """
     in_root = cfg.in_root
+    same_root = str(cfg.in_root).strip() == str(cfg.out_root).strip()
+    camera_dirs = _find_camera_dirs(in_root, cfg.camera_dir_name, cfg.filter_keywords, log)
+    if not camera_dirs:
+        log(f"[提示] 未在 {in_root} 下找到任何 {cfg.camera_dir_name!r} 目录")
+        return
+
+    for camera_dir in camera_dirs:
+        if cancel and cancel():
+            return
+        camera_out = _resolve_camera_out(in_root, cfg.out_root, camera_dir, same_root)
+        log(f"[camera] {camera_dir} -> {camera_out}")
+        _process_one_camera(camera_dir, camera_out, cfg, yolo, pose, embed, stats, writer, log, cancel)
+
+
+def _process_one_camera(
+    camera_dir: Path,
+    camera_out: Path,
+    cfg: ClassifyConfig,
+    yolo, pose, embed,
+    stats: Stats,
+    writer,
+    log: LogFn,
+    cancel: CancelFn | None,
+) -> None:
+    in_root = camera_dir
     for dirpath, dirs, files in os.walk(in_root):
         if cancel and cancel():
             return
@@ -401,16 +464,7 @@ def process_all(
 
             rel_in = img.relative_to(in_root)
 
-            # 1) 镜像复制到 out_root/<rel>
-            try:
-                _copy_overwrite(img, cfg.out_root / rel_in)
-                stats.copied_original += 1
-            except Exception as e:
-                stats.errors += 1
-                log(f"  [错误] 镜像复制失败 {img}: {e}")
-                continue
-
-            # 2) 分类判定
+            # 分类判定（v0.4.23：不再做全量镜像复制，只按命中桶复制）
             r = classify_one(img, rel_in, yolo, pose, embed, cfg)
             if r.error:
                 stats.errors += 1
@@ -426,7 +480,7 @@ def process_all(
                 stats.occlusion += 1
 
             for bucket in r.buckets:
-                dst = _bucket_path_for(bucket, cfg.out_root) / rel_in
+                dst = _bucket_path_for(bucket, camera_out) / rel_in
                 try:
                     _copy_overwrite(img, dst)
                     stats.copied_bucket += 1
@@ -505,14 +559,10 @@ def run(
             log(f"[警告] isdir=False 但 exists=True，继续尝试遍历")
         else:
             raise FileNotFoundError(f"输入目录不存在: {in_root_str}")
-    # 输出保留输入根的完整层级
-    top_prefix = _in_root_top_segments(cfg.in_root)
-    log(f"[输出] 顶层前缀     = {top_prefix}")
-    real_out = cfg.out_root / top_prefix
-    real_out.mkdir(parents=True, exist_ok=True)
-    # 把 cfg 的 out_root 替换为带顶层前缀后的实际输出根
-    cfg = _dc_replace(cfg, out_root=real_out)
     cfg.out_root.mkdir(parents=True, exist_ok=True)
+    # 是否同目录原地操作
+    same_root = str(cfg.in_root).strip() == str(cfg.out_root).strip()
+    log(f"[模式] 输入==输出 : {same_root}  分水岭目录名: {cfg.camera_dir_name!r}")
 
     from detector import YoloDetector, resolve_model_path
     from pose_detector import PoseDetector, resolve_pose_model_path
@@ -614,6 +664,8 @@ def parse_args() -> argparse.Namespace:
                    help="embedding 相似度阈值（所有桶的默认值）")
     p.add_argument("--embed-sim-bucket", action="append", default=[],
                    help="某个桶的单独阈值：--embed-sim-bucket 遮挡=0.7 可多次")
+    p.add_argument("--camera-dir-name", type=str, default="camera",
+                   help="分水岭目录名，精确匹配（默认 camera）")
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--report", type=Path, default=None)
     p.add_argument("--fingerprint", action="store_true")
@@ -689,6 +741,7 @@ def main() -> int:
         embed_sim_default=a.embed_sim_default,
         embed_sim_per_bucket=_parse_bucket_thres(a.embed_sim_bucket),
         limit=a.limit,
+        camera_dir_name=a.camera_dir_name,
         report_path=a.report,
     )
     run(cfg)

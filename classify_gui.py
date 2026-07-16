@@ -33,7 +33,7 @@ from classify_pic import (
 
 
 APP_TITLE = "pic-clear 二次分类工具"
-APP_VERSION = "v0.4.22"
+APP_VERSION = "v0.4.23"
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "classify_gui.json"
 
@@ -88,6 +88,7 @@ class ClassifyApp:
         self.filter_var = StringVar(value="")
         self.front_var = StringVar(value=",".join(DEFAULT_FRONT_KEYWORDS))
         self.ext_var = StringVar(value=",".join(DEFAULT_IMAGE_EXT))
+        self.camera_var = StringVar(value="camera")
         self.model_var = StringVar(value="")
         self.pose_var = StringVar(value="")
         self.embed_model_var = StringVar(value="")
@@ -163,6 +164,7 @@ class ClassifyApp:
         add_text_row(top, "过滤关键字",     self.filter_var, "逗号分隔，子目录名包含即跳过")
         add_text_row(top, "前视关键字",     self.front_var,  "规则 4，逗号分隔")
         add_text_row(top, "图片后缀",       self.ext_var,    "逗号分隔")
+        add_text_row(top, "分水岭目录名",   self.camera_var, "精确匹配的目录名（默认 camera）")
 
         add_path_row(top, "yolov8n.onnx",       self.model_var, False)
         add_path_row(top, "yolov8n-pose.onnx",  self.pose_var, False)
@@ -356,6 +358,7 @@ class ClassifyApp:
             embed_sim_default=default_thres,
             embed_sim_per_bucket=per_bucket,
             limit=int(self.limit_var.get()),
+            camera_dir_name=self.camera_var.get().strip() or "camera",
         )
 
     # ---------------------------------------------------------- logging
@@ -456,6 +459,7 @@ class ClassifyApp:
             "kp_visible_min": int(self.kp_min_var.get()),
             "limit": int(self.limit_var.get()),
             "embed_default": float(self.embed_default_var.get()),
+            "camera_dir_name": self.camera_var.get(),
             "bucket_thres": {
                 b: float(v.get()) for b, v in self.bucket_thres_vars.items()
             },
@@ -483,6 +487,7 @@ class ClassifyApp:
         _set(self.person_area_var, "person_area", float)
         _set(self.kp_min_var, "kp_visible_min", int)
         _set(self.limit_var, "limit", int)
+        _set(self.camera_var, "camera_dir_name")
         _set(self.embed_default_var, "embed_default", float)
         thres = cfg.get("bucket_thres") or {}
         for b, v in self.bucket_thres_vars.items():
