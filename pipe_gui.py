@@ -1141,7 +1141,7 @@ def show_license_error_dialog(info: dict) -> None:
 # - 密钥文件 otp.secret（单行 base32）与 license.lic 并列放在 exe 同目录。
 # - 通过后写 ~/.pic-clear/otp_session.json，24 小时内启动不再要求输入。
 # - 三个 GUI (pipe_gui / extract_gui / dedupe_gui) 共用同一份 session。
-# - 兼容开关：环境变量 PIC_CLEAR_SKIP_OTP=1 跳过；otp.secret 不存在也跳过。
+# - 环境变量 PIC_CLEAR_SKIP_OTP=1 可跳过（仅供开发）；otp.secret 缺失将强制退出。
 # - 6 位口令，容忍 ±90 秒（otp_utils.verify window=3）。
 # - 错 3 次 → 冷却 60 秒。
 # - 用户取消 / 关闭对话框 → sys.exit(4)。
@@ -1329,8 +1329,8 @@ def show_otp_dialog(secret: str) -> bool:
 
 def require_otp_or_die() -> None:
     """三个 GUI 的 main() 在授权检查通过后调用一次。
-    - 环境变量 PIC_CLEAR_SKIP_OTP=1 → 跳过
-    - otp.secret 不存在 → 跳过（向后兼容旧用户）
+    - 环境变量 PIC_CLEAR_SKIP_OTP=1 → 跳过（仅供开发/调试）
+    - otp.secret 不存在 → 直接退出（强制要求 OTP）
     - 24h 内已通过 → 跳过
     - 否则弹口令对话框；不通过 sys.exit(4)
     """
@@ -1338,16 +1338,31 @@ def require_otp_or_die() -> None:
         return
     secret = _read_otp_secret()
     if not secret:
-        return
+        # 强制要求 OTP：找不到 otp.secret 直接终止启动
+        secret_path = _resolve_otp_secret_path()
+        msg = (
+            "缺少动态口令密钥文件 otp.secret\n\n"
+            f"预期位置：{secret_path}\n\n"
+            "请联系管理员在 OTP 后台生成密钥，把 otp.secret 放到 exe 同目录后重试。"
+        )
+        print(f"[OTP] {msg}", file=sys.stderr)
+        try:
+            from tkinter import Tk, messagebox
+            _r = Tk(); _r.withdraw()
+            messagebox.showerror("pic-clear 启动失败：缺少 otp.secret", msg)
+            _r.destroy()
+        except Exception:
+            pass
+        sys.exit(4)
     if _otp_session_alive():
         return
     ok = False
     try:
         ok = show_otp_dialog(secret)
     except Exception as e:
+        # 弹框异常改成硬失败，避免绕过 OTP
         print(f"[OTP] 对话框异常：{e}", file=sys.stderr)
-        # 弹框失败，保守放行（避免打包环境个例把用户锁死）
-        return
+        sys.exit(4)
     if not ok:
         sys.exit(4)
 
