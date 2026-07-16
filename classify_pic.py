@@ -373,15 +373,19 @@ def _find_camera_dirs(in_root: Path, camera_name: str, filter_keywords: tuple[st
 def _resolve_camera_out(in_root: Path, out_root: Path, camera_dir: Path, same_root: bool) -> Path:
     """决定当前 camera 目录对应的输出根。
        - same_root=True：原地操作，输出就在 camera_dir 自己
-       - same_root=False：out_root / (camera_dir 相对 in_root)
+       - same_root=False：out_root / <in_root 去盘符/UNC> / <camera 相对 in_root>
+         例：in_root=Z:/切帧结果/测试/分类测试1  out_root=D:/test
+             camera_dir=Z:/切帧结果/测试/分类测试1/sjbz.../camera
+             → D:/test/切帧结果/测试/分类测试1/sjbz.../camera
     """
     if same_root:
         return camera_dir
+    top = _in_root_top_segments(in_root)   # 切帧结果/测试/分类测试1
     try:
-        rel = camera_dir.relative_to(in_root)
+        rel = camera_dir.relative_to(in_root)   # sjbz.../camera
     except ValueError:
         rel = Path(camera_dir.name)
-    return out_root / rel
+    return out_root / top / rel
 
 
 def process_all(
