@@ -12,6 +12,7 @@ classify_gui.py — classify_pic.py 的 tkinter GUI 前端。
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import sys
@@ -32,11 +33,40 @@ from classify_pic import (
 
 
 APP_TITLE = "pic-clear 二次分类工具"
+CONFIG_NAME = "classify_gui.json"
 
 # GUI 里给用户显示的桶列表（跟 classify_pic 里保持一致）
 BUCKET_ORDER = [
     BUCKET_LIVENESS, BUCKET_KEYPOINT, BUCKET_FRUNK, BUCKET_HOOD, BUCKET_OCCLUSION,
 ]
+
+
+# ---------- 配置持久化：~/.pic-clear/classify_gui.json ----------
+
+def _config_path() -> Path:
+    return Path(os.path.expanduser("~")) / ".pic-clear" / CONFIG_NAME
+
+
+def _load_config() -> dict:
+    p = _config_path()
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_config(cfg: dict) -> None:
+    try:
+        p = _config_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception as e:
+        print(f"[配置] 保存失败: {e}", flush=True)
 
 
 class ClassifyApp:
@@ -75,6 +105,8 @@ class ClassifyApp:
         }
 
         self._build_ui()
+        self._apply_config(_load_config())
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(150, self._drain_log)
 
     # ------------------------------------------------------------------ UI
@@ -251,6 +283,7 @@ class ClassifyApp:
             return
 
         self.cancel_flag.clear()
+        self._persist_config()   # 每次点开始都存一次，防意外崩溃丢配置
         self.start_btn.configure(state=DISABLED)
         self.stop_btn.configure(state=NORMAL)
         self._log(f"[启动] 输入={cfg.in_root}  输出={cfg.out_root}")
@@ -335,6 +368,71 @@ class ClassifyApp:
 
     def _clear_log(self) -> None:
         self.log.delete("1.0", END)
+
+    # -------------------------------------------------- 配置持久化
+    def _dump_config(self) -> dict:
+        return {
+            "in_root": self.in_var.get(),
+            "out_root": self.out_var.get(),
+            "rules_dir": self.rules_var.get(),
+            "camera_dir_name": self.camera_var.get(),
+            "filter_keywords": self.filter_var.get(),
+            "front_keywords": self.front_var.get(),
+            "image_extensions": self.ext_var.get(),
+            "yolo_model": self.model_var.get(),
+            "pose_model": self.pose_var.get(),
+            "embed_model": self.embed_model_var.get(),
+            "person_conf": float(self.person_conf_var.get()),
+            "person_area": float(self.person_area_var.get()),
+            "kp_visible_min": int(self.kp_min_var.get()),
+            "limit": int(self.limit_var.get()),
+            "embed_default": float(self.embed_default_var.get()),
+            "bucket_thres": {
+                b: float(v.get()) for b, v in self.bucket_thres_vars.items()
+            },
+        }
+
+    def _apply_config(self, cfg: dict) -> None:
+        if not cfg:
+            return
+        def _set(var, key, cast=str):
+            if key in cfg and cfg[key] is not None:
+                try:
+                    var.set(cast(cfg[key]))
+                except Exception:
+                    pass
+        _set(self.in_var, "in_root")
+        _set(self.out_var, "out_root")
+        _set(self.rules_var, "rules_dir")
+        _set(self.camera_var, "camera_dir_name")
+        _set(self.filter_var, "filter_keywords")
+        _set(self.front_var, "front_keywords")
+        _set(self.ext_var, "image_extensions")
+        _set(self.model_var, "yolo_model")
+        _set(self.pose_var, "pose_model")
+        _set(self.embed_model_var, "embed_model")
+        _set(self.person_conf_var, "person_conf", float)
+        _set(self.person_area_var, "person_area", float)
+        _set(self.kp_min_var, "kp_visible_min", int)
+        _set(self.limit_var, "limit", int)
+        _set(self.embed_default_var, "embed_default", float)
+        thres = cfg.get("bucket_thres") or {}
+        for b, v in self.bucket_thres_vars.items():
+            if b in thres:
+                try:
+                    v.set(float(thres[b]))
+                except Exception:
+                    pass
+
+    def _persist_config(self) -> None:
+        try:
+            _save_config(self._dump_config())
+        except Exception as e:
+            self._log(f"[配置] 保存失败: {e}")
+
+    def _on_close(self) -> None:
+        self._persist_config()
+        self.root.destroy()
 
 
 def _check_license_or_die_gui() -> None:
