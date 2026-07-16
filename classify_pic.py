@@ -340,15 +340,29 @@ def _parse_bucket_thres(pairs: list[str]) -> dict[str, float]:
     return out
 
 
-def _find_camera_dirs(in_root: Path, camera_name: str) -> list[Path]:
-    """递归找所有名为 camera_name 的目录。用 pathlib 的 .name 兼容 Windows
-    上正/反斜杠混排的 dirpath；匹配不区分大小写，防止 Camera/CAMERA 漏掉。"""
+def _find_camera_dirs(
+    in_root: Path,
+    camera_name: str,
+    log=None,
+) -> list[Path]:
+    """递归找所有名为 camera_name 的目录。
+    - 用 pathlib 的 .name 兼容 Windows 正/反斜杠混排
+    - 匹配不区分大小写，防止 Camera/CAMERA 漏掉
+    - 前 20 层目录打调试日志，便于排查 "扫不到" 的疑难杂症
+    """
     result: list[Path] = []
     target = camera_name.lower()
+    walked = 0
     for dirpath, dirs, _files in os.walk(in_root):
-        if Path(dirpath).name.lower() == target:
+        walked += 1
+        name = Path(dirpath).name
+        if walked <= 20 and log is not None:
+            log(f"  [walk] {dirpath}  name={name!r}  subdirs={dirs[:5]}")
+        if name.lower() == target:
             result.append(Path(dirpath))
             dirs[:] = []
+    if log is not None:
+        log(f"  [walk] 总共遍历 {walked} 个目录，命中 {len(result)} 个")
     return result
 
 
@@ -502,7 +516,7 @@ def run(
     else:
         log("[提示] 未提供 rules 目录，embedding 匹配全部跳过")
 
-    camera_dirs = _find_camera_dirs(cfg.in_root, cfg.camera_dir_name)
+    camera_dirs = _find_camera_dirs(cfg.in_root, cfg.camera_dir_name, log=log)
     log(f"[扫描] 找到 {len(camera_dirs)} 个 {cfg.camera_dir_name}/ 目录")
     if not camera_dirs:
         return Stats()
