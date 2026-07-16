@@ -189,6 +189,7 @@ class DedupeGUI:
     # ---------- UI ----------
 
     def _build_ui(self):
+        _pg.apply_tab_style(self.root)
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=8, pady=6)
 
