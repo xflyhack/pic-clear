@@ -341,9 +341,12 @@ def _parse_bucket_thres(pairs: list[str]) -> dict[str, float]:
 
 
 def _find_camera_dirs(in_root: Path, camera_name: str) -> list[Path]:
+    """递归找所有名为 camera_name 的目录。用 pathlib 的 .name 兼容 Windows
+    上正/反斜杠混排的 dirpath；匹配不区分大小写，防止 Camera/CAMERA 漏掉。"""
     result: list[Path] = []
+    target = camera_name.lower()
     for dirpath, dirs, _files in os.walk(in_root):
-        if os.path.basename(dirpath) == camera_name:
+        if Path(dirpath).name.lower() == target:
             result.append(Path(dirpath))
             dirs[:] = []
     return result
