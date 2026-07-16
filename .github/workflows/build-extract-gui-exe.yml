@@ -35,17 +35,19 @@ jobs:
           copy pipe_gui.py build_extract_gui\
           copy extract_gui.py build_extract_gui\
           copy licensing.py build_extract_gui\
+          copy otp_utils.py build_extract_gui\
         shell: cmd
 
       - name: Obfuscate with PyArmor
         run: |
           cd build_extract_gui
-          pyarmor gen --output dist_obf pipeline.py pipe_gui.py extract_gui.py licensing.py
+          pyarmor gen --output dist_obf pipeline.py pipe_gui.py extract_gui.py licensing.py otp_utils.py
           dir dist_obf
           copy /Y dist_obf\pipeline.py pipeline.py
           copy /Y dist_obf\pipe_gui.py pipe_gui.py
           copy /Y dist_obf\extract_gui.py extract_gui.py
           copy /Y dist_obf\licensing.py licensing.py
+          copy /Y dist_obf\otp_utils.py otp_utils.py
           cd ..
         shell: cmd
 
@@ -71,6 +73,7 @@ jobs:
             --hidden-import cryptography.hazmat.primitives.hashes ^
             --hidden-import cryptography.hazmat.primitives.serialization ^
             --hidden-import licensing ^
+            --hidden-import otp_utils ^
             --hidden-import pipeline ^
             --hidden-import pipe_gui ^
             --hidden-import tkinter ^
