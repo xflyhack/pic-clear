@@ -1219,7 +1219,13 @@ def show_otp_dialog(secret: str) -> bool:
         print(f"[OTP] 加载 otp_utils 失败：{e}", file=sys.stderr)
         return True
 
+    _enable_hidpi_awareness()
     root = tk.Tk()
+    # 先隐藏窗口，DPI + geometry + 控件全部构造完再一次性显示，避免"小窗变大"
+    try:
+        root.withdraw()
+    except Exception:
+        pass
     root.title("pic-clear 编排工具 - 动态口令")
     _apply_window_icon(root)
     root.resizable(False, False)
@@ -1228,7 +1234,6 @@ def show_otp_dialog(secret: str) -> bool:
     except Exception:
         pass
 
-    _enable_hidpi_awareness()
     scale = _apply_dpi_scaling(root)
     root.geometry(_scale_geometry(420, 260, scale))
 
@@ -1325,6 +1330,16 @@ def show_otp_dialog(secret: str) -> bool:
     entry.bind("<KeyRelease>", _on_key_release)
 
     root.protocol("WM_DELETE_WINDOW", _do_cancel)
+    try:
+        root.update_idletasks()
+        root.deiconify()
+        try:
+            root.lift()
+            root.focus_force()
+        except Exception:
+            pass
+    except Exception:
+        pass
     try:
         root.mainloop()
     except Exception:
