@@ -12,8 +12,25 @@ export_onnx.py — 一次性导出 3 个离线模型到项目根目录：
 
 from __future__ import annotations
 
+import io
 import sys
 from pathlib import Path
+
+
+def _force_utf8_stdio() -> None:
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            buf = getattr(stream, "buffer", None)
+            if buf is not None:
+                setattr(sys, name, io.TextIOWrapper(buf, encoding="utf-8", errors="replace"))
+
+
+_force_utf8_stdio()
 
 
 ROOT = Path(__file__).resolve().parent

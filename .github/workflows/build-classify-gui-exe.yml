@@ -36,9 +36,15 @@ jobs:
           pip install ultralytics onnx onnxslim torch torchvision onnxscript
 
       - name: Export yolov8n.onnx & yolov8n-pose.onnx & mobilenetv3_embed.onnx
+        env:
+          PYTHONIOENCODING: utf-8
+        shell: cmd
         run: |
+          chcp 65001
           python export_onnx.py
-          dir yolov8n.onnx yolov8n-pose.onnx mobilenetv3_embed.onnx
+          dir yolov8n.onnx
+          dir yolov8n-pose.onnx
+          dir mobilenetv3_embed.onnx
 
       - name: Obfuscate Python sources with PyArmor
         # 把 4 个业务 .py + licensing 加密成字节码。
