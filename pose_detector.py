@@ -15,6 +15,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+# 复用 detector 里的 Windows 长路径兼容 helper, 避免 PIL 在 MAX_PATH=260
+# 附近 silently 打不开图片; detector 加载失败时退化为原生 Image.open.
+try:
+    from detector import _pil_open  # type: ignore
+except Exception:  # pragma: no cover
+    def _pil_open(_p):  # type: ignore
+        return Image.open(_p)
+
 from detector import _letterbox, _nms
 
 # COCO 17 keypoints，索引 = 顺序
@@ -72,7 +80,7 @@ class PoseDetector:
 
     def detect(self, image_path: str | Path) -> list[PoseDetection]:
         try:
-            with Image.open(image_path) as im:
+            with _pil_open(image_path) as im:
                 im = im.convert("RGB")
                 tensor, ratio, (pad_x, pad_y) = _letterbox(im, self.input_size)
         except Exception:

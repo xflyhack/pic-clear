@@ -30,6 +30,14 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+# 复用 detector 里的 Windows 长路径兼容 helper, 避免 PIL 在 MAX_PATH=260
+# 附近 silently 打不开图片; detector 加载失败时退化为原生 Image.open.
+try:
+    from detector import _pil_open  # type: ignore
+except Exception:  # pragma: no cover
+    def _pil_open(_p):  # type: ignore
+        return Image.open(_p)
+
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -40,7 +48,7 @@ CACHE_VERSION = 1
 
 def _preprocess(image_path: str | Path, size: int = 224) -> np.ndarray | None:
     try:
-        with Image.open(image_path) as im:
+        with _pil_open(image_path) as im:
             im = im.convert("RGB").resize((size, size), Image.BILINEAR)
             arr = np.asarray(im, dtype=np.float32) / 255.0
     except Exception:

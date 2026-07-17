@@ -168,12 +168,47 @@ def _release_dedup_lock(lock_path: Path) -> None:
         pass
 
 
+# ----------------------------- 长路径兼容 -----------------------------------
+
+def _to_long_path(image_path) -> str:
+    r"""Windows 上 >= 200 字符的绝对路径转成 \\?\ 前缀, 绕开 MAX_PATH=260 限制.
+
+    - 非 Windows 原样返回, 保证 mac / Linux / 本地虚拟机零回归
+    - 已带 \\?\ 或 \?\ 前缀原样返回, 不重复加
+    - 短于 200 字符原样返回 (PIL 观察在 200 附近就会开始翻车,
+      比 MAX_PATH=260 更保守, 换取更少的黑箱失败)
+    - UNC 路径 (\\server\share\...) 转成 \\?\UNC\server\share\...
+    - 相对路径先用 os.path.abspath 转绝对路径再套前缀
+    """
+    s = str(image_path)
+    if os.name != "nt":
+        return s
+    if s.startswith("\\\\?\\") or s.startswith("\\?\\"):
+        return s
+    if len(s) < 200:
+        return s
+    # UNC 已经是 \\server\share\... 就直接套前缀, 不走 abspath
+    if s.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + s.lstrip("\\")
+    try:
+        abs_s = os.path.abspath(s)
+    except Exception:
+        abs_s = s
+    if abs_s.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + abs_s.lstrip("\\")
+    return "\\\\?\\" + abs_s
+
+
+def _pil_open(image_path):
+    """PIL Image.open 的长路径安全版本. 调用方仍需自行 close / with."""
+    return Image.open(_to_long_path(image_path))
+
 # ----------------------------- dHash ---------------------------------------
 
 def dhash(image_path: Path, hash_size: int = 8) -> int | None:
     """计算图片的 dHash，返回 64-bit 整数；失败返回 None。"""
     try:
-        with Image.open(image_path) as img:
+        with _pil_open(image_path) as img:
             img = img.convert("L").resize(
                 (hash_size + 1, hash_size), Image.LANCZOS
             )

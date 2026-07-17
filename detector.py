@@ -17,6 +17,35 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+def _to_long_path(image_path) -> str:
+    r"""Windows 上 >= 200 字符的绝对路径转成 \\?\ 前缀, 绕开 MAX_PATH=260 限制.
+
+    - 非 Windows 原样返回, 保证 mac / Linux 零回归
+    - 已带前缀 / 短路径原样返回
+    - UNC 路径转成 \\?\UNC\... 形式
+    """
+    s = str(image_path)
+    if os.name != "nt":
+        return s
+    if s.startswith("\\\\?\\") or s.startswith("\\?\\"):
+        return s
+    if len(s) < 200:
+        return s
+    if s.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + s.lstrip("\\")
+    try:
+        abs_s = os.path.abspath(s)
+    except Exception:
+        abs_s = s
+    if abs_s.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + abs_s.lstrip("\\")
+    return "\\\\?\\" + abs_s
+
+
+def _pil_open(image_path):
+    """PIL Image.open 的长路径安全版本, 与 dedupe_pic._pil_open 语义一致."""
+    return Image.open(_to_long_path(image_path))
+
 # COCO 80 类
 COCO_NAMES = [
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
@@ -84,7 +113,7 @@ def analyze_scene(
     调用方约定：只对 YOLO 无 person/vehicle 命中的图调用，避免误伤正常场景。
     """
     try:
-        with Image.open(image_path) as im:
+        with _pil_open(image_path) as im:
             im = im.convert("RGB")
             w0, h0 = im.size
             if w0 <= 0 or h0 <= 0:
@@ -286,7 +315,7 @@ class YoloDetector:
 
     def detect(self, image_path: str | Path) -> list[Detection]:
         try:
-            with Image.open(image_path) as im:
+            with _pil_open(image_path) as im:
                 im = im.convert("RGB")
                 tensor, ratio, (pad_x, pad_y) = _letterbox(im, self.input_size)
         except Exception:
@@ -366,7 +395,7 @@ class YoloDetector:
           (是否含保护类别, 保护命中列表, 车辆命中列表, 图像尺寸 (W,H))
         """
         try:
-            with Image.open(image_path) as im:
+            with _pil_open(image_path) as im:
                 size = im.size
         except Exception:
             size = None
