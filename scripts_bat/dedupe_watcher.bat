@@ -60,9 +60,14 @@ set "STATS_ROOT="
 REM LOCK_TTL: stale-lock TTL in seconds (multi-machine dedupe).
 REM   Must match run_all / dedupe_gui defaults or the two won't coordinate.
 set "LOCK_TTL=900"
-REM Stop watcher after this many cumulative remaining images.
-REM Set to 0 to disable.
-set "DAILY_REMAIN_LIMIT=8000000000"
+REM DAILY_DELETE_LIMIT: 当日"累计已删除张数"的软上限.
+REM   watcher 每处理完一个目录, 用 append_stats.bat 汇总当日已删张数,
+REM   一旦 >= 上限就停止再取下一个目录 (当前正在跑的目录会跑完, 不切一半).
+REM   因此实际总删除量可能略超上限, 这是有意为之: 保证目录级原子性.
+REM   设为 0 表示不限量.
+REM   老名字 DAILY_REMAIN_LIMIT 若已在环境里, 会被自动继承 (向后兼容).
+set "DAILY_DELETE_LIMIT=8000000000"
+if defined DAILY_REMAIN_LIMIT set "DAILY_DELETE_LIMIT=%DAILY_REMAIN_LIMIT%"
 set "DAILY_LIMIT_HIT=0"
 
 :PARSE_ARGS
@@ -160,7 +165,7 @@ set "TOTAL_PROCESSED=0"
 
 :LOOP
 if "%DAILY_LIMIT_HIT%"=="1" (
-    call :LOG_OK "已达当日剩余阈值 %DAILY_REMAIN_LIMIT%,watcher 停止(不影响正在处理的目录)"
+    call :LOG_OK "当日累计已删张数已达上限 %DAILY_DELETE_LIMIT%,watcher 停止取新目录 (正在跑的目录会跑完)"
     endlocal & exit /b 0
 )
 set "FOUND_THIS_ROUND=0"
@@ -276,8 +281,10 @@ goto :EOF
 
 REM ====================================================================
 REM  :DO_STATS  <TARGET_DIR>
-REM  Call append_stats.bat to get cumulative-remaining count; if it
-REM  exceeds DAILY_REMAIN_LIMIT, set DAILY_LIMIT_HIT=1.
+REM  Call append_stats.bat to get cumulative-DELETED count for today.
+REM  Semantics:
+REM    "累计已删" >= DAILY_DELETE_LIMIT -> set DAILY_LIMIT_HIT=1
+REM    watcher then stops picking new dirs (current one still finishes).
 REM  Route stdout through a tempfile to avoid nested for/if + delayed
 REM  expansion pitfalls.
 REM ====================================================================
@@ -290,17 +297,23 @@ if not exist "!STATS_BAT!" (
     goto :EOF
 )
 set "STATS_TMP=%TEMP%\dedupe_stats_%RANDOM%_%RANDOM%.txt"
+REM append_stats.bat stdout = 当日累计已删张数 (跨所有目录的 sum)
 call "!STATS_BAT!" "!TDIR!" > "!STATS_TMP!" 2>nul
-set "CUM_REMAIN="
-for /f "usebackq delims=" %%C in ("!STATS_TMP!") do set "CUM_REMAIN=%%C"
+set "CUM_DELETED="
+for /f "usebackq delims=" %%C in ("!STATS_TMP!") do set "CUM_DELETED=%%C"
 del "!STATS_TMP!" 2>nul
-if not defined CUM_REMAIN (
-    call :LOG_WARN "append_stats.bat 无输出,跳过阈值判断"
+if not defined CUM_DELETED (
+    call :LOG_WARN "append_stats.bat 无输出,跳过上限判断"
     goto :EOF
 )
-call :LOG_INFO "        当日累计剩余 !CUM_REMAIN! / 阈值 %DAILY_REMAIN_LIMIT%"
-if %DAILY_REMAIN_LIMIT% LEQ 0 goto :EOF
-if !CUM_REMAIN! GEQ %DAILY_REMAIN_LIMIT% set "DAILY_LIMIT_HIT=1"
+REM -1 = append_stats 报错 (路径不可写等), 不参与阈值判断
+if "!CUM_DELETED!"=="-1" (
+    call :LOG_WARN "append_stats.bat 返回错误,统计不可用,继续跑但不判上限"
+    goto :EOF
+)
+call :LOG_INFO "        当日累计已删 !CUM_DELETED! / 上限 %DAILY_DELETE_LIMIT%  (超过上限后本目录跑完就停)"
+if %DAILY_DELETE_LIMIT% LEQ 0 goto :EOF
+if !CUM_DELETED! GEQ %DAILY_DELETE_LIMIT% set "DAILY_LIMIT_HIT=1"
 goto :EOF
 
 

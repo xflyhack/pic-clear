@@ -128,13 +128,14 @@ if not exist "%STATS_CSV%" (
     endlocal ^& exit /b 5
 )
 
-REM ---- 计算当日累计 remain ----
-REM 跳过表头行;第 4 列是 remain
-set "CUM_REMAIN=0"
-for /f "usebackq skip=1 tokens=4 delims=," %%R in ("%STATS_CSV%") do (
-    set /a CUM_REMAIN+=%%R 2>nul
+REM ---- 计算当日累计已删 (第 3 列 deleted 汇总) ----
+REM watcher 用它跟 DAILY_DELETE_LIMIT 比: 累计已删 >= 上限 -> 停止再取下一个目录
+REM 之前累加的是第 4 列 remain, 语义相反, 已修正
+set "CUM_DELETED=0"
+for /f "usebackq skip=1 tokens=3 delims=," %%D in ("%STATS_CSV%") do (
+    set /a CUM_DELETED+=%%D 2>nul
 )
 
-REM stdout 只打这一个数字(watcher 靠它判断 8w 阈值)
-echo %CUM_REMAIN%
+REM stdout 只打这一个数字(watcher 靠它判断删除上限)
+echo %CUM_DELETED%
 endlocal & exit /b 0
