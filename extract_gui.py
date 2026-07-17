@@ -181,12 +181,12 @@ class ExtractGUI:
         self._markers_root_var = tk.StringVar(value=self._cfg.get("markers_root", ""))
         self._force_reextract_var = tk.BooleanVar(
             value=bool(self._cfg.get("force_reextract", False)))
-        # 命名规则相关（新版：video1 - 副本_0009.jpg / 老版：frame_000002.jpg）
+        # 命名规则相关（新版：video1_0009.jpg / 老版：frame_000002.jpg）
         # name_style: legacy / parent / custom
         self._name_style_var = tk.StringVar(
             value=str(self._cfg.get("name_style", "parent")))
         self._name_template_var = tk.StringVar(
-            value=str(self._cfg.get("name_template", "{parent} - 副本_{seq}")))
+            value=str(self._cfg.get("name_template", "{parent}_{seq}")))
         self._name_digits_var = tk.IntVar(
             value=int(self._cfg.get("name_digits", 4)))
         self._name_preview_var = tk.StringVar(value="")
@@ -329,14 +329,14 @@ class ExtractGUI:
         self._name_style_combo = ttk.Combobox(
             row, width=32, state="readonly",
             values=[
-                "新版 ({parent} - 副本_{seq})",
+                "新版 ({parent}_{seq})",
                 "老版 (frame_{seq})",
                 "自定义（下方模板生效）",
             ],
         )
         # 内部值与显示值映射
         self._name_style_display_map = {
-            "parent": "新版 ({parent} - 副本_{seq})",
+            "parent": "新版 ({parent}_{seq})",
             "legacy": "老版 (frame_{seq})",
             "custom": "自定义（下方模板生效）",
         }
@@ -543,7 +543,7 @@ class ExtractGUI:
         self._name_style_var.set(style)
         # 老版 / 新版：模板固定，Entry 只读展示；自定义时才可编辑
         preset_map = {
-            "parent": "{parent} - 副本_{seq}",
+            "parent": "{parent}_{seq}",
             "legacy": "frame_{seq}",
         }
         if style in preset_map:
@@ -570,10 +570,10 @@ class ExtractGUI:
             return
         digits = max(1, min(8, digits))
         if style == "custom":
-            tmpl = template or "{parent} - 副本_{seq}"
+            tmpl = template or "{parent}_{seq}"
         else:
-            tmpl = {"parent": "{parent} - 副本_{seq}",
-                    "legacy": "frame_{seq}"}.get(style, "{parent} - 副本_{seq}")
+            tmpl = {"parent": "{parent}_{seq}",
+                    "legacy": "frame_{seq}"}.get(style, "{parent}_{seq}")
         try:
             example = (tmpl.replace("{parent}", "video1")
                            .replace("{seq}", f"{9:0{digits}d}") + ".jpg")
@@ -592,7 +592,7 @@ class ExtractGUI:
         digits = max(1, min(8, digits))
         # 非 custom 时，模板保持与 preset 一致，避免用户误改后不生效
         if style == "parent":
-            template = "{parent} - 副本_{seq}"
+            template = "{parent}_{seq}"
         elif style == "legacy":
             template = "frame_{seq}"
         return style, template, digits

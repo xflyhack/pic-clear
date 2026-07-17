@@ -203,7 +203,7 @@ if errorlevel 1 (
 REM ---- image name style: new or old, bat only supports these two ----
 echo.
 call :LOG_INFO "图片命名规则:"
-call :LOG_INFO "  N = 新版  video1 - 副本_0001.jpg  (parent + 4 位补零,推荐)"
+call :LOG_INFO "  N = 新版  video1_0001.jpg  (parent + 4 位补零,推荐)"
 call :LOG_INFO "  O = 老版  frame_000001.jpg        (legacy + 6 位补零,兼容历史)"
 choice /C NO /M "请选择命名规则 (N=新版 / O=老版)"
 set "NAME_ARGS=--name-style parent --name-digits 4"

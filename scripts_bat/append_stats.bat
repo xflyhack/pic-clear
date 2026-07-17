@@ -42,50 +42,68 @@ REM ============================================================
 
 set "TARGET_DIR=%~1"
 if "%TARGET_DIR%"=="" (
-    echo [append_stats] ERROR: 缺少目录参数
-    endlocal & exit /b 1
+    >&2 echo [append_stats] ERROR: 缺少目录参数
+    echo -1
+    endlocal ^& exit /b 1
 )
 if not exist "%TARGET_DIR%\" (
-    echo [append_stats] ERROR: 目录不存在: %TARGET_DIR%
-    endlocal & exit /b 2
+    >&2 echo [append_stats] ERROR: 目录不存在: %TARGET_DIR%
+    echo -1
+    endlocal ^& exit /b 2
 )
 
 set "REPORT=%TARGET_DIR%\dedupe_report.csv"
+set "HAS_REPORT=1"
 if not exist "%REPORT%" (
-    echo [append_stats] WARN: 没有 dedupe_report.csv,跳过统计: %TARGET_DIR%
-    endlocal & exit /b 2
+    >&2 echo [append_stats] WARN: 没有 dedupe_report.csv, 按 total=0/deleted=0 记账: %TARGET_DIR%
+    set "HAS_REPORT=0"
 )
 
 REM ---- 统计输出路径 ----
 REM STATS_ROOT 优先取环境变量, 让 watcher/run_all 传进来, 兼容多盘符.
 if not defined STATS_ROOT set "STATS_ROOT=Z:\data_source"
 
-REM ---- 取当天日期 yyyyMMdd, 三级兜底 ----
-REM 1) 首选 PowerShell, 输出稳定; 但某些堡垒机上启动慢/被禁
-REM 2) fallback: %DATE% 假设 yyyy-MM-dd 或 yyyy/MM/dd, 切前 4/6/8 位
-REM 3) fallback: wmic os get localdatetime (Win7+ 都有)
-REM 三种都失败 -> stderr 报错, stdout 打 -1, 让 watcher 跳过阈值判断
+REM ---- 取当天日期 yyyyMMdd, 三级兜底, 全部用 label goto, 不放在括号块里 ----
+REM 括号块 if () (...) 内含 for /f + 中文 + 转义符 + ^& exit /b N,
+REM 在部分堡垒机 cmd 上会被解析器误 tokenize, 报
+REM   '3)' is not recognized as an internal or external command
+REM   '?' is not recognized ... (中文首字节被当命令名)
+REM 改成 label 顺序流, 每级 fallback 走 goto, cmd 只按顶层单行解析.
+REM 本地/虚拟机上 PowerShell 一级即成功, 后面分支不会执行, 语义不变.
+REM ---- 第1级: PowerShell (yyyyMMdd 直出) ----
 set "TODAY="
 for /f %%d in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd" 2^>nul') do set "TODAY=%%d"
-REM fallback 用 %DATE% 拆前 4/6/8 位, 中文 Win 通常是 2026-07-17 或 2026/07/17
-REM 拿完后 findstr 校验必须是 8 位纯数字, 否则清空触发下一级兜底
-if not defined TODAY (
-    >&2 echo [append_stats] WARN: PowerShell 拿日期失败, fallback 到 %%DATE%%
-    set "D_RAW=%DATE%"
-    set "TODAY=!D_RAW:~0,4!!D_RAW:~5,2!!D_RAW:~8,2!"
-    echo(!TODAY!| findstr /R "^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$" >nul || set "TODAY="
-)
-if not defined TODAY (
-    >&2 echo [append_stats] WARN: %%DATE%% 也拿不到, fallback 到 wmic
-    for /f "tokens=2 delims==" %%d in ('wmic os get localdatetime /value 2^>nul ^| findstr "="') do set "TODAY=%%d"
-    if defined TODAY set "TODAY=!TODAY:~0,8!"
-    echo(!TODAY!| findstr /R "^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$" >nul || set "TODAY="
-)
-if not defined TODAY (
-    >&2 echo [append_stats] ERROR: 三种方式都拿不到日期, 无法按天分目录
-    echo -1
-    endlocal ^& exit /b 3
-)
+if not defined TODAY goto :TRY_DATE
+echo(!TODAY!| findstr /R "^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$" >nul
+if not errorlevel 1 goto :TODAY_OK
+set "TODAY="
+
+:TRY_DATE
+REM ---- 第2级: %%DATE%% 切前 4/6/8 位 (中文 Win 通常是 2026-07-17 或 2026/07/17) ----
+>&2 echo [append_stats] WARN: PowerShell 拿日期失败, fallback 到 %%DATE%%
+set "D_RAW=%DATE%"
+set "TODAY=!D_RAW:~0,4!!D_RAW:~5,2!!D_RAW:~8,2!"
+if not defined TODAY goto :TRY_WMIC
+echo(!TODAY!| findstr /R "^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$" >nul
+if not errorlevel 1 goto :TODAY_OK
+set "TODAY="
+
+:TRY_WMIC
+REM ---- 第3级: wmic os get localdatetime (Win7+ 都有) ----
+>&2 echo [append_stats] WARN: %%DATE%% 也拿不到, fallback 到 wmic
+for /f "tokens=2 delims==" %%d in ('wmic os get localdatetime /value 2^>nul ^| findstr "="') do set "TODAY=%%d"
+if defined TODAY set "TODAY=!TODAY:~0,8!"
+if not defined TODAY goto :TODAY_FAIL
+echo(!TODAY!| findstr /R "^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$" >nul
+if not errorlevel 1 goto :TODAY_OK
+set "TODAY="
+
+:TODAY_FAIL
+>&2 echo [append_stats] ERROR: 三种方式都拿不到日期, 无法按天分目录
+echo -1
+endlocal ^& exit /b 3
+
+:TODAY_OK
 >&2 echo [append_stats] today=!TODAY! stats_root=%STATS_ROOT%
 set "STATS_DIR=%STATS_ROOT%\%TODAY%"
 set "STATS_CSV=%STATS_DIR%\machine_id_%COMPUTERNAME%.csv"
@@ -120,15 +138,18 @@ for %%E in (jpg jpeg png) do (
     )
 )
 
-REM ---- 数 DELETE 行数 (走 PowerShell, cmd for/f 遇 BOM/中文/空字段不稳) ----
+REM ---- 数 DELETE 行数 ----
+REM 走 PowerShell (cmd for/f 遇 BOM/中文/空字段不稳); 没 CSV 时跳过.
+REM 用 label 而不是 if () 括号块, 避免在堡垒机 cmd 上被误 tokenize.
 set "DELETED=0"
+if not "!HAS_REPORT!"=="1" goto :DELETED_DONE
 for /f %%D in ('powershell -NoProfile -Command "try { (Import-Csv '%REPORT%' | Where-Object { $_.action -eq 'DELETE' }).Count } catch { 0 }" 2^>nul') do set "DELETED=%%D"
-REM 兜底: 如果 PowerShell 也没数出来, 退化到 for /f
-if "!DELETED!"=="0" (
-    for /f "usebackq skip=1 tokens=2 delims=," %%A in ("%REPORT%") do (
-        if /I "%%A"=="DELETE" set /a DELETED+=1
-    )
+if not "!DELETED!"=="0" goto :DELETED_DONE
+REM 兜底: PowerShell 没数出来, 退化到 cmd for/f
+for /f "usebackq skip=1 tokens=2 delims=," %%A in ("%REPORT%") do (
+    if /I "%%A"=="DELETE" set /a DELETED+=1
 )
+:DELETED_DONE
 REM 调试: stderr 打一行, 便于排查; 累计还是 0 时先看这一行是不是有值
 >&2 echo [append_stats] %FOLDER_NAME%: total=!TOTAL! deleted=!DELETED! report="%REPORT%"
 

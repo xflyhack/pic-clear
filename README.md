@@ -357,7 +357,7 @@ extract_frames.exe <SRC_ROOT> <DST_ROOT> [选项]
 | style | 示例（`--name-digits 4`） | 说明 |
 |---|---|---|
 | `legacy`（默认） | `frame_0001.jpg` | 老规则，兼容历史 |
-| `parent` | `video1 - 副本_0001.jpg` | `video1` 是视频同名子文件夹（`out_dir.name`） |
+| `parent` | `video1_0001.jpg` | `video1` 是视频同名子文件夹（`out_dir.name`） |
 | `custom` | 由 `--name-template` 决定 | 支持占位符 `{parent}` 和 `{seq}` |
 
 示例：

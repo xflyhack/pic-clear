@@ -11,8 +11,8 @@ extract_frames.py — 递归遍历一个视频根目录，把每个 .h265 文件
 
 图片文件名支持通过 --name-style / --name-template / --name-digits 配置：
   legacy 规则（默认）：frame_000001.jpg
-  parent 规则       ：video1 - 副本_0001.jpg（parent = 视频同名子文件夹）
-  custom 规则       ：--name-template '{parent} - 副本_{seq}' 之类，
+  parent 规则       ：video1_0001.jpg（parent = 视频同名子文件夹）
+  custom 规则       ：--name-template '{parent}_{seq}' 之类，
                      占位符 {parent}/{seq} 会分别替换成父目录名和补零序号。
 
 硬规则：任何叫 VLM 的目录（含子目录）整棵子树跳过。
@@ -143,7 +143,7 @@ class VideoTask:
 # 抽帧输出的图片文件名以前是硬编码的 frame_000001.jpg（6 位补零），
 # 现在改成可配置：
 #   --name-style legacy    → frame_{seq}.jpg（旧规则）
-#   --name-style parent    → {parent} - 副本_{seq}.jpg（新规则，parent 是 out_dir.name）
+#   --name-style parent    → {parent}_{seq}.jpg（新规则，parent 是 out_dir.name）
 #   --name-template "..."  → 完全自定义，占位符 {parent}/{seq}
 #   --name-digits N        → {seq} 的补零位数（对 legacy/parent/custom 都生效）
 #
@@ -163,7 +163,7 @@ def _resolve_template(style: str, template: str | None) -> str:
     if template:
         return template
     if style == NAME_STYLE_PARENT:
-        return "{parent} - 副本_{seq}"
+        return "{parent}_{seq}"
     # 兜底：legacy
     return "frame_{seq}"
 
@@ -190,9 +190,9 @@ def build_name_pattern(
     """根据规则算出 (ffmpeg_pattern, glob_pattern)。
 
     - ffmpeg_pattern: 传给 ffmpeg 的完整输出路径，形如
-        DST/.../video1/video1 - 副本_%04d.jpg
+        DST/.../video1/video1_%04d.jpg
     - glob_pattern  : 供 Path.glob() 用来枚举已生成帧，形如
-        "video1 - 副本_*.jpg"（不含目录部分）
+        "video1_*.jpg"（不含目录部分）
     """
     digits = max(1, min(8, int(digits or 4)))
     tmpl = _resolve_template(style, template)
@@ -569,7 +569,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "图片命名规则。"
             "legacy=frame_{seq}.jpg（旧默认，兼容历史）；"
-            "parent={parent} - 副本_{seq}.jpg（parent 为视频同名文件夹）；"
+            "parent={parent}_{seq}.jpg（parent 为视频同名文件夹）；"
             "custom=使用 --name-template 指定的自定义模板。"
             "默认: %(default)s"
         ),
@@ -578,7 +578,7 @@ def parse_args() -> argparse.Namespace:
         "--name-template", default=None,
         help=(
             "自定义命名模板，支持占位符 {parent} 和 {seq}，"
-            "示例：'{parent} - 副本_{seq}' 或 'frame_{seq}'。"
+            "示例：'{parent}_{seq}' 或 'frame_{seq}'。"
             "填了本参数即视同 --name-style custom。"
         ),
     )
