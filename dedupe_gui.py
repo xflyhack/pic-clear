@@ -249,6 +249,8 @@ class DedupeGUI:
 
         # 表单变量
         self._target_var = tk.StringVar(value=self._cfg.get("target", ""))
+        # v0.4.37 新增: 图片源根 (跟 extract_gui 的 输出根 对齐), 空=不做镜像 (回退到 v0.4.36 行为)
+        self._src_root_var = tk.StringVar(value=self._cfg.get("src_root", ""))
         self._mode_var = tk.StringVar(
             value=self._cfg.get("mode", "recursive"))
         self._threshold_var = tk.IntVar(
@@ -342,6 +344,18 @@ class DedupeGUI:
             side="left", fill="x", expand=True)
         ttk.Button(row, text="浏览...", command=self._browse_target).pack(
             side="left", padx=4)
+
+        # 图片源根 (对齐 extract_gui 的"输出根", 用来算相对路径, marker 就镜像到这里之下)
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="图片源根：", width=14).pack(side="left")
+        ttk.Entry(row, textvariable=self._src_root_var, width=60).pack(
+            side="left", fill="x", expand=True)
+        ttk.Button(row, text="浏览...", command=self._browse_src_root).pack(
+            side="left", padx=4)
+        ttk.Label(page,
+                  text="  切帧的输出根 (如 Z:\\切帧结果), 用来算 Marker 相对路径; "
+                       "空=只用目标叶子名作镜像 (老行为)",
+                  foreground="#666").pack(anchor="w", padx=20)
 
         # Marker 根
         row = ttk.Frame(page); row.pack(fill="x", **pad)
@@ -578,6 +592,12 @@ class DedupeGUI:
         if p:
             self._target_var.set(p)
 
+    def _browse_src_root(self):
+        init = self._src_root_var.get() or self._target_var.get() or os.path.expanduser("~")
+        p = filedialog.askdirectory(initialdir=init, title="选择图片源根 (切帧输出根)")
+        if p:
+            self._src_root_var.set(p)
+
     def _browse_markers_root(self):
         init = self._markers_root_var.get() or os.path.expanduser("~")
         p = filedialog.askdirectory(initialdir=init, title="选择 Marker 根")
@@ -635,17 +655,39 @@ class DedupeGUI:
             messagebox.showerror("创建失败", f"无法创建 Marker 根目录：{e}")
             return
 
-        # 计算 (target, marker_dir) 对：marker_dir = markers_root / rel(target - target_p)
+        # v0.4.37 pairs 计算.
+        # 若填了 图片源根 src_root:
+        #   marker_dir = markers_root / src_root.name / rel(d, src_root)
+        # 完全对齐 extract_gui 的 marker 放置方式.
+        # 没填 src_root 就走老规则 (v0.4.36 行为): rel(d, target_p) 挂到 markers_root 下.
+        sr_raw = self._src_root_var.get().strip()
+        src_root: Path | None = None
+        if sr_raw:
+            sr_norm = _normalize_windows_path(sr_raw)
+            src_root = Path(sr_norm)
+            if not src_root.is_dir():
+                messagebox.showerror(
+                    "参数错误",
+                    f"图片源根不是有效目录：{src_root}\n留空=沿用老规则; 填了就必须存在.")
+                return
         pairs: list[tuple[Path, Path]] = []
         for d in dirs:
-            try:
-                rel = d.relative_to(target_p)
-            except Exception:
-                rel = Path(d.name)
-            marker_dir = markers_root / rel if str(rel) != "." else markers_root
+            if src_root is not None:
+                try:
+                    rel = d.relative_to(src_root)
+                except Exception:
+                    rel = Path(d.name)
+                marker_dir = markers_root / src_root.name / rel if str(rel) != "." else markers_root / src_root.name
+            else:
+                try:
+                    rel = d.relative_to(target_p)
+                except Exception:
+                    rel = Path(d.name)
+                marker_dir = markers_root / rel if str(rel) != "." else markers_root
             pairs.append((d, marker_dir))
-        # v0.4.36 诊断: 打前 3 对 + 关键路径, 便于排查 marker 位置错的 bug
+        # v0.4.36+ 诊断: 打前 3 对 + 关键路径, 便于排查 marker 位置错的 bug
         self._log(f"[诊断] target_p = {target_p}")
+        self._log(f"[诊断] src_root  = {src_root}")
         self._log(f"[诊断] markers_root = {markers_root}")
         for i, (d, md) in enumerate(pairs[:3]):
             marker_file = md / DEDUP_DONE_MARKER
@@ -823,6 +865,7 @@ class DedupeGUI:
             "force_rerun": bool(self._force_rerun_var.get()),
             "dedupe_jobs": int(self._dedupe_jobs_var.get()),
             "lock_ttl": int(self._lock_ttl_var.get()),
+            "src_root": self._src_root_var.get(),
             "markers_root": self._markers_root_var.get(),
             "minimize_to_tray": bool(self._minimize_to_tray_var.get()),
             "hotkey": self._hotkey_var.get(),
