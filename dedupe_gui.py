@@ -37,7 +37,13 @@ import pipeline  # noqa: E402
 
 
 APP_TITLE = "pic-clear 去重工具"
-APP_VERSION = "v0.3.0"
+# 版本号: CI 会在打包前覆盖 _version.py 里的 VERSION 成 tag 名 (如 v0.4.30);
+# 本地跑 py 时 fallback 到 'dev', 找不到 _version.py 也能启动.
+try:
+    from _version import VERSION as _V
+except Exception:
+    _V = 'dev'
+APP_VERSION = _V
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "dedupe_gui.json"
 HOTKEY_DEFAULT = "ctrl+alt+d"
@@ -83,26 +89,109 @@ def _find_dedupe_exe() -> str | None:
 
 # ---------- 图片目录扫描 ----------
 
-def _find_dedupe_targets(root: Path, mode: str) -> list[Path]:
-    """按模式返回要跑 dedupe_pic 的目录列表：
-      - single: 只跑 root 本身
-      - subdirs: root 下每个一级子目录跑一次
-      - recursive: 递归找所有"含 jpg/jpeg/png 的最深层目录"
+def _to_long_path(path_str: str) -> str:
+    r"""Windows 上 >= 200 字符的绝对路径转成 \\?\ 前缀, 绕开 MAX_PATH=260."""
+    if os.name != "nt":
+        return path_str
+    if path_str.startswith("\\\\?\\") or path_str.startswith("\\?\\"):
+        return path_str
+    if len(path_str) < 200:
+        return path_str
+    if path_str.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + path_str.lstrip("\\")
+    # 已经是绝对路径的直接用, 避免 abspath 在某些实现下多拼一次 cwd
+    if os.path.isabs(path_str):
+        abs_s = path_str
+    else:
+        try:
+            abs_s = os.path.abspath(path_str)
+        except Exception:
+            abs_s = path_str
+    if abs_s.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + abs_s.lstrip("\\")
+    return "\\\\?\\" + abs_s
+
+
+def _is_regular_file(path_str: str) -> bool:
+    r"""os.path.isfile 的长路径安全版本. 优先直接 isfile,
+    失败时套 \\?\ 前缀再试 (Windows 长路径场景)."""
+    try:
+        if os.path.isfile(path_str):
+            return True
+    except Exception:
+        pass
+    long_p = _to_long_path(path_str)
+    if long_p == path_str:
+        return False
+    try:
+        return os.path.isfile(long_p)
+    except Exception:
+        return False
+
+
+def _find_dedupe_targets(root: Path, mode: str,
+                         logger=None) -> list[Path]:
+    r"""按模式返回要跑 dedupe_pic 的目录列表.
+
+    - single: 只跑 root 本身
+    - subdirs: root 下每个一级子目录跑一次
+    - recursive: 递归找所有'含 jpg/jpeg/png 的最深层目录',
+                 用 os.walk 替代 rglob, 对 Windows 长路径 (>=200 chr)
+                 用 \\?\ 前缀重试, 避免长路径下 is_file 静默失败.
+
+    logger: 可选的日志回调 (msg -> None), 用于把扫描过程输出到 GUI 进度栏.
     """
+    def _log(msg: str):
+        if logger is not None:
+            try:
+                logger(msg)
+            except Exception:
+                pass
+
     if not root.is_dir():
+        _log(f"[扫描] target 不是目录: {root}")
         return []
     if mode == "single":
+        _log(f"[扫描] single 模式, 直接用 target: {root}")
         return [root]
     if mode == "subdirs":
-        return sorted([p for p in root.iterdir() if p.is_dir()])
-    # recursive
-    out: set[Path] = set()
+        subs = sorted([p for p in root.iterdir() if p.is_dir()])
+        _log(f"[扫描] subdirs 模式, 一级子目录 {len(subs)} 个")
+        return subs
+
+    # recursive: os.walk + 长路径兼容
     exts = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
-    for ext in exts:
-        for p in root.rglob(f"*{ext}"):
-            if p.is_file():
-                out.add(p.parent)
-    return sorted(out)
+    out: set[str] = set()
+    total_images = 0
+    long_path_hits = 0
+    root_str = str(root)
+    walk_root = _to_long_path(root_str)
+
+    for dirpath, dirnames, filenames in os.walk(walk_root):
+        # 剥掉 \?\ 前缀, 结果里存正常路径 (dedupe_pic.exe 会自己处理长路径)
+        normal_dirpath = dirpath
+        if normal_dirpath.startswith("\\\\?\\UNC\\"):
+            normal_dirpath = "\\" + normal_dirpath[len("\\\\?\\UNC\\"):]
+        elif normal_dirpath.startswith("\\\\?\\"):
+            normal_dirpath = normal_dirpath[len("\\\\?\\"):]
+
+        has_image = False
+        for name in filenames:
+            lower = name.lower()
+            for ext in exts:
+                if lower.endswith(ext):
+                    total_images += 1
+                    if len(os.path.join(normal_dirpath, name)) >= 200:
+                        long_path_hits += 1
+                    has_image = True
+                    break
+        if has_image:
+            out.add(normal_dirpath)
+
+    _log(f"[扫描] recursive: 遍历完成, 共 {total_images} 张图片 "
+         f"(其中 {long_path_hits} 张 >=200 字符长路径)")
+    _log(f"[扫描] 归纳出 {len(out)} 个候选目录")
+    return sorted(Path(s) for s in out)
 
 
 # ---------- 主 GUI ----------
@@ -497,7 +586,7 @@ class DedupeGUI:
 
         target_p = Path(target)
         mode = self._mode_var.get()
-        dirs = _find_dedupe_targets(target_p, mode)
+        dirs = _find_dedupe_targets(target_p, mode, logger=self._log)
         if not dirs:
             messagebox.showwarning("提示",
                                    "扫描不到需要去重的目录（含图片文件）。")
