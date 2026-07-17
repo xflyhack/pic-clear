@@ -259,6 +259,11 @@ class ExtractGUI:
         nb.add(page, text="抽帧")
         self._build_main_tab(page)
 
+        # 日志 tab（独立出来，避免主页按钮/控件被挤没）
+        log_tab = ttk.Frame(nb)
+        nb.add(log_tab, text="日志")
+        self._build_log_tab(log_tab)
+
         # 关于 tab
         about = ttk.Frame(nb)
         nb.add(about, text="关于")
@@ -397,23 +402,38 @@ class ExtractGUI:
         self._sub_frame = ttk.LabelFrame(page, text="一级子目录")
         self._sub_frame.pack(fill="both", expand=True, padx=6, pady=4)
 
-        # 进度 + 日志
+        # 进度（日志区已挪到独立 Tab）
         row = ttk.Frame(page); row.pack(fill="x", **pad)
         ttk.Label(row, text="进度：").pack(side="left")
         ttk.Label(row, textvariable=self._progress_var,
                   foreground="#0066cc").pack(side="left")
-        # 日志控制条（右侧）：自动滚 + 打开日志文件夹
+        ttk.Label(row, text="（详细日志见「日志」Tab）",
+                  foreground="#888").pack(side="left", padx=8)
+
+        # 托盘 / 快捷键
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Checkbutton(row, text="关闭时最小化到托盘",
+                        variable=self._minimize_to_tray_var).pack(side="left")
+        ttk.Label(row, text="   快捷键：").pack(side="left", padx=(12, 2))
+        ttk.Entry(row, textvariable=self._hotkey_var, width=16).pack(side="left")
+        ttk.Button(row, text="注册",
+                   command=self._register_hotkey).pack(side="left", padx=4)
+
+    def _build_log_tab(self, page: ttk.Frame):
+        pad = {"padx": 6, "pady": 4}
+        # 顶部控制条：打开日志文件夹 / 自动滚 / 当前日志文件名
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
         ttk.Button(row, text="打开日志文件夹",
-                   command=self._open_log_dir).pack(side="right", padx=4)
+                   command=self._open_log_dir).pack(side="left")
         ttk.Checkbutton(row, text="自动滚到底",
-                        variable=self._auto_scroll_var).pack(side="right", padx=4)
-        ttk.Label(row, text=f"  日志：{self._log_path.name}",
-                  foreground="#888").pack(side="right", padx=4)
+                        variable=self._auto_scroll_var).pack(side="left", padx=8)
+        ttk.Label(row, text=f"日志文件：{self._log_path.name}",
+                  foreground="#888").pack(side="left", padx=8)
 
         # 日志区：Text + 纵/横滚动条（放在同一个 Frame 里）
         log_wrap = ttk.Frame(page)
         log_wrap.pack(fill="both", expand=True, padx=6, pady=(2, 6))
-        self._log_text = tk.Text(log_wrap, height=16,
+        self._log_text = tk.Text(log_wrap, height=24,
                                  font=("Consolas", 9), wrap="none")
         self._log_vsb = ttk.Scrollbar(log_wrap, orient="vertical",
                                       command=self._on_log_scrollbar)
@@ -435,15 +455,6 @@ class ExtractGUI:
 
         # 载入上次日志末尾 200 行，方便接着看
         self._preload_prev_log_tail()
-
-        # 托盘 / 快捷键
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
-        ttk.Checkbutton(row, text="关闭时最小化到托盘",
-                        variable=self._minimize_to_tray_var).pack(side="left")
-        ttk.Label(row, text="   快捷键：").pack(side="left", padx=(12, 2))
-        ttk.Entry(row, textvariable=self._hotkey_var, width=16).pack(side="left")
-        ttk.Button(row, text="注册",
-                   command=self._register_hotkey).pack(side="left", padx=4)
 
     def _build_about_tab(self, page: ttk.Frame):
         pad = {"padx": 12, "pady": 6}

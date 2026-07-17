@@ -299,6 +299,8 @@ class DedupeGUI:
         self._progress_var = tk.StringVar(value="就绪")
         self._done_dirs = 0
         self._total_dirs = 0
+        # 智能自动滚动：手动往上翻则暂停跟随，滚回底部自动恢复
+        self._auto_scroll_var = tk.BooleanVar(value=True)
 
         self._build_ui()
         self.root.after(200, self._drain_log_queue)
@@ -322,6 +324,11 @@ class DedupeGUI:
         about = ttk.Frame(nb)
         nb.add(about, text="关于")
         self._build_about_tab(about)
+
+        # 日志 tab（独立出来，避免主页按钮/控件被挤没）
+        log_tab = ttk.Frame(nb)
+        nb.add(log_tab, text="日志")
+        self._build_log_tab(log_tab)
 
         bar = ttk.Frame(self.root)
         bar.pack(fill="x", padx=8, pady=(0, 8))
@@ -433,15 +440,13 @@ class DedupeGUI:
                         variable=self._force_rerun_var).pack(
             side="left", padx=4)
 
-        # 进度 + 日志
+        # 进度（日志区已挪到独立 Tab）
         row = ttk.Frame(page); row.pack(fill="x", **pad)
         ttk.Label(row, text="进度：").pack(side="left")
         ttk.Label(row, textvariable=self._progress_var,
                   foreground="#0066cc").pack(side="left")
-
-        self._log_text = tk.Text(page, height=14, font=("Consolas", 9))
-        self._log_text.pack(fill="both", expand=True, padx=6, pady=(2, 6))
-        self._log_text.config(state="disabled")
+        ttk.Label(row, text="（详细日志见「日志」Tab）",
+                  foreground="#888").pack(side="left", padx=8)
 
         # 托盘 / 快捷键
         row = ttk.Frame(page); row.pack(fill="x", **pad)
@@ -543,6 +548,72 @@ class DedupeGUI:
         if "person" not in names:
             names.insert(0, "person")
         return ",".join(names)
+
+    def _build_log_tab(self, page: ttk.Frame):
+        pad = {"padx": 6, "pady": 4}
+        # 顶部控制条
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Checkbutton(row, text="自动滚到底",
+                        variable=self._auto_scroll_var).pack(side="left", padx=4)
+        ttk.Label(row, text="（手动上滚会自动暂停跟随，滚回底部恢复）",
+                  foreground="#888").pack(side="left", padx=8)
+
+        # 日志区：Text + 纵/横滚动条
+        log_wrap = ttk.Frame(page)
+        log_wrap.pack(fill="both", expand=True, padx=6, pady=(2, 6))
+        self._log_text = tk.Text(log_wrap, height=24,
+                                 font=("Consolas", 9), wrap="none")
+        self._log_vsb = ttk.Scrollbar(log_wrap, orient="vertical",
+                                      command=self._on_log_scrollbar)
+        self._log_hsb = ttk.Scrollbar(log_wrap, orient="horizontal",
+                                      command=self._log_text.xview)
+        self._log_text.configure(yscrollcommand=self._on_log_yview,
+                                 xscrollcommand=self._log_hsb.set)
+        self._log_text.grid(row=0, column=0, sticky="nsew")
+        self._log_vsb.grid(row=0, column=1, sticky="ns")
+        self._log_hsb.grid(row=1, column=0, sticky="ew")
+        log_wrap.rowconfigure(0, weight=1)
+        log_wrap.columnconfigure(0, weight=1)
+        # 鼠标滚轮 / 键盘翻页触发时判定是否在底部（暂停自动滚）
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>",
+                    "<Prior>", "<Next>", "<Up>", "<Down>",
+                    "<Key-Home>", "<Key-End>"):
+            self._log_text.bind(seq, self._on_log_user_scroll, add="+")
+        self._log_text.config(state="disabled")
+
+    def _on_log_yview(self, first: str, last: str) -> None:
+        """Text 的 yscrollcommand：同步滚动条位置 + 到底部时恢复自动滚。"""
+        self._log_vsb.set(first, last)
+        try:
+            lnum = float(last)
+        except ValueError:
+            return
+        if lnum >= 0.9999 and not self._auto_scroll_var.get():
+            self._auto_scroll_var.set(True)
+
+    def _on_log_scrollbar(self, *args) -> None:
+        """滚动条被拖动时同步 Text，并判断是否离开底部（暂停自动滚）。"""
+        self._log_text.yview(*args)
+        try:
+            _, last = self._log_text.yview()
+            if last < 0.9999:
+                self._auto_scroll_var.set(False)
+        except Exception:
+            pass
+
+    def _on_log_user_scroll(self, event=None):
+        """鼠标滚轮 / PgUp/Down / Home/End 触发。"""
+        self.root.after(1, self._maybe_pause_autoscroll)
+
+    def _maybe_pause_autoscroll(self) -> None:
+        try:
+            _, last = self._log_text.yview()
+            if last < 0.9999:
+                self._auto_scroll_var.set(False)
+            else:
+                self._auto_scroll_var.set(True)
+        except Exception:
+            pass
 
     def _build_about_tab(self, page: ttk.Frame):
         pad = {"padx": 12, "pady": 6}
@@ -840,15 +911,21 @@ class DedupeGUI:
         self._log_queue.put(f"[{ts}] {msg}\n")
 
     def _drain_log_queue(self):
+        appended = False
         try:
             while True:
                 line = self._log_queue.get_nowait()
                 self._log_text.config(state="normal")
                 self._log_text.insert("end", line)
-                self._log_text.see("end")
                 self._log_text.config(state="disabled")
+                appended = True
         except queue.Empty:
             pass
+        if appended and self._auto_scroll_var.get():
+            try:
+                self._log_text.see("end")
+            except Exception:
+                pass
         self.root.after(200, self._drain_log_queue)
 
     # ---------- 配置 ----------
