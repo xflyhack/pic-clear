@@ -41,7 +41,12 @@ jobs:
       - name: Obfuscate with PyArmor
         run: |
           cd build_dedupe_gui
-          pyarmor gen --output dist_obf pipeline.py pipe_gui.py dedupe_gui.py licensing.py otp_utils.py
+          REM 拆分 pyarmor gen 调用绕开 trial 版单次调用配额限制
+          pyarmor gen --output dist_obf pipeline.py
+          pyarmor gen --output dist_obf pipe_gui.py
+          pyarmor gen --output dist_obf dedupe_gui.py
+          pyarmor gen --output dist_obf licensing.py
+          pyarmor gen --output dist_obf otp_utils.py
           dir dist_obf
           copy /Y dist_obf\pipeline.py pipeline.py
           copy /Y dist_obf\pipe_gui.py pipe_gui.py

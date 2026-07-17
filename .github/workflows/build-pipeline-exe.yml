@@ -36,7 +36,9 @@ jobs:
       - name: Obfuscate with PyArmor
         run: |
           cd build_pipeline
-          pyarmor gen --output dist_obf pipeline.py licensing.py
+          REM 拆分 pyarmor gen 调用绕开 trial 版单次调用配额限制
+          pyarmor gen --output dist_obf pipeline.py
+          pyarmor gen --output dist_obf licensing.py
           dir dist_obf
           copy /Y dist_obf\pipeline.py pipeline.py
           copy /Y dist_obf\licensing.py licensing.py

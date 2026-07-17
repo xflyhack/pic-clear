@@ -40,7 +40,10 @@ jobs:
         # 把 3 个 .py 加密成花指令字节码，产物在 dist_obf/
         # 加密后目录里同名文件替代原文件，注入到打包流程
         run: |
-          pyarmor gen --output dist_obf dedupe_pic.py detector.py licensing.py
+          REM 拆分 pyarmor gen 调用绕开 trial 版单次调用配额限制
+          pyarmor gen --output dist_obf dedupe_pic.py
+          pyarmor gen --output dist_obf detector.py
+          pyarmor gen --output dist_obf licensing.py
           dir dist_obf
           # 用加密版本覆盖原文件
           copy /Y dist_obf\dedupe_pic.py dedupe_pic.py

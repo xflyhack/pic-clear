@@ -50,7 +50,14 @@ jobs:
         # 把 4 个业务 .py + licensing 加密成字节码。
         # 加密后 dist_obf/ 里同名文件覆盖原文件，PyInstaller 打包用加密版本。
         run: |
-          pyarmor gen --output dist_obf classify_gui.py classify_pic.py detector.py pose_detector.py embed_detector.py licensing.py otp_utils.py
+          REM 拆分 pyarmor gen 调用绕开 trial 版单次调用配额限制
+          pyarmor gen --output dist_obf classify_gui.py
+          pyarmor gen --output dist_obf classify_pic.py
+          pyarmor gen --output dist_obf detector.py
+          pyarmor gen --output dist_obf pose_detector.py
+          pyarmor gen --output dist_obf embed_detector.py
+          pyarmor gen --output dist_obf licensing.py
+          pyarmor gen --output dist_obf otp_utils.py
           dir dist_obf
           copy /Y dist_obf\classify_gui.py     classify_gui.py
           copy /Y dist_obf\classify_pic.py     classify_pic.py
