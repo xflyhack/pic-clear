@@ -33,12 +33,10 @@ REM            license.lic in the same dir as the exe.
 REM ============================================================
 
 REM ---- config (edit here if your paths differ) ----
-set "DATA_DRIVE=Z:"
-set "OUT_ROOT=%DATA_DRIVE%\切帧结果"
+set "OUT_ROOT=Z:\切帧结果"
 REM MARKERS_ROOT: dir holding _extract.lock / _done.marker per video.
 REM All machines on the shared drive MUST point to the same location.
-set "MARKERS_ROOT=%DATA_DRIVE%\切帧标记"
-set "DATA_PREFIX=sjbz_"
+set "MARKERS_ROOT=Z:\切帧标记"
 REM MOTION_THRESHOLD: car motion guard, larger = stricter (delete more).
 REM   0.05 = exe default, even sub-pixel jitter counts as motion
 REM   0.12 = bat default, must move >12%% of frame width/height
@@ -48,52 +46,26 @@ set "MOTION_THRESHOLD=0.12"
 echo ============================================================
 echo   run_all  一站式抽帧 + 去重
 echo ============================================================
-call :LOG_INFO "数据盘   : %DATA_DRIVE%"
-call :LOG_INFO "默认输出根: %OUT_ROOT%  (启动时可覆盖)"
-call :LOG_INFO "目录前缀 : %DATA_PREFIX%*"
-echo ============================================================
 echo.
 
-if not exist "%DATA_DRIVE%\" (
-    call :LOG_ERR "数据盘 %DATA_DRIVE% 不存在,请先挂载或检查 net use"
-    pause & exit /b 2
-)
-
-REM ---- Step A: 选 sjbz_* 顶层目录 ----
+REM ---- Step A: input source directory ----
+REM  Drop the auto-detect for Z:\sjbz_*  - just ask the user to
+REM  drag a folder into this window (or paste an absolute path).
 set "SRC_ROOT="
 set "SRC_ROOT_NAME="
-set "MATCH_COUNT=0"
-for /d %%D in ("%DATA_DRIVE%\%DATA_PREFIX%*") do (
-    set /a MATCH_COUNT+=1
-    set "SRC_ROOT=%%~fD"
-    set "SRC_ROOT_NAME=%%~nxD"
+call :LOG_INFO "把源视频目录拖到本窗口,或手工粘贴绝对路径,然后回车:"
+set /p "SRC_ROOT=源目录: "
+if not defined SRC_ROOT ( call :LOG_ERR "未提供源目录,退出" & pause & exit /b 2 )
+REM strip surrounding quotes if the user dragged a path with spaces
+set "SRC_ROOT=!SRC_ROOT:"=!"
+if not exist "!SRC_ROOT!\" (
+    call :LOG_ERR "源目录不存在: !SRC_ROOT!"
+    pause & exit /b 2
 )
-
-if "%MATCH_COUNT%"=="0" (
-    call :LOG_WARN "在 %DATA_DRIVE%\ 下没有找到 %DATA_PREFIX%* 目录"
-    call :LOG_INFO "请把源目录路径拖到本窗口,或手工输入,然后回车:"
-    set /p "SRC_ROOT=源目录: "
-    if not defined SRC_ROOT ( call :LOG_ERR "未提供,退出" & pause & exit /b 2 )
-    for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
-) else if "%MATCH_COUNT%"=="1" (
-    call :LOG_INFO "唯一 sjbz 目录: !SRC_ROOT!"
-) else (
-    call :LOG_INFO "找到多个 %DATA_PREFIX%* 目录,请选择:"
-    set "IDX=0"
-    for /d %%D in ("%DATA_DRIVE%\%DATA_PREFIX%*") do (
-        set /a IDX+=1
-        set "ROOT_!IDX!=%%~fD"
-        echo         [!IDX!] %%~nxD
-    )
-    echo.
-    set /p "PICK=请输入编号: "
-    call set "SRC_ROOT=%%ROOT_!PICK!%%"
-    if not defined SRC_ROOT ( call :LOG_ERR "无效选择,退出" & pause & exit /b 2 )
-    for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
-)
+for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
 
 echo.
-call :LOG_INFO "sjbz 根目录: %SRC_ROOT%"
+call :LOG_INFO "源目录  : !SRC_ROOT!"
 echo.
 
 REM ---- Step A2: choose / override OUT_ROOT ----
@@ -105,11 +77,13 @@ call :LOG_INFO "默认输出根: %OUT_ROOT%"
 call :LOG_INFO "  - 直接回车 = 用默认;  或输入新的绝对路径,例如 D:\pic-clear\frames"
 set "OUT_INPUT="
 set /p "OUT_INPUT=输出根 (回车=默认): "
-if defined OUT_INPUT (
-    set "OUT_ROOT=!OUT_INPUT!"
-    REM 用户覆盖了 OUT_ROOT, markers 跟着走,避免二次输入
-    set "MARKERS_ROOT=!OUT_INPUT!\.markers"
-)
+if not defined OUT_INPUT goto :OUT_ROOT_READY
+REM strip quotes if user dragged a folder with spaces
+set "OUT_INPUT=!OUT_INPUT:"=!"
+set "OUT_ROOT=!OUT_INPUT!"
+REM 用户覆盖了 OUT_ROOT, markers 跟着走,避免二次输入
+set "MARKERS_ROOT=!OUT_INPUT!\.markers"
+:OUT_ROOT_READY
 if not exist "!OUT_ROOT!" mkdir "!OUT_ROOT!" 2>nul
 if not exist "!MARKERS_ROOT!" mkdir "!MARKERS_ROOT!" 2>nul
 call :LOG_INFO "实际输出根: !OUT_ROOT!"
