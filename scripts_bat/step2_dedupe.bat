@@ -4,10 +4,30 @@ setlocal EnableExtensions EnableDelayedExpansion
 @echo off
 title %~n0
 
+
+REM ---- verify chcp 65001 actually took effect ----
+REM  Some old Windows / VM environments silently ignore 'chcp 65001'.
+REM  If it fails, non-ASCII bytes below are parsed as GBK and the
+REM  whole bat blows up. Detect and abort with an ASCII-only message.
+set "CHCP_OK=0"
+for /f "tokens=* delims=" %%A in ('chcp') do set "CHCP_LINE=%%A"
+echo(!CHCP_LINE! | findstr /C:"65001" >nul && set "CHCP_OK=1"
+if not "!CHCP_OK!"=="1" (
+    echo [FATAL] chcp 65001 did not take effect on this machine.
+    echo         current: !CHCP_LINE!
+    echo.
+    echo   How to fix:
+    echo     1^) run 'chcp 65001' in this cmd window and try again, or
+    echo     2^) use extract_gui.exe / dedupe_gui.exe instead, or
+    echo     3^) ask ops to enable UTF-8 in Region ^> Administrative
+    echo        ^> "Beta: Use Unicode UTF-8 for worldwide language support".
+    pause
+    exit /b 4
+)
 REM ============================================================
 REM  step2_dedupe.bat
-REM  只做去重：对 Z:\切帧结果\sjbz_YYYYMMDD\子目录 逐个 dry-run + 二次确认真删
-REM  依赖：dedupe_pic.exe 在 PATH (推荐 C:\Windows\System32)
+REM  只做去重:对 Z:\切帧结果\sjbz_YYYYMMDD\子目录 逐个 dry-run + 二次确认真删
+REM  依赖:dedupe_pic.exe 在 PATH (推荐 C:\Windows\System32)
 REM ============================================================
 
 set "DATA_DRIVE=Z:"
@@ -24,7 +44,7 @@ echo ============================================================
 echo.
 
 if not exist "%DATA_DRIVE%\" (
-    call :LOG_ERR "数据盘 %DATA_DRIVE% 不存在，请先挂载或检查 net use"
+    call :LOG_ERR "数据盘 %DATA_DRIVE% 不存在,请先挂载或检查 net use"
     pause & exit /b 2
 )
 
@@ -40,14 +60,14 @@ for /d %%D in ("%DATA_DRIVE%\%DATA_PREFIX%*") do (
 
 if "%MATCH_COUNT%"=="0" (
     call :LOG_WARN "在 %DATA_DRIVE%\ 下没有找到 %DATA_PREFIX%* 目录"
-    call :LOG_INFO "请把源目录路径拖到本窗口，或手工输入，然后回车："
+    call :LOG_INFO "请把源目录路径拖到本窗口,或手工输入,然后回车:"
     set /p "SRC_ROOT=源目录: "
-    if not defined SRC_ROOT ( call :LOG_ERR "未提供，退出" & pause & exit /b 2 )
+    if not defined SRC_ROOT ( call :LOG_ERR "未提供,退出" & pause & exit /b 2 )
     for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
 ) else if "%MATCH_COUNT%"=="1" (
     call :LOG_INFO "唯一 sjbz 目录: !SRC_ROOT!"
 ) else (
-    call :LOG_INFO "找到多个 %DATA_PREFIX%* 目录，请选择："
+    call :LOG_INFO "找到多个 %DATA_PREFIX%* 目录,请选择:"
     set "IDX=0"
     for /d %%D in ("%DATA_DRIVE%\%DATA_PREFIX%*") do (
         set /a IDX+=1
@@ -57,7 +77,7 @@ if "%MATCH_COUNT%"=="0" (
     echo.
     set /p "PICK=请输入编号: "
     call set "SRC_ROOT=%%ROOT_!PICK!%%"
-    if not defined SRC_ROOT ( call :LOG_ERR "无效选择，退出" & pause & exit /b 2 )
+    if not defined SRC_ROOT ( call :LOG_ERR "无效选择,退出" & pause & exit /b 2 )
     for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
 )
 
@@ -73,7 +93,7 @@ for /d %%D in ("%SRC_ROOT%\*") do (
 )
 
 if "%SUB_COUNT%"=="0" (
-    call :LOG_WARN "%SRC_ROOT% 下没有一级子目录，将直接对整个目录处理"
+    call :LOG_WARN "%SRC_ROOT% 下没有一级子目录,将直接对整个目录处理"
     set "SELECTED[1]=."
     set "SELECTED_COUNT=1"
     goto :SUB_DONE
@@ -84,13 +104,13 @@ for /l %%i in (1,1,%SUB_COUNT%) do (
     call echo         [%%i] %%SUB_%%i%%
 )
 echo.
-call :LOG_INFO "输入方式（可组合）："
+call :LOG_INFO "输入方式(可组合):"
 call :LOG_INFO "  - 序号列表 (逗号分隔) : 1,2"
 call :LOG_INFO "  - 序号区间             : 1-3"
 call :LOG_INFO "  - 全部                 : all"
 echo.
 set /p "SEL=请输入你要处理的子目录: "
-if not defined SEL ( call :LOG_ERR "未输入，退出" & pause & exit /b 2 )
+if not defined SEL ( call :LOG_ERR "未输入,退出" & pause & exit /b 2 )
 set "SELECTED_COUNT=0"
 
 if /I "!SEL!"=="all" (
@@ -139,12 +159,12 @@ goto :EOF
 
 :SUB_DONE
 echo.
-call :LOG_INFO "已选 !SELECTED_COUNT! 个子目录，将依次去重:"
+call :LOG_INFO "已选 !SELECTED_COUNT! 个子目录,将依次去重:"
 for /l %%i in (1,1,!SELECTED_COUNT!) do (
     call echo         - %%SELECTED[%%i]%%
 )
 echo.
-call :LOG_INFO "提示: 若窗口看似卡住无输出，按一下 Enter 或 Esc 恢复"
+call :LOG_INFO "提示: 若窗口看似卡住无输出,按一下 Enter 或 Esc 恢复"
 call :LOG_INFO "      建议永久关闭快速编辑模式: 右键窗口标题 -^> 属性 -^> 编辑选项"
 echo.
 
@@ -154,7 +174,7 @@ if errorlevel 1 (
     pause & exit /b 3
 )
 
-REM 用 cmd 内置变量拼时间戳，不再 spawn powershell
+REM 用 cmd 内置变量拼时间戳,不再 spawn powershell
 set "TS_D=%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%"
 set "TS_T=%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
 set "TS_T=%TS_T: =0%"
@@ -172,7 +192,7 @@ echo ============================================================
 if "%OVERALL_RC%"=="0" (
     call :LOG_OK "全部子目录去重完成"
 ) else (
-    call :LOG_ERR "去重完成，但至少 1 个子目录出错，请翻窗口日志"
+    call :LOG_ERR "去重完成,但至少 1 个子目录出错,请翻窗口日志"
 )
 echo ============================================================
 pause
@@ -192,7 +212,7 @@ if "!SUBNAME!"=="." (
 
 set "TARGET_DIR=!DST_DIR!"
 if not exist "!TARGET_DIR!\" (
-    call :LOG_WARN "抽帧输出目录不存在，改用源目录: !SRC_DIR!"
+    call :LOG_WARN "抽帧输出目录不存在,改用源目录: !SRC_DIR!"
     set "TARGET_DIR=!SRC_DIR!"
 )
 
@@ -218,7 +238,7 @@ if errorlevel 2 (
 )
 
 set "T=%TIME:~0,8%"
-call :LOG_INFO "  %T%  开始真删 (永久删除，不落回收站)"
+call :LOG_INFO "  %T%  开始真删 (永久删除,不落回收站)"
 dedupe_pic.exe "!TARGET_DIR!" --threshold 3 --apply --hard-delete --report "!REPORT_CSV!"
 set "RC=!ERRORLEVEL!"
 

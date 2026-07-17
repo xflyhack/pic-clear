@@ -4,22 +4,43 @@ setlocal EnableExtensions EnableDelayedExpansion
 @echo off
 title dedupe_watcher
 
+REM ---- verify chcp 65001 actually took effect ----
+REM  This bat is often spawned via 'start' from run_all.bat, so it runs
+REM  in a fresh cmd window that does NOT inherit the parent's chcp.
+REM  Detect and abort early with an ASCII-only message if UTF-8 fails.
+set "CHCP_OK=0"
+for /f "tokens=* delims=" %%A in ('chcp') do set "CHCP_LINE=%%A"
+echo(!CHCP_LINE! | findstr /C:"65001" >nul && set "CHCP_OK=1"
+if not "!CHCP_OK!"=="1" (
+    echo [FATAL] chcp 65001 did not take effect on this machine.
+    echo         current: !CHCP_LINE!
+    echo.
+    echo   How to fix:
+    echo     1^) run 'chcp 65001' in this cmd window and try again, or
+    echo     2^) use extract_gui.exe / dedupe_gui.exe instead, or
+    echo     3^) ask ops to enable UTF-8 in Region ^> Administrative
+    echo        ^> "Beta: Use Unicode UTF-8 for worldwide language support".
+    pause
+    exit /b 4
+)
+
 REM ============================================================
 REM  dedupe_watcher.bat
-REM  监听 WATCH_ROOT 下的 _done.marker，发现就调 dedupe_pic.exe 去重
-REM  抽帧完一个视频，这里立刻清理，磁盘不攒垃圾
+REM  Watch WATCH_ROOT for _done.marker files, run dedupe_pic.exe
+REM  when found. Cleans up right after each video is extracted.
 REM
-REM  用法：
+REM  Usage:
 REM    dedupe_watcher.bat
-REM    dedupe_watcher.bat "Z:\切帧结果\sjbz_20260708"
+REM    dedupe_watcher.bat "Z:\out\job1"
 REM
-REM  参数：
-REM    第 1 个位置参数 = 监听根目录（可选，默认 Z:\切帧结果）
-REM    /apply           = 真删（默认 dry-run）
-REM    /threshold N     = 相似阈值，默认 3
-REM    /interval N      = 扫描间隔秒，默认 5
-REM    /motion N        = 相邻帧车运动阈值（越大越严格，默认由 exe 决定 0.05）
-REM    /once            = 扫一遍就退出（否则死循环）
+REM  Args:
+REM    <positional>     watch root (default: OUT_ROOT env or Z:\out)
+REM    /apply           real delete (default dry-run)
+REM    /threshold N     similarity threshold, default 3
+REM    /interval N      scan interval seconds, default 5
+REM    /motion N        adjacent-frame car motion threshold
+REM    /scene           enable --scene-protect
+REM    /once            run one pass and exit (default: loop forever)
 REM ============================================================
 
 set "WATCH_ROOT="
@@ -29,8 +50,8 @@ set "INTERVAL=5"
 set "MOTION="
 set "SCENE_ARG="
 set "RUN_ONCE=0"
-REM 当日累计剩余图片数超过该值就停止 watcher（不影响正在处理的目录）
-REM 改为 0 或不设置来禁用
+REM Stop watcher after this many cumulative remaining images.
+REM Set to 0 to disable.
 set "DAILY_REMAIN_LIMIT=8000000000"
 set "DAILY_LIMIT_HIT=0"
 
@@ -61,7 +82,7 @@ if not exist "%WATCH_ROOT%\" (
 
 where dedupe_pic.exe >nul 2>nul
 if errorlevel 1 (
-    call :LOG_ERR "找不到 dedupe_pic.exe，请放到 PATH (推荐 C:\Windows\System32)"
+    call :LOG_ERR "找不到 dedupe_pic.exe,请放到 PATH (推荐 C:\Windows\System32)"
     pause & exit /b 3
 )
 
@@ -76,11 +97,16 @@ call :LOG_INFO "模式       : %APPLY_TXT%"
 call :LOG_INFO "阈值       : %THRESHOLD%"
 call :LOG_INFO "扫描间隔   : %INTERVAL% 秒"
 call :LOG_INFO "一次即退   : %RUN_ONCE%"
-if defined SCENE_ARG ( call :LOG_INFO "场景保护   : 开启 (--scene-protect)" ) else ( call :LOG_INFO "场景保护   : 关闭" )
+if defined SCENE_ARG goto :SCENE_ON
+call :LOG_INFO "场景保护   : 关闭"
+goto :SCENE_LOGGED
+:SCENE_ON
+call :LOG_INFO "场景保护   : 开启 (--scene-protect)"
+:SCENE_LOGGED
 echo ------------------------------------------------------------
 call :LOG_INFO "工作原理: 扫描有 _done.marker 但没 _dedup_done.marker 的目录"
 call :LOG_INFO "          对每个这样的目录调用 dedupe_pic.exe"
-call :LOG_INFO "          成功写 _dedup_done.marker，失败写 _dedup_failed.marker"
+call :LOG_INFO "          成功写 _dedup_done.marker,失败写 _dedup_failed.marker"
 call :LOG_INFO "按 Ctrl+C 可随时退出"
 echo ============================================================
 echo.
@@ -89,7 +115,7 @@ set "TOTAL_PROCESSED=0"
 
 :LOOP
 if "%DAILY_LIMIT_HIT%"=="1" (
-    call :LOG_OK "已达当日剩余阈值 %DAILY_REMAIN_LIMIT%，watcher 停止（不影响正在处理的目录）"
+    call :LOG_OK "已达当日剩余阈值 %DAILY_REMAIN_LIMIT%,watcher 停止(不影响正在处理的目录)"
     endlocal & exit /b 0
 )
 set "FOUND_THIS_ROUND=0"
@@ -101,15 +127,15 @@ for /f "delims=" %%M in ('dir /s /b /a-d "%WATCH_ROOT%\_done.marker" 2^>nul') do
 
 if "!FOUND_THIS_ROUND!"=="0" (
     if "%RUN_ONCE%"=="1" (
-        call :LOG_OK "本轮无待处理目录，累计已处理 !TOTAL_PROCESSED! 个，退出"
+        call :LOG_OK "本轮无待处理目录,累计已处理 !TOTAL_PROCESSED! 个,退出"
         endlocal & exit /b 0
     )
     set "T=%TIME:~0,8%"
-    call :LOG_INFO "!T!  本轮 0 个待处理，%INTERVAL%s 后重试 (累计 !TOTAL_PROCESSED!)"
+    call :LOG_INFO "!T!  本轮 0 个待处理,%INTERVAL%s 后重试 (累计 !TOTAL_PROCESSED!)"
     timeout /t %INTERVAL% >nul
 ) else (
     if "%RUN_ONCE%"=="1" (
-        call :LOG_OK "本轮共处理 !FOUND_THIS_ROUND! 个，累计 !TOTAL_PROCESSED!，退出"
+        call :LOG_OK "本轮共处理 !FOUND_THIS_ROUND! 个,累计 !TOTAL_PROCESSED!,退出"
         endlocal & exit /b 0
     )
 )
@@ -117,7 +143,7 @@ goto :LOOP
 
 
 REM ====================================================================
-REM  :PROCESS_ONE  in: MARKER = <某目录>\_done.marker 的完整路径
+REM  :PROCESS_ONE  in: MARKER = full path to <dir>\_done.marker
 REM ====================================================================
 :PROCESS_ONE
 if "%DAILY_LIMIT_HIT%"=="1" goto :EOF
@@ -139,7 +165,7 @@ call :LOG_STEP "!T!  发现待处理: !TARGET_DIR!"
 set "REPORT_CSV=!TARGET_DIR!\dedupe_report.csv"
 
 if "%APPLY%"=="1" (
-    REM 直接永久删除，不落 _trash（避免堡垒机上又要清理一遍）
+    REM hard-delete, skip _trash so no second cleanup pass is needed
     if defined MOTION (
         dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% !SCENE_ARG! --motion-threshold %MOTION% --apply --hard-delete --report "!REPORT_CSV!"
     ) else (
@@ -164,11 +190,11 @@ if "!RC!"=="0" (
 ) else (
     > "!TARGET_DIR!\_dedup_failed.marker" echo rc=!RC!
     call :LOG_ERR "!T2!  dedupe 失败 rc=!RC!  目录: !TARGET_DIR!"
-    call :LOG_ERR "        已写入 _dedup_failed.marker，本轮不再重试此目录"
+    call :LOG_ERR "        已写入 _dedup_failed.marker,本轮不再重试此目录"
     call :LOG_ERR "        排查后手工删除 _dedup_failed.marker 即可让下轮继续"
 )
 
-REM 把内部可能已置位的 DAILY_LIMIT_HIT 带出 setlocal 边界
+REM propagate DAILY_LIMIT_HIT out of the setlocal scope
 set "_HIT=!DAILY_LIMIT_HIT!"
 endlocal & set /a FOUND_THIS_ROUND+=1 & set /a TOTAL_PROCESSED+=1 & set "DAILY_LIMIT_HIT=%_HIT%"
 goto :EOF
@@ -176,11 +202,13 @@ goto :EOF
 
 REM ====================================================================
 REM  :DO_STATS  <TARGET_DIR>
-REM  调 append_stats.bat 拿到"当日累计剩余"，超阈值就设 DAILY_LIMIT_HIT=1
-REM  用 tempfile 中转 stdout，避免嵌套 for/if + delayed expansion 的坑
+REM  Call append_stats.bat to get cumulative-remaining count; if it
+REM  exceeds DAILY_REMAIN_LIMIT, set DAILY_LIMIT_HIT=1.
+REM  Route stdout through a tempfile to avoid nested for/if + delayed
+REM  expansion pitfalls.
 REM ====================================================================
 :DO_STATS
-REM 不再 setlocal，直接在调用者作用域修改 DAILY_LIMIT_HIT
+REM No setlocal here: DAILY_LIMIT_HIT is intentionally modified in the caller scope
 set "TDIR=%~1"
 set "STATS_BAT=%~dp0append_stats.bat"
 if not exist "!STATS_BAT!" (
@@ -193,7 +221,7 @@ set "CUM_REMAIN="
 for /f "usebackq delims=" %%C in ("!STATS_TMP!") do set "CUM_REMAIN=%%C"
 del "!STATS_TMP!" 2>nul
 if not defined CUM_REMAIN (
-    call :LOG_WARN "append_stats.bat 无输出，跳过阈值判断"
+    call :LOG_WARN "append_stats.bat 无输出,跳过阈值判断"
     goto :EOF
 )
 call :LOG_INFO "        当日累计剩余 !CUM_REMAIN! / 阈值 %DAILY_REMAIN_LIMIT%"
@@ -203,7 +231,7 @@ goto :EOF
 
 
 REM ====================================================================
-REM  日志子过程：统一 tag 宽度，方便未来 grep
+REM  Log helpers: uniform tag width, greppable
 REM ====================================================================
 :LOG_INFO
 echo [INFO ] %~1

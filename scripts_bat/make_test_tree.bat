@@ -3,6 +3,26 @@ setlocal EnableExtensions EnableDelayedExpansion
 >nul chcp 65001
 title %~n0
 
+
+REM ---- verify chcp 65001 actually took effect ----
+REM  Some old Windows / VM environments silently ignore 'chcp 65001'.
+REM  If it fails, non-ASCII bytes below are parsed as GBK and the
+REM  whole bat blows up. Detect and abort with an ASCII-only message.
+set "CHCP_OK=0"
+for /f "tokens=* delims=" %%A in ('chcp') do set "CHCP_LINE=%%A"
+echo(!CHCP_LINE! | findstr /C:"65001" >nul && set "CHCP_OK=1"
+if not "!CHCP_OK!"=="1" (
+    echo [FATAL] chcp 65001 did not take effect on this machine.
+    echo         current: !CHCP_LINE!
+    echo.
+    echo   How to fix:
+    echo     1^) run 'chcp 65001' in this cmd window and try again, or
+    echo     2^) use extract_gui.exe / dedupe_gui.exe instead, or
+    echo     3^) ask ops to enable UTF-8 in Region ^> Administrative
+    echo        ^> "Beta: Use Unicode UTF-8 for worldwide language support".
+    pause
+    exit /b 4
+)
 REM ============================================================
 REM  make_test_tree.bat
 REM  生成一批"深层目录"用于测试递归遍历软件

@@ -4,15 +4,35 @@ setlocal EnableExtensions EnableDelayedExpansion
 @echo off
 title hide_markers.bat
 
+
+REM ---- verify chcp 65001 actually took effect ----
+REM  Some old Windows / VM environments silently ignore 'chcp 65001'.
+REM  If it fails, non-ASCII bytes below are parsed as GBK and the
+REM  whole bat blows up. Detect and abort with an ASCII-only message.
+set "CHCP_OK=0"
+for /f "tokens=* delims=" %%A in ('chcp') do set "CHCP_LINE=%%A"
+echo(!CHCP_LINE! | findstr /C:"65001" >nul && set "CHCP_OK=1"
+if not "!CHCP_OK!"=="1" (
+    echo [FATAL] chcp 65001 did not take effect on this machine.
+    echo         current: !CHCP_LINE!
+    echo.
+    echo   How to fix:
+    echo     1^) run 'chcp 65001' in this cmd window and try again, or
+    echo     2^) use extract_gui.exe / dedupe_gui.exe instead, or
+    echo     3^) ask ops to enable UTF-8 in Region ^> Administrative
+    echo        ^> "Beta: Use Unicode UTF-8 for worldwide language support".
+    pause
+    exit /b 4
+)
 REM ============================================================
 REM  hide_markers.bat
-REM  递归隐藏当前目录（bat 所在目录）下面的 marker + csv：
+REM  递归隐藏当前目录(bat 所在目录)下面的 marker + csv:
 REM    - _done.marker
 REM    - _dedup_done.marker
 REM    - _dedup_running.marker
 REM    - _dedup_failed.marker
 REM    - dedupe_report.csv
-REM  用法：把 bat 拷到要处理的根目录里，双击运行即可。
+REM  用法:把 bat 拷到要处理的根目录里,双击运行即可.
 REM ============================================================
 
 REM 处理根目录 = bat 所在目录
@@ -90,7 +110,7 @@ echo   隐藏 !N! 个 dedupe_report.csv
 
 echo.
 echo ============================================================
-echo   完成，共隐藏 !TOTAL! 个文件。
+echo   完成,共隐藏 !TOTAL! 个文件.
 echo ============================================================
 echo.
 pause

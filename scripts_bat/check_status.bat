@@ -3,17 +3,37 @@ setlocal EnableExtensions EnableDelayedExpansion
 >nul chcp 65001
 title check_status - pic-clear
 
+
+REM ---- verify chcp 65001 actually took effect ----
+REM  Some old Windows / VM environments silently ignore 'chcp 65001'.
+REM  If it fails, non-ASCII bytes below are parsed as GBK and the
+REM  whole bat blows up. Detect and abort with an ASCII-only message.
+set "CHCP_OK=0"
+for /f "tokens=* delims=" %%A in ('chcp') do set "CHCP_LINE=%%A"
+echo(!CHCP_LINE! | findstr /C:"65001" >nul && set "CHCP_OK=1"
+if not "!CHCP_OK!"=="1" (
+    echo [FATAL] chcp 65001 did not take effect on this machine.
+    echo         current: !CHCP_LINE!
+    echo.
+    echo   How to fix:
+    echo     1^) run 'chcp 65001' in this cmd window and try again, or
+    echo     2^) use extract_gui.exe / dedupe_gui.exe instead, or
+    echo     3^) ask ops to enable UTF-8 in Region ^> Administrative
+    echo        ^> "Beta: Use Unicode UTF-8 for worldwide language support".
+    pause
+    exit /b 4
+)
 REM ============================================================
 REM  check_status.bat
-REM  只做检测，不做任何操作。循环刷新（默认 5 秒一次）。
-REM  Ctrl+C 退出。
-REM  依赖：tasklist、powershell（Win 都自带）。
+REM  只做检测,不做任何操作.循环刷新(默认 5 秒一次).
+REM  Ctrl+C 退出.
+REM  依赖:tasklist,powershell(Win 都自带).
 REM ============================================================
 
-REM 刷新间隔（秒），可改
+REM 刷新间隔(秒),可改
 set "INTERVAL=5"
 
-REM 输出根，用于查找最新任务的 status.json；跟 pipeline 的 OUT_ROOT 保持一致
+REM 输出根,用于查找最新任务的 status.json;跟 pipeline 的 OUT_ROOT 保持一致
 set "OUT_ROOT=Z:\切帧结果"
 
 :LOOP
@@ -41,7 +61,7 @@ timeout /t %INTERVAL% /nobreak >nul
 goto :LOOP
 
 REM ====================================================================
-REM :CHECK_PROC   %1=exe 名（含引号）
+REM :CHECK_PROC   %1=exe 名(含引号)
 REM ====================================================================
 :CHECK_PROC
 set "PROC=%~1"
@@ -90,7 +110,7 @@ if !KB! GEQ 1024 (
 goto :EOF
 
 REM ====================================================================
-REM :PAD   %1=字符串, %2=目标宽度, %3=输出变量名（右侧补空格到目标宽度）
+REM :PAD   %1=字符串, %2=目标宽度, %3=输出变量名(右侧补空格到目标宽度)
 REM ====================================================================
 :PAD
 set "S=%~1"
@@ -106,11 +126,11 @@ REM ====================================================================
 :SHOW_LATEST_JOB
 set "JOBS_DIR=%OUT_ROOT%\.pipeline\jobs"
 if not exist "%JOBS_DIR%" (
-    echo   [任务] 未找到 jobs 目录：%JOBS_DIR%
+    echo   [任务] 未找到 jobs 目录:%JOBS_DIR%
     goto :EOF
 )
 
-REM 找最新一个子目录（按修改时间倒序，取第一个）
+REM 找最新一个子目录(按修改时间倒序,取第一个)
 set "LATEST="
 for /f "delims=" %%D in ('dir /b /ad /o-d "%JOBS_DIR%" 2^>nul') do (
     if not defined LATEST set "LATEST=%%D"
@@ -122,11 +142,11 @@ if not defined LATEST (
 
 set "STATUS_FILE=%JOBS_DIR%\%LATEST%\status.json"
 if not exist "%STATUS_FILE%" (
-    echo   [任务] 最新任务无 status.json：%LATEST%
+    echo   [任务] 最新任务无 status.json:%LATEST%
     goto :EOF
 )
 
-REM 用 PowerShell 解析 JSON，格式化输出
+REM 用 PowerShell 解析 JSON,格式化输出
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$s = Get-Content -Raw -Encoding UTF8 -Path '%STATUS_FILE%' ^| ConvertFrom-Json; ^
      $done = ($s.subs ^| Where-Object { $_.stage -eq 'done' }).Count; ^
