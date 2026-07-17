@@ -37,6 +37,9 @@ set "OUT_ROOT=Z:\切帧结果"
 REM MARKERS_ROOT: dir holding _extract.lock / _done.marker per video.
 REM All machines on the shared drive MUST point to the same location.
 set "MARKERS_ROOT=Z:\切帧标记"
+REM VIDEO_EXTS: comma-separated video extensions to extract.
+REM Passed as --ext to extract_frames.exe; keep in sync with extract_gui defaults.
+set "VIDEO_EXTS=h265,mp4"
 
 echo ============================================================
 echo   step1_extract  只做抽帧
@@ -208,6 +211,7 @@ if errorlevel 2 (
 )
 call :LOG_INFO "命名规则   : !NAME_LABEL!"
 call :LOG_INFO "命名参数   : !NAME_ARGS!"
+call :LOG_INFO "视频扩展名 : %VIDEO_EXTS%"
 echo.
 
 set "OVERALL_RC=0"
@@ -252,7 +256,7 @@ call :LOG_INFO "  标记 : !MK_DIR!"
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  开始"
 
-extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext .h265 --markers-root "!MK_DIR!" %NAME_ARGS%
+extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext %VIDEO_EXTS% --markers-root "!MK_DIR!" %NAME_ARGS%
 set "RC=!ERRORLEVEL!"
 
 set "T=%TIME:~0,8%"
