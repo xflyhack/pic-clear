@@ -17,12 +17,66 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+# ----- Z:/映射盘符 → \\server\share 缓存 (Windows only) -----
+_MAPPED_DRIVE_CACHE: dict[str, str | None] = {}
+
+
+def _resolve_mapped_drive_to_unc(drive_letter: str) -> str | None:
+    r"""把 'Z:' 这样的映射盘符解析为底层 UNC (如 \\server\share).
+
+    - 只在 Windows 上有效, 其他平台返回 None
+    - 结果按盘符字母 (大写) 缓存到进程内, 反复调用零开销
+    - 非映射盘 / 本地盘 / 解析失败 -> 返回 None (调用方按原盘符处理)
+
+    背景: Win32 的 \\?\ 前缀要求路径是"已归一化的 NT 命名空间", 而映射盘符
+          在超过 MAX_PATH 时会绕过 DOS 设备解析层, 导致 \\?\Z:\... 直通失败.
+          正确写法是 \\?\UNC\server\share\..., 因此先展开一次.
+    """
+    if os.name != "nt":
+        return None
+    key = drive_letter.upper().rstrip("\\/")
+    if not (len(key) == 2 and key[1] == ":"):
+        return None
+    if key in _MAPPED_DRIVE_CACHE:
+        return _MAPPED_DRIVE_CACHE[key]
+    unc: str | None = None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        mpr = ctypes.WinDLL("mpr", use_last_error=True)
+        WNetGetConnectionW = mpr.WNetGetConnectionW
+        WNetGetConnectionW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        WNetGetConnectionW.restype = wintypes.DWORD
+
+        buf_len = wintypes.DWORD(1024)
+        buf = ctypes.create_unicode_buffer(buf_len.value)
+        rc = WNetGetConnectionW(key, buf, ctypes.byref(buf_len))
+        if rc == 0:
+            val = buf.value.strip()
+            if val.startswith("\\\\"):
+                unc = val
+    except Exception:
+        unc = None
+    _MAPPED_DRIVE_CACHE[key] = unc
+    return unc
+
+
 def _to_long_path(image_path) -> str:
     r"""Windows 上 >= 200 字符的绝对路径转成 \\?\ 前缀, 绕开 MAX_PATH=260 限制.
 
-    - 非 Windows 原样返回, 保证 mac / Linux 零回归
-    - 已带前缀 / 短路径原样返回
-    - UNC 路径转成 \\?\UNC\... 形式
+    - 非 Windows 原样返回, 保证 mac / Linux / 本地虚拟机零回归
+    - 已带 \\?\ 或 \?\ 前缀原样返回, 不重复加
+    - 短于 200 字符原样返回 (PIL 观察在 200 附近就会开始翻车,
+      比 MAX_PATH=260 更保守, 换取更少的黑箱失败)
+    - UNC 路径 (\\server\share\...) 转成 \\?\UNC\server\share\...
+    - 映射盘符 (Z:\...) 先展开成 \\server\share\... 再套 \\?\UNC\ 前缀,
+      纯本地盘 (D:\...) 保持 \\?\D:\... 不变.
+    - 相对路径先用 os.path.abspath 转绝对路径再套前缀
     """
     s = str(image_path)
     if os.name != "nt":
@@ -31,6 +85,7 @@ def _to_long_path(image_path) -> str:
         return s
     if len(s) < 200:
         return s
+    # UNC 已经是 \\server\share\... 就直接套前缀, 不走 abspath
     if s.startswith("\\\\"):
         return "\\\\?\\UNC\\" + s.lstrip("\\")
     try:
@@ -39,6 +94,13 @@ def _to_long_path(image_path) -> str:
         abs_s = s
     if abs_s.startswith("\\\\"):
         return "\\\\?\\UNC\\" + abs_s.lstrip("\\")
+    # 到这里 abs_s 形如 'X:\\...', 若 X: 是映射盘则展开成 UNC
+    if len(abs_s) >= 2 and abs_s[1] == ":":
+        unc_root = _resolve_mapped_drive_to_unc(abs_s[:2])
+        if unc_root:
+            rest = abs_s[2:].lstrip("\\")
+            unc_full = unc_root.rstrip("\\") + "\\" + rest
+            return "\\\\?\\UNC\\" + unc_full.lstrip("\\")
     return "\\\\?\\" + abs_s
 
 

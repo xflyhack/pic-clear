@@ -161,6 +161,16 @@ git tag 打到 `v0.4.29` 时用户在堡垒机上截图 dedupe_gui 显示 `v0.3.
 - 影响面：`dedupe_pic.py` / `detector.py` / `embed_detector.py` / `pose_detector.py`
 - 本地/Mac 零回归：`os.name != 'nt'` 原样返回
 
+### 13. `\\?\` 前缀 + 映射盘符 (Z:) 组合互斥
+- 现象：D 盘长路径能删，Z 盘长路径 PIL 全部失败, `[扫描完成] 有效图片 0`
+- 场景：堡垒机把 SMB 共享挂载到 `Z:`, 用户 GUI 里选 `Z:\切帧结果\...`, 路径 >260 字符
+- 根因：`\\?\` 语义 = "跳过 DOS 设备解析器, 直通到 NT 命名空间"; 但映射盘符 `Z:` 不是真设备,
+       内核直通到 `Z:` 这个符号就断了. 官方规则: 映射盘符长路径必须先展开成 `\\?\UNC\server\share\...`
+- 修法：`_to_long_path` 内加 `_resolve_mapped_drive_to_unc()` helper, 走 `mpr!WNetGetConnectionW` 查一次,
+       结果按盘符缓存到进程内; 本地盘 (`D:`) / 已 UNC / 非 Windows 全部走原分支
+- 影响面：`dedupe_pic.py` / `detector.py` (v0.4.31)
+- 兼容性：非映射盘 / 短路径 / Mac / Linux **完全零回归**
+
 ### 4. PyArmor trial 版对单次 `pyarmor gen` 有配额
 - 现象：CI 报 `ERROR out of license`，`dist_obf` 空目录，后续 copy 全失败
 - 根因：一次给 3+ 个文件，最近脚本变大后爆额度
