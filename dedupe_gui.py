@@ -156,6 +156,32 @@ def _is_regular_file(path_str: str) -> bool:
         return False
 
 
+def _rel_from_drive_root(p: Path) -> Path:
+    """把绝对路径的 anchor (盘符 / UNC 头) 去掉, 返回相对盘根的整段路径.
+
+    - Windows: ``Z:\\a\\b\\c`` -> ``a\\b\\c``
+    - UNC    : ``\\\\srv\\share\\x\\y`` -> ``x\\y``  (share 也一起去掉)
+    - POSIX  : ``/a/b/c`` -> ``a/b/c``
+    - 盘根本身 (``Z:\\``) -> ``Path('.')``
+
+    与 extract/dedupe 的 "marker 位置从盘根往下完整镜像" 规则配套.
+    """
+    try:
+        parts = p.parts
+    except Exception:
+        return Path(p.name)
+    if not parts:
+        return Path(".")
+    anchor_str = p.anchor  # ``Z:\\`` 或 ``\\\\srv\\share\\`` 或 ``/``
+    if anchor_str:
+        rest = parts[1:]
+    else:
+        rest = parts
+    if not rest:
+        return Path(".")
+    return Path(*rest)
+
+
 def _find_dedupe_targets(root: Path, mode: str,
                          logger=None) -> list[Path]:
     r"""按模式返回要跑 dedupe_pic 的目录列表.
@@ -748,7 +774,11 @@ class DedupeGUI:
                     rel = d.relative_to(src_root)
                 except Exception:
                     rel = Path(d.name)
-                marker_dir = markers_root / src_root.name / rel if str(rel) != "." else markers_root / src_root.name
+                # v0.4.40: 前缀 = src_root 相对盘根的整段, 不再只取 src_root.name
+                # 这样 target 深浅无关, marker 目录永远等于 markers_root + <盘根往下的完整路径>
+                src_prefix = _rel_from_drive_root(src_root)
+                base = markers_root if str(src_prefix) == "." else markers_root / src_prefix
+                marker_dir = base if str(rel) == "." else base / rel
             else:
                 try:
                     rel = d.relative_to(target_p)
