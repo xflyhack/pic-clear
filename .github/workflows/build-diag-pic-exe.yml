@@ -1,0 +1,80 @@
+name: Build Diag Pic EXE
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install Pillow
+          pip install pyinstaller
+
+      - name: Write _version.py from git ref
+        run: |
+          if "%GITHUB_REF_TYPE%"=="tag" (
+            echo VERSION = "%GITHUB_REF_NAME%" > _version.py
+          ) else (
+            echo VERSION = "%GITHUB_REF_NAME%-%GITHUB_SHA:~0,7%" > _version.py
+          )
+          type _version.py
+        shell: cmd
+
+      - name: Prepare build folder
+        run: |
+          mkdir build_diag_pic
+          copy diag_pic.py build_diag_pic\
+          copy _version.py build_diag_pic\
+        shell: cmd
+
+      - name: Build single-file exe (windowed)
+        run: |
+          cd build_diag_pic
+          pyinstaller --onefile --windowed --name diag_pic ^
+            --icon "..\icon.ico" ^
+            --add-data "..\icon.ico;." ^
+            --hidden-import _version ^
+            --hidden-import tkinter ^
+            --hidden-import tkinter.ttk ^
+            --hidden-import tkinter.filedialog ^
+            --hidden-import tkinter.messagebox ^
+            --hidden-import PIL ^
+            --hidden-import PIL.Image ^
+            --hidden-import ctypes ^
+            --hidden-import ctypes.wintypes ^
+            diag_pic.py
+          cd ..
+        shell: cmd
+
+      - name: Show exe size
+        run: dir build_diag_pic\dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-pic-windows-exe
+          path: build_diag_pic/dist/diag_pic.exe
+          if-no-files-found: error
+
+      - name: Attach exe to GitHub Release (only on tag push)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build_diag_pic/dist/diag_pic.exe
+          fail_on_unmatched_files: true
