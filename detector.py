@@ -62,19 +62,35 @@ def _resolve_mapped_drive_to_unc(drive_letter: str) -> str | None:
     return unc
 
 
+def _normalize_windows_path(image_path) -> str:
+    r"""把 tkinter/filedialog 混用的 //?/ 前缀 + 正斜杠路径统一成 Windows 惯用形式.
+
+    背景 (v0.4.34): tkinter filedialog 在长路径下会把返回值里的 \ 全部转成 /,
+    并且已经悄悄加了 \\?\ 前缀. 这样一路传到 _to_long_path 时:
+      - startswith("\\?\\") 判断失效 (实际是 //?/)
+      - 又叠一层 \\?\ 变双重前缀 -> FileNotFoundError
+    这里做的事:
+      1) 正斜杠全部换成反斜杠
+      2) 已带 \\?\ 前缀就保留 (不重复加)
+      3) 非 Windows 原样返回
+    """
+    s = str(image_path)
+    if os.name != "nt":
+        return s
+    if "/" in s:
+        s = s.replace("/", "\\")
+    while s.startswith("\\\\?\\\\\\?\\"):
+        s = s[4:]
+    return s
+
+
 def _to_long_path(image_path) -> str:
     r"""Windows 上 >= 180 字符的绝对路径转成 \\?\ 前缀, 绕开 MAX_PATH=260 限制.
 
-    - 非 Windows 原样返回, 保证 mac / Linux / 本地虚拟机零回归
-    - 已带 \\?\ 或 \?\ 前缀原样返回, 不重复加
-    - 短于 180 字符原样返回 (堡垒机实测短 API 到 204 也 OK,
-      但 PIL/CRT 在 180 附近就有翻车迹象, 阈值再降 20 更保险)
-    - UNC 路径 (\\server\share\...) 直接转成 \\?\UNC\server\share\...
-    - 映射盘符 (Z:\...) 保留 \\?\Z:\... 形式 (堡垒机 Win Server 2022 实测 OK,
-      展开成 \\?\UNC\... 反而打不开)
-    - 相对路径先用 os.path.abspath 转绝对路径再套前缀
+    v0.4.34 起入口先走 _normalize_windows_path 修复 tkinter 的 //?/ 混斜杠坑;
+    tkinter filedialog 返回的长路径带 //?/ 前缀 + 正斜杠, 若不归一化会双重前缀失败.
     """
-    s = str(image_path)
+    s = _normalize_windows_path(image_path)
     if os.name != "nt":
         return s
     if s.startswith("\\\\?\\") or s.startswith("\\?\\"):

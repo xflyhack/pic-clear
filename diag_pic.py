@@ -67,10 +67,33 @@ def _resolve_mapped_drive_to_unc(drive_letter: str) -> tuple[int, str | None]:
         return (-99, f"ctypes exception: {e!r}")
 
 
+def _normalize_windows_path(image_path) -> str:
+    r"""把 tkinter/filedialog 混用的 //?/ 前缀 + 正斜杠路径统一成 Windows 惯用形式.
+
+    背景 (v0.4.34): tkinter filedialog 在长路径下会把返回值里的 \ 全部转成 /,
+    并且已经悄悄加了 \\?\ 前缀. 这样一路传到 _to_long_path 时:
+      - startswith("\\?\\") 判断失效 (实际是 //?/)
+      - 又叠一层 \\?\ 变双重前缀 -> FileNotFoundError
+    这里做的事:
+      1) 正斜杠全部换成反斜杠
+      2) 已带 \\?\ 前缀就保留 (不重复加)
+      3) 非 Windows 原样返回
+    """
+    s = str(image_path)
+    if os.name != "nt":
+        return s
+    if "/" in s:
+        s = s.replace("/", "\\")
+    while s.startswith("\\\\?\\\\\\?\\"):
+        s = s[4:]
+    return s
+
+
 def _long_path_prefix(p: str) -> str:
     r"""对映射盘符 / 本地盘直接套 \\?\, 对 UNC 套 \\?\UNC\."""
     if os.name != "nt":
         return p
+    p = _normalize_windows_path(p)
     if p.startswith("\\\\?\\") or p.startswith("\\?\\"):
         return p
     if p.startswith("\\\\"):
@@ -88,6 +111,8 @@ def _to_unc_full(p: str, unc_root: str) -> str:
 
 def run_diagnostics(img_path: str) -> str:
     """跑一遍所有诊断项, 返回一个纯文本报告 (完整可复制)."""
+    img_path_raw = img_path
+    img_path = _normalize_windows_path(img_path)
     lines: list[str] = []
     def w(s: str = "") -> None:
         lines.append(s)
@@ -121,7 +146,11 @@ def run_diagnostics(img_path: str) -> str:
     w("")
 
     # ---------- 基础信息 ----------
-    w(f"[输入路径] {img_path}")
+    if img_path_raw != img_path:
+        w(f"[原始路径] {img_path_raw}")
+        w(f"[规范路径] {img_path}   (已把 / -> \\ + 去重复 \\?\\)")
+    else:
+        w(f"[输入路径] {img_path}")
     w(f"[路径长度] {len(img_path)}")
     w("")
 

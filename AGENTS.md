@@ -179,6 +179,17 @@ git tag 打到 `v0.4.29` 时用户在堡垒机上截图 dedupe_gui 显示 `v0.3.
               `.NET File.OpenRead('\\?\UNC\filestor01...')` ERR (不可开) —— 就是这条结论.
 - **影响面**: `dedupe_pic.py` / `detector.py`
 - **兼容性**: 非映射盘 / 短路径 / Mac / Linux **零回归**; BytesIO 兜底路径只在 `Image.open` 失败才走.
+- **v0.4.34 反转再反转**: 用 diag_pic.exe 实测发现, tkinter `filedialog.askopenfilename()` 在
+  长路径下返回值形如 `//?/Z:/切帧结果/...`, **正斜杠 + 已带 `\?\` 前缀**. 我们代码里
+  `s.startswith("\\?\\")` 用反斜杠判断根本不匹配, 又叠一层 `\?\` → `\?\//?/Z:/...`
+  双重前缀 → FileNotFoundError. **真根因是路径归一化 bug, 跟映射盘/UNC/PIL 全无关**.
+- **v0.4.34 正确修法**: 新增 `_normalize_windows_path()` helper, 入口先做:
+    1) `/` 全换成 `\`
+    2) 折叠误加的 `\\?\\\?\` → `\\?\`
+  三处入口全套: `dedupe_pic._to_long_path` / `detector._to_long_path` /
+  `diag_pic._long_path_prefix` + `run_diagnostics`
+- **教训**: `\?\` 相关 helper 必须**先归一化再判断前缀**, 否则 startsWith 会被斜杠方向骗过.
+
 - **诊断日志样例**:
     ```
     [PIL诊断] path=Z:\...frame_000006.jpg len=204
