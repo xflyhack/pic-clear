@@ -161,15 +161,31 @@ git tag 打到 `v0.4.29` 时用户在堡垒机上截图 dedupe_gui 显示 `v0.3.
 - 影响面：`dedupe_pic.py` / `detector.py` / `embed_detector.py` / `pose_detector.py`
 - 本地/Mac 零回归：`os.name != 'nt'` 原样返回
 
-### 13. `\\?\` 前缀 + 映射盘符 (Z:) 组合互斥
-- 现象：D 盘长路径能删，Z 盘长路径 PIL 全部失败, `[扫描完成] 有效图片 0`
-- 场景：堡垒机把 SMB 共享挂载到 `Z:`, 用户 GUI 里选 `Z:\切帧结果\...`, 路径 >260 字符
-- 根因：`\\?\` 语义 = "跳过 DOS 设备解析器, 直通到 NT 命名空间"; 但映射盘符 `Z:` 不是真设备,
-       内核直通到 `Z:` 这个符号就断了. 官方规则: 映射盘符长路径必须先展开成 `\\?\UNC\server\share\...`
-- 修法：`_to_long_path` 内加 `_resolve_mapped_drive_to_unc()` helper, 走 `mpr!WNetGetConnectionW` 查一次,
-       结果按盘符缓存到进程内; 本地盘 (`D:`) / 已 UNC / 非 Windows 全部走原分支
-- 影响面：`dedupe_pic.py` / `detector.py` (v0.4.31)
-- 兼容性：非映射盘 / 短路径 / Mac / Linux **完全零回归**
+### 13. Windows 映射盘 (Z:) 长路径 + `\\?\` 前缀真相 (v0.4.32 修订)
+- **背景**: 堡垒机 Windows Server 2022 (build 20348) 上 Z: 挂 `\\filestor01...\kj-e68-datamark-100`,
+          `Z:\...` 路径 >200 字符时 PIL 全部打不开, 156 张图 `[扫描完成] 有效图片 0`.
+- **走过的弯路 (v0.4.31)**: 以为必须展开成 `\\?\UNC\server\share\...`, 结果堡垒机实测
+          `\\?\UNC\...` **反而打不开** (`Could not find a part of the path`), 而 `\\?\Z:\...`
+          却 **能打开**. 微软老文档说的 "映射盘必须展开 UNC" 在新版 Windows 上不成立.
+- **正确修法 (v0.4.32)**:
+    1. `_to_long_path` 不再走 UNC 展开分支, 保持 `\\?\Z:\...` 形式
+    2. 长度阈值 200 → 180 更保守
+    3. `_pil_open` 加 **BytesIO 兜底**: `Image.open(long_path)` 失败时改用
+       `Image.open(io.BytesIO(open(long_path,"rb").read()))`, 绕开 PIL 走 CRT `fopen` 对
+       `\\?\` 挑食的坑
+    4. 前 3 次失败在 stderr 打完整诊断 (原路径 / 长路径 / 异常类型 / WNetGetConnection 结果),
+       方便下次真机排查
+- **验证方法**: 堡垒机上 `.NET File.OpenRead('\\?\Z:\...')` OK size=180283 (可开),
+              `.NET File.OpenRead('\\?\UNC\filestor01...')` ERR (不可开) —— 就是这条结论.
+- **影响面**: `dedupe_pic.py` / `detector.py`
+- **兼容性**: 非映射盘 / 短路径 / Mac / Linux **零回归**; BytesIO 兜底路径只在 `Image.open` 失败才走.
+- **诊断日志样例**:
+    ```
+    [PIL诊断] path=Z:\...frame_000006.jpg len=204
+    [PIL诊断]   long_path=\\?\Z:\...frame_000006.jpg len=208
+    [PIL诊断]   Image.open ERR UnidentifiedImageError: ...
+    [PIL诊断]   BytesIO Image.open ERR ...  file bytes read OK, size=180283
+    ```
 
 ### 4. PyArmor trial 版对单次 `pyarmor gen` 有配额
 - 现象：CI 报 `ERROR out of license`，`dist_obf` 空目录，后续 copy 全失败

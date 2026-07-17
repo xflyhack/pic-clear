@@ -17,20 +17,16 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-# ----- Z:/映射盘符 → \\server\share 缓存 (Windows only) -----
+# ----- Z:/映射盘符 → \\server\share 缓存 (Windows only, 仅诊断用) -----
 _MAPPED_DRIVE_CACHE: dict[str, str | None] = {}
 
 
 def _resolve_mapped_drive_to_unc(drive_letter: str) -> str | None:
     r"""把 'Z:' 这样的映射盘符解析为底层 UNC (如 \\server\share).
 
+    - 保留仅供诊断日志展示 (堡垒机实测 \\?\UNC\... 反而打不开, 已不走展开分支)
     - 只在 Windows 上有效, 其他平台返回 None
     - 结果按盘符字母 (大写) 缓存到进程内, 反复调用零开销
-    - 非映射盘 / 本地盘 / 解析失败 -> 返回 None (调用方按原盘符处理)
-
-    背景: Win32 的 \\?\ 前缀要求路径是"已归一化的 NT 命名空间", 而映射盘符
-          在超过 MAX_PATH 时会绕过 DOS 设备解析层, 导致 \\?\Z:\... 直通失败.
-          正确写法是 \\?\UNC\server\share\..., 因此先展开一次.
     """
     if os.name != "nt":
         return None
@@ -67,15 +63,15 @@ def _resolve_mapped_drive_to_unc(drive_letter: str) -> str | None:
 
 
 def _to_long_path(image_path) -> str:
-    r"""Windows 上 >= 200 字符的绝对路径转成 \\?\ 前缀, 绕开 MAX_PATH=260 限制.
+    r"""Windows 上 >= 180 字符的绝对路径转成 \\?\ 前缀, 绕开 MAX_PATH=260 限制.
 
     - 非 Windows 原样返回, 保证 mac / Linux / 本地虚拟机零回归
     - 已带 \\?\ 或 \?\ 前缀原样返回, 不重复加
-    - 短于 200 字符原样返回 (PIL 观察在 200 附近就会开始翻车,
-      比 MAX_PATH=260 更保守, 换取更少的黑箱失败)
-    - UNC 路径 (\\server\share\...) 转成 \\?\UNC\server\share\...
-    - 映射盘符 (Z:\...) 先展开成 \\server\share\... 再套 \\?\UNC\ 前缀,
-      纯本地盘 (D:\...) 保持 \\?\D:\... 不变.
+    - 短于 180 字符原样返回 (堡垒机实测短 API 到 204 也 OK,
+      但 PIL/CRT 在 180 附近就有翻车迹象, 阈值再降 20 更保险)
+    - UNC 路径 (\\server\share\...) 直接转成 \\?\UNC\server\share\...
+    - 映射盘符 (Z:\...) 保留 \\?\Z:\... 形式 (堡垒机 Win Server 2022 实测 OK,
+      展开成 \\?\UNC\... 反而打不开)
     - 相对路径先用 os.path.abspath 转绝对路径再套前缀
     """
     s = str(image_path)
@@ -83,9 +79,8 @@ def _to_long_path(image_path) -> str:
         return s
     if s.startswith("\\\\?\\") or s.startswith("\\?\\"):
         return s
-    if len(s) < 200:
+    if len(s) < 180:
         return s
-    # UNC 已经是 \\server\share\... 就直接套前缀, 不走 abspath
     if s.startswith("\\\\"):
         return "\\\\?\\UNC\\" + s.lstrip("\\")
     try:
@@ -94,19 +89,76 @@ def _to_long_path(image_path) -> str:
         abs_s = s
     if abs_s.startswith("\\\\"):
         return "\\\\?\\UNC\\" + abs_s.lstrip("\\")
-    # 到这里 abs_s 形如 'X:\\...', 若 X: 是映射盘则展开成 UNC
-    if len(abs_s) >= 2 and abs_s[1] == ":":
-        unc_root = _resolve_mapped_drive_to_unc(abs_s[:2])
-        if unc_root:
-            rest = abs_s[2:].lstrip("\\")
-            unc_full = unc_root.rstrip("\\") + "\\" + rest
-            return "\\\\?\\UNC\\" + unc_full.lstrip("\\")
     return "\\\\?\\" + abs_s
 
 
+# ----- PIL 打开兜底 + 首次诊断 -----
+_PIL_DIAG_LEFT = 3   # 首次失败最多打印几条完整诊断日志
+_PIL_DIAG_LOCK_KEY = "_pil_diag_left"
+
+
+def _pil_diag(msg: str) -> None:
+    """把 PIL 长路径相关的诊断日志打到 stderr, 不污染 stdout 报告."""
+    try:
+        sys.stderr.write("[PIL诊断] " + msg + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 def _pil_open(image_path):
-    """PIL Image.open 的长路径安全版本, 与 dedupe_pic._pil_open 语义一致."""
-    return Image.open(_to_long_path(image_path))
+    r"""PIL Image.open 的长路径安全版本. 调用方仍需自行 close / with.
+
+    策略 (堡垒机 v0.4.32 起):
+      1) 先按 _to_long_path 结果调 Image.open (短路径 / \\?\Z:\... 直通)
+      2) 失败再兜底: 用 Python builtin open('rb') 把整个文件读到 BytesIO 后 Image.open,
+         这样绕开 PIL 走 CRT fopen 对 \\?\ 挑食的坑
+      3) 前 N 次失败在 stderr 打一条诊断: 原路径 / 加前缀路径 / 异常类型和消息 /
+         如果是映射盘还打一次 WNetGetConnectionW 展开后的 UNC 供后续排查
+    """
+    long_path = _to_long_path(image_path)
+    try:
+        return Image.open(long_path)
+    except Exception as e1:
+        global _PIL_DIAG_LEFT
+        original = str(image_path)
+        # 兜底: 二进制预读 -> BytesIO
+        try:
+            with open(long_path, "rb") as f:
+                data = f.read()
+        except Exception as e2:
+            if _PIL_DIAG_LEFT > 0:
+                _PIL_DIAG_LEFT -= 1
+                _pil_diag(f"path={original} len={len(original)}")
+                _pil_diag(f"  long_path={long_path} len={len(long_path)}")
+                _pil_diag(f"  Image.open ERR {type(e1).__name__}: {e1}")
+                _pil_diag(f"  open('rb') ERR {type(e2).__name__}: {e2}")
+                # 追加映射盘 UNC 信息供人工排查, 不参与打开
+                if os.name == "nt" and len(original) >= 2 and original[1] == ":":
+                    unc = _resolve_mapped_drive_to_unc(original[:2])
+                    _pil_diag(f"  WNetGetConnection({original[:2]}) = {unc!r}")
+            raise
+        # BytesIO 二次尝试
+        try:
+            import io
+            bio = io.BytesIO(data)
+            img = Image.open(bio)
+            if _PIL_DIAG_LEFT > 0:
+                _PIL_DIAG_LEFT -= 1
+                _pil_diag(f"path={original} len={len(original)} "
+                          f"-> Image.open 失败, BytesIO 兜底 OK bytes={len(data)}")
+                _pil_diag(f"  first-error Image.open {type(e1).__name__}: {e1}")
+            return img
+        except Exception as e3:
+            if _PIL_DIAG_LEFT > 0:
+                _PIL_DIAG_LEFT -= 1
+                _pil_diag(f"path={original} len={len(original)}")
+                _pil_diag(f"  long_path={long_path} len={len(long_path)}")
+                _pil_diag(f"  Image.open ERR {type(e1).__name__}: {e1}")
+                _pil_diag(f"  BytesIO Image.open ERR {type(e3).__name__}: {e3}")
+                _pil_diag(f"  file bytes read OK, size={len(data)}")
+            raise
+
 
 # COCO 80 类
 COCO_NAMES = [
