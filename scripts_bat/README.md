@@ -1,10 +1,9 @@
 # 自动化 bat 脚本
 
 > **给开发/AI 助手**：新写 bat 之前先看 [`../docs/bat_conventions.md`](../docs/bat_conventions.md)，
-> 里面记录了 UTF-8 BOM + CRLF + 双 `@echo off` 等踩坑约定。
+> 里面记录了 UTF-8 无 BOM + CRLF + chcp 自检等踩坑约定。
 
-
-给堡垒机 Windows 用的一键脚本。把两个 exe 放到系统 PATH（推荐 `C:\Windows\System32`），bat 自动定位 `Z:\sjbz_*` 源目录，让你**挑选要处理的子目录**，把结果写到 `Z:\切帧结果\` 下、层级完全对齐。
+给堡垒机 Windows / 本地机器用的交互式脚本。把 exe 和 bat 放到同一目录（或 exe 在 PATH 里），双击 bat 后**当场用拖拽/输入的方式指定源目录和输出根**，无需绑死盘符。
 
 > 想要**后台运行 + 关窗口不中断 + 集中日志**？请看 `docs/pipeline_exe.md`（`pipeline.exe`）。
 > 本目录下的 bat 保留，用于**前台交互 + 逐个 Y/N 确认删除**的场景。
@@ -23,6 +22,8 @@
    - `step2_dedupe.bat` —— 只去重
 3. 建议永久关闭 cmd 的"快速编辑模式"：
    右键 cmd 窗口标题栏 → 属性 → 编辑选项 → 取消勾选 **快速编辑模式**。
+4. 如果双击后立即看到英文 `[FATAL] chcp 65001 did not take effect`：
+   本机 cmd 不认 UTF-8，改用 `extract_gui.exe` 即可（GUI 不走 cmd）。
 
 ## 只想看运行状态？
 
@@ -30,7 +31,7 @@
 - 每 5 秒刷新一次，展示 `pipeline.exe` / `extract_frames.exe` / `dedupe_pic.exe` 的进程状态（PID、内存）
 - 顺带展示 `Z:\切帧结果\.pipeline\jobs\` 下**最新一个任务**的进度（job_id、state、done/total、last_message）
 - 只读，**不做任何操作**；`Ctrl+C` 退出
-- 若 `OUT_ROOT` 不是默认 `Z:\切帧结果`，请打开 bat 改顶部的 `set "OUT_ROOT=..."`
+- 若你的默认输出根不是 `Z:\切帧结果`，打开 bat 改顶部的 `set "OUT_ROOT=..."`
 
 ## 想隐藏 marker + csv 文件（不污染业务目录）
 
@@ -43,10 +44,18 @@
 
 ## 使用流程
 
-双击任一 bat：
-1. 自动定位 `sjbz_*` 根目录（多个则列表选一个）
-2. 列出根目录下一级子目录，你选：`1,2` / `1-3` / `all`
-3. 依次处理已选子目录，输出目录 = `%OUT_ROOT%\<sjbz>\<子目录>`
+双击 `run_all.bat` / `step1_extract.bat`：
+
+1. **chcp 自检**：脚本先校验 `chcp 65001` 是否真的生效，不生效直接英文报错退出（避免虚拟机上乱码连环崩，见"常见问题"）
+2. **命名规则**：`N` = 新版 `video1 - 副本_0001.jpg` / `O` = 老版 `frame_000001.jpg`（详见下文）
+3. **源目录**：把源视频目录**拖到窗口里**（或粘贴绝对路径）+ 回车。可以是任意盘符，不再要求 `Z:\sjbz_*`
+4. **输出根**：
+   - 直接回车 = 用 bat 顶部的默认 `OUT_ROOT`（默认 `Z:\切帧结果`）
+   - 输入新路径 = 覆盖默认；此时 `MARKERS_ROOT` 自动跟到 `<新OUT>\.markers`，不用二次输入
+5. **子目录多选**：列出源目录下一级子目录，你选：`1,2` / `1-3` / `all`
+6. 依次处理，输出目录 = `<OUT_ROOT>\<源目录名>\<子目录>`
+
+`run_all.bat` 额外会问：**是否启用 `dedupe_watcher` 后台并行去重**、**是否启用场景保护**；`step1_extract.bat` 只跑抽帧，问完命名规则和路径就直接干活。
 
 ## 图片命名规则（新版 / 老版）
 
@@ -110,29 +119,37 @@
 - 上次软删的图片已经在 `_trash_` 里，下次扫不到，不会重复处理
 - **随便重跑几次都没关系**（dry-run 更是想跑就跑）
 
-## 需要改盘符 / 目录前缀 / 输出根 / 标记根？
+## 需要改默认输出根 / 标记根？
 
-改 bat 开头几行：
+源目录和输出根都在运行时交互输入，**不用改 bat 也能用**。只有想改"回车时的默认值"才动这几行：
+
 ```bat
-set "DATA_DRIVE=Z:"
-set "OUT_ROOT=%DATA_DRIVE%\切帧结果"
-set "MARKERS_ROOT=%DATA_DRIVE%\切帧标记"
-set "DATA_PREFIX=sjbz_"
+set "OUT_ROOT=Z:\切帧结果"
+set "MARKERS_ROOT=Z:\切帧标记"
 ```
 
-`MARKERS_ROOT` 是 `extract_frames.exe` `--markers-root` 的目标：
-抽帧锁（`_extract.lock`）和完成标记（`_done.marker`）都集中放这里，
-按 `<sjbz>\<子目录>\<视频名>` 建镜像层级。
-**多机共享盘一定要所有机器指向同一位置**，否则抢不到锁、会同时抽同一个视频。
+说明：
+
+- **`OUT_ROOT`**：用户直接回车时使用的输出根；抬头会打印 `默认输出根: ...` 提示
+- **`MARKERS_ROOT`**：`extract_frames.exe --markers-root` 的目标目录。抽帧锁（`_extract.lock`）和完成标记（`_done.marker`）集中放这里，按 `<源目录名>\<子目录>\<视频名>` 建镜像层级
+- **用户在 Step A2 覆盖了 `OUT_ROOT`** 时，`MARKERS_ROOT` **不再是这个默认值**，而是自动落到 `<新OUT_ROOT>\.markers`。这样多机共享盘只要输出根一致，markers 天然对齐
+- **多机共享盘**：所有机器要用同一个输出根，否则 `_extract.lock` 抢不到，多机会同时抽同一个视频
+
+> `DATA_DRIVE` / `DATA_PREFIX` 这两个变量已经**在 2026-07-17 的重构里删掉**——脚本不再自动搜 `Z:\sjbz_*`，一律由用户当场输入源目录。
 
 ## 常见问题
 
+- **报错 `[FATAL] chcp 65001 did not take effect`**：本机 cmd 不认 UTF-8，脚本自检拦下来了。三选一：
+  1. 在 cmd 里手动 `chcp 65001` 后再双击 bat
+  2. 改用 `extract_gui.exe`（GUI 不受代码页影响）
+  3. 让运维打开系统"区域 → 管理 → Beta: 使用 UTF-8 提供全球语言支持"，重启后再跑
+- **报错 `'放到数据盘同级。' is not recognized as ...`** 之类的中文乱行报错：跟上一条同因；如果自检没拦住说明脚本里还有全角标点或"疑难中文字节"，把该行改英文即可
 - **窗口卡住不动**：cmd 快速编辑模式，按一下 Enter / Esc 恢复；或永久关闭（见前置准备）
 - **提示"找不到 exe"**：exe 不在 PATH。放 `C:\Windows\System32` 或改 bat 里为绝对路径
 - **license.lic 报错**：license 必须和 exe 同目录
 - **改抽帧参数**：改 bat 里 `extract_frames.exe ... --fps 1 --ext .h265`
 - **改命名规则**：见上文"图片命名规则"小节；不想每次弹 choice 就改 `NAME_ARGS`
-- **改标记根**：改 bat 顶部 `set "MARKERS_ROOT=..."`
+- **改标记根**：改 bat 顶部 `set "MARKERS_ROOT=..."`；或者直接在 Step A2 输入新 `OUT_ROOT`，markers 会自动跟到 `<新OUT>\.markers`
 - **改相似阈值**：改 `--threshold 3`，值越小越严格
 
 ## 边抽边删（dedupe_watcher）
