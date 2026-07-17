@@ -44,6 +44,7 @@ REM    /once            run one pass and exit (default: loop forever)
 REM    /markers-root D  scan this dir for _done.marker (multi-machine mode)
 REM                     dedup targets the mirror location under /out-root
 REM    /out-root D      image root that mirrors /markers-root (required with it)
+REM    /stats-root D    export daily stats CSV to <D>\yyyyMMdd\... (default Z:\data_source)
 REM ============================================================
 
 set "WATCH_ROOT="
@@ -55,6 +56,7 @@ set "SCENE_ARG="
 set "RUN_ONCE=0"
 set "MARKERS_ROOT="
 set "OUT_ROOT_ARG="
+set "STATS_ROOT="
 REM LOCK_TTL: stale-lock TTL in seconds (multi-machine dedupe).
 REM   Must match run_all / dedupe_gui defaults or the two won't coordinate.
 set "LOCK_TTL=900"
@@ -79,6 +81,8 @@ if /I "%~1"=="/markers-root"   ( set "MARKERS_ROOT=%~2" & shift & shift & goto :
 if /I "%~1"=="--markers-root"  ( set "MARKERS_ROOT=%~2" & shift & shift & goto :PARSE_ARGS )
 if /I "%~1"=="/out-root"       ( set "OUT_ROOT_ARG=%~2" & shift & shift & goto :PARSE_ARGS )
 if /I "%~1"=="--out-root"      ( set "OUT_ROOT_ARG=%~2" & shift & shift & goto :PARSE_ARGS )
+if /I "%~1"=="/stats-root"     ( set "STATS_ROOT=%~2" & shift & shift & goto :PARSE_ARGS )
+if /I "%~1"=="--stats-root"    ( set "STATS_ROOT=%~2" & shift & shift & goto :PARSE_ARGS )
 if not defined WATCH_ROOT set "WATCH_ROOT=%~1"
 shift
 goto :PARSE_ARGS
@@ -133,6 +137,7 @@ call :LOG_INFO "监听根目录 : %WATCH_ROOT%"
 call :LOG_INFO "扫描根     : %SCAN_ROOT%"
 call :LOG_INFO "图片根     : %IMG_ROOT%"
 if "%SPLIT_MODE%"=="1" call :LOG_INFO "分离模式   : marker 与图片不在同一目录树"
+if defined STATS_ROOT call :LOG_INFO "统计根     : %STATS_ROOT%"
 call :LOG_INFO "模式       : %APPLY_TXT%"
 call :LOG_INFO "阈值       : %THRESHOLD%"
 call :LOG_INFO "扫描间隔   : %INTERVAL% 秒"

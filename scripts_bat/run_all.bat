@@ -274,8 +274,11 @@ set "USE_WATCHER=1"
 
 set "WATCH_TARGET=%OUT_ROOT%\%SRC_ROOT_NAME%"
 set "WATCH_MARKERS=%MARKERS_ROOT%\%SRC_ROOT_NAME%"
+REM stats 与 markers 同盘, 让不同人共用一个 out_root 时也能各自累计
+set "WATCH_STATS=%OUT_ROOT%\.stats"
 if not exist "!WATCH_TARGET!" mkdir "!WATCH_TARGET!" 2>nul
 if not exist "!WATCH_MARKERS!" mkdir "!WATCH_MARKERS!" 2>nul
+if not exist "!WATCH_STATS!" mkdir "!WATCH_STATS!" 2>nul
 
 set "WATCHER_BAT=%~dp0dedupe_watcher.bat"
 if not exist "!WATCHER_BAT!" (
@@ -295,9 +298,10 @@ if not exist "!WATCHER_BAT!" (
 call :LOG_INFO "启动后台窗口 : !WATCHER_BAT!"
 call :LOG_INFO "监听目录     : !WATCH_TARGET!"
 call :LOG_INFO "marker 扫描  : !WATCH_MARKERS!"
+call :LOG_INFO "统计输出     : !WATCH_STATS!"
 set "WATCH_SCENE="
 if defined SCENE_FLAG set "WATCH_SCENE=/scene"
-start "dedupe_watcher" cmd /k ""!WATCHER_BAT!" "!WATCH_TARGET!" /apply /motion %MOTION_THRESHOLD% !WATCH_SCENE! /markers-root "!WATCH_MARKERS!" /out-root "!WATCH_TARGET!""
+start "dedupe_watcher" cmd /k ""!WATCHER_BAT!" "!WATCH_TARGET!" /apply /motion %MOTION_THRESHOLD% !WATCH_SCENE! /markers-root "!WATCH_MARKERS!" /out-root "!WATCH_TARGET!" /stats-root "!WATCH_STATS!""
 call :LOG_INFO "监听窗口已弹出 (真删模式,重复图会被永久删除,不落回收站)"
 call :LOG_INFO "如需 dry-run 观察,可另开: dedupe_watcher.bat \"!WATCH_TARGET!\""
 echo.

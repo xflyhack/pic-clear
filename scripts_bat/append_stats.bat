@@ -57,7 +57,8 @@ if not exist "%REPORT%" (
 )
 
 REM ---- 统计输出路径 ----
-set "STATS_ROOT=Z:\data_source"
+REM STATS_ROOT 优先取环境变量, 让 watcher/run_all 传进来, 兼容多盘符.
+if not defined STATS_ROOT set "STATS_ROOT=Z:\data_source"
 REM 关键:%DATE% 在中文 Windows 上可能包含"周一/星期日"这样的前缀,
 REM tokens 拆分会把星期名当成 YYYY,最终生成"周一0714"这种错目录.
 REM 用 PowerShell 拿日期,绕开 %DATE% 陷阱,输出永远是 8 位 yyyyMMdd.
@@ -70,7 +71,17 @@ set "STATS_DIR=%STATS_ROOT%\%TODAY%"
 set "STATS_CSV=%STATS_DIR%\machine_id_%COMPUTERNAME%.csv"
 
 if not exist "%STATS_ROOT%\" mkdir "%STATS_ROOT%" 2>nul
+if not exist "%STATS_ROOT%\" (
+    >&2 echo [append_stats] ERROR: 统计根目录不可写, 请设置环境变量 STATS_ROOT 到可写位置, 当前: %STATS_ROOT%
+    echo -1
+    endlocal ^& exit /b 4
+)
 if not exist "%STATS_DIR%\"  mkdir "%STATS_DIR%"  2>nul
+if not exist "%STATS_DIR%\" (
+    >&2 echo [append_stats] ERROR: 无法创建当日目录 %STATS_DIR%
+    echo -1
+    endlocal ^& exit /b 4
+)
 
 REM 第一次写入时写表头
 if not exist "%STATS_CSV%" (
@@ -111,6 +122,11 @@ set "TS=!TS_RAW:T= !"
 REM ---- 追加一行 ----
 REM abs_path 里可能有逗号或空格,用双引号包起来
 >> "%STATS_CSV%" echo %FOLDER_NAME%,%TOTAL%,%DELETED%,%REMAIN%,"%TARGET_DIR%",%TS%
+if not exist "%STATS_CSV%" (
+    >&2 echo [append_stats] ERROR: 写不进统计 CSV: %STATS_CSV%
+    echo -1
+    endlocal ^& exit /b 5
+)
 
 REM ---- 计算当日累计 remain ----
 REM 跳过表头行;第 4 列是 remain
