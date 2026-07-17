@@ -469,7 +469,7 @@ def build_index(
     total: int | None = None,
     progress_interval: float = 5.0,
     enable_scene: bool = False,
-) -> tuple[list[Item], list[Path]]:
+) -> tuple[list[Item], list[Path], list[Path]]:
     """扫描 root 下所有匹配图片，计算 dHash；如果提供了 detector，
     还会跑目标检测并在 Item 上打上 is_protected 标记。
 
@@ -480,7 +480,9 @@ def build_index(
         --no-protect 模式下若开启此项，则对所有图都做一次场景分析。
     """
     items: list[Item] = []
-    failed: list[Path] = []
+    stat_failed: list[Path] = []
+    hash_failed: list[Path] = []
+    _first_open_fail_left = 5  # 前 5 张打开失败打到 stderr, 之后只累计
     count = 0
     current_dir: str | None = None
     protect_hits = 0
@@ -510,13 +512,29 @@ def build_index(
         count += 1
         try:
             st = p.stat()
-        except OSError:
-            failed.append(p)
+        except OSError as _e_stat:
+            stat_failed.append(p)
+            if _first_open_fail_left > 0:
+                _first_open_fail_left -= 1
+                import sys as _sys
+                _sys.stderr.write(
+                    f"[打开失败-stat] {p} len={len(str(p))} "
+                    f"err={type(_e_stat).__name__}: {_e_stat}\n"
+                )
+                _sys.stderr.flush()
             reporter.update(count)
             continue
         h = dhash(p)
         if h is None:
-            failed.append(p)
+            hash_failed.append(p)
+            if _first_open_fail_left > 0:
+                _first_open_fail_left -= 1
+                import sys as _sys
+                _sys.stderr.write(
+                    f"[打开失败-hash] {p} len={len(str(p))} "
+                    f"(_pil_open 已在 stderr 打了 [PIL诊断])\n"
+                )
+                _sys.stderr.flush()
             reporter.update(count)
             continue
 
@@ -585,7 +603,7 @@ def build_index(
     if _analyze_scene is not None:
         final_parts.append(f"场景 {scene_hits}")
     reporter.finish(extra="  ".join(final_parts))
-    return items, failed
+    return items, stat_failed, hash_failed
 
 
 # ------------------------- 近似聚类 ----------------------------------------
@@ -1148,16 +1166,20 @@ def _run_dedupe(args: argparse.Namespace) -> int:
         return 0
 
     t0 = time.time()
-    items, failed = build_index(
+    items, _stat_failed, _hash_failed = build_index(
         args.root, extensions,
         detector=detector, protect_classes=protect_set,
         total=total,
         enable_scene=args.scene_protect,
     )
+    _n_open = len(_stat_failed) + len(_hash_failed)
     print(
-        f"[扫描完成] 有效图片 {len(items)}，失败/跳过 {len(failed)}，"
+        f"[扫描完成] 有效图片 {len(items)}，"
+        f"打开失败 {_n_open} (stat={len(_stat_failed)}, hash/PIL={len(_hash_failed)})，"
         f"耗时 {_fmt_eta(time.time() - t0)}"
     )
+    # 合并"打开失败"两类, 供 write_report / --failed-report 使用 (兼容老字段名)
+    failed = _stat_failed + _hash_failed
 
     if detector is not None and items:
         m = mark_motion_changes(items, motion_threshold=args.motion_threshold)
