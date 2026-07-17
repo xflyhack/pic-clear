@@ -774,11 +774,12 @@ class DedupeGUI:
                     rel = d.relative_to(src_root)
                 except Exception:
                     rel = Path(d.name)
-                # v0.4.40: 前缀 = src_root 相对盘根的整段, 不再只取 src_root.name
-                # 这样 target 深浅无关, marker 目录永远等于 markers_root + <盘根往下的完整路径>
-                src_prefix = _rel_from_drive_root(src_root)
-                base = markers_root if str(src_prefix) == "." else markers_root / src_prefix
-                marker_dir = base if str(rel) == "." else base / rel
+                # v0.4.41: marker_dir = markers_root / rel(target, src_root)
+                # 不再拼 src_root 那段, 例:
+                #   markers_root=Z:\\任务节点, src_root=Z:\\切帧结果
+                #   target=Z:\\切帧结果\\sjbz_.../camera07
+                #   marker_dir=Z:\\任务节点\\sjbz_.../camera07
+                marker_dir = markers_root if str(rel) == "." else markers_root / rel
             else:
                 try:
                     rel = d.relative_to(target_p)
