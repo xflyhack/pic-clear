@@ -48,6 +48,37 @@
 2. 列出根目录下一级子目录，你选：`1,2` / `1-3` / `all`
 3. 依次处理已选子目录，输出目录 = `%OUT_ROOT%\<sjbz>\<子目录>`
 
+## 图片命名规则（新版 / 老版）
+
+`run_all.bat` / `step1_extract.bat` 启动后会先让你选一次命名规则：
+
+```
+[INFO ] 图片命名规则：
+[INFO ]   N = 新版  video1 - 副本_0001.jpg  (parent + 4 位补零，推荐)
+[INFO ]   O = 老版  frame_000001.jpg        (legacy + 6 位补零，兼容历史)
+请选择命名规则 (N=新版 / O=老版) [N,O]?
+```
+
+- **`N` 新版**（默认，直接回车即选中）：图片名 = `<视频同名文件夹> - 副本_<4 位序号>.jpg`，
+  跟 `extract_gui.exe` 默认一致，是我们现在主推的命名。
+- **`O` 老版**：图片名 = `frame_<6 位序号>.jpg`，跟历史数据保持一致。
+
+对应 `extract_frames.exe` 参数：
+
+| bat 选项 | 传给 exe 的参数 | 示例文件名 |
+|---|---|---|
+| `N` | `--name-style parent --name-digits 4` | `video1 - 副本_0009.jpg` |
+| `O` | `--name-style legacy --name-digits 6` | `frame_000009.jpg` |
+
+> **不想每次交互选**：把 bat 里 `set "NAME_ARGS=..."` 那两行改成你要的固定值，
+> 把 `choice /C NO` 那段用 `REM` 注释掉即可。
+>
+> **想用 GUI 里那种自定义模板**（比如 `{parent}_snap_{seq}`）：bat 不支持，
+> 请改用 `extract_gui.exe`；bat 的定位是"稳定/少交互"，只保留两个预设。
+>
+> ⚠ 切换命名规则后想重抽已完成的目录，需要**手工加** `--no-skip-existing`
+> （bat 目前没暴露该 flag，直接改 bat 里 `extract_frames.exe` 那一行）。
+
 ## 进度提示
 
 - 每次调 exe 之前，bat 会打一行 `[HH:mm:ss] START extract_frames.exe ...`，方便看进度
@@ -79,14 +110,20 @@
 - 上次软删的图片已经在 `_trash_` 里，下次扫不到，不会重复处理
 - **随便重跑几次都没关系**（dry-run 更是想跑就跑）
 
-## 需要改盘符 / 目录前缀 / 输出根？
+## 需要改盘符 / 目录前缀 / 输出根 / 标记根？
 
-改 bat 开头三行：
+改 bat 开头几行：
 ```bat
 set "DATA_DRIVE=Z:"
 set "OUT_ROOT=%DATA_DRIVE%\切帧结果"
+set "MARKERS_ROOT=%DATA_DRIVE%\切帧标记"
 set "DATA_PREFIX=sjbz_"
 ```
+
+`MARKERS_ROOT` 是 `extract_frames.exe` `--markers-root` 的目标：
+抽帧锁（`_extract.lock`）和完成标记（`_done.marker`）都集中放这里，
+按 `<sjbz>\<子目录>\<视频名>` 建镜像层级。
+**多机共享盘一定要所有机器指向同一位置**，否则抢不到锁、会同时抽同一个视频。
 
 ## 常见问题
 
@@ -94,6 +131,8 @@ set "DATA_PREFIX=sjbz_"
 - **提示"找不到 exe"**：exe 不在 PATH。放 `C:\Windows\System32` 或改 bat 里为绝对路径
 - **license.lic 报错**：license 必须和 exe 同目录
 - **改抽帧参数**：改 bat 里 `extract_frames.exe ... --fps 1 --ext .h265`
+- **改命名规则**：见上文"图片命名规则"小节；不想每次弹 choice 就改 `NAME_ARGS`
+- **改标记根**：改 bat 顶部 `set "MARKERS_ROOT=..."`
 - **改相似阈值**：改 `--threshold 3`，值越小越严格
 
 ## 边抽边删（dedupe_watcher）
