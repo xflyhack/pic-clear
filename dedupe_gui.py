@@ -89,13 +89,40 @@ def _find_dedupe_exe() -> str | None:
 
 # ---------- 图片目录扫描 ----------
 
-def _to_long_path(path_str: str) -> str:
-    r"""Windows 上 >= 200 字符的绝对路径转成 \\?\ 前缀, 绕开 MAX_PATH=260."""
+def _normalize_windows_path(path_str) -> str:
+    r"""把 tkinter/filedialog 返回值 (混合斜杠 + 悄悄加的 //?/ 前缀) 归一化.
+
+    v0.4.36: dedupe_gui 的 GUI 变量 (target / markers_root) 从
+    filedialog / 手工输入 / json 反读进来时形式不定, 可能是:
+      - Z:\...        (标准反斜杠)
+      - Z:/...         (正斜杠, 用户或 tkinter 转的)
+      - //?/Z:/...     (tkinter filedialog 对长路径悄悄加前缀 + 正斜杠)
+      - \\?\Z:\... (已带前缀)
+    如果不统一, Path("Z:/a/b").relative_to(Path("Z:\a")) 会抛 ValueError,
+    导致 marker_dir 只取 rel=d.name (叶子名), 不同祖先重名互相覆盖,
+    断线续跑失效, 重复清理.
+    """
+    s = str(path_str)
     if os.name != "nt":
-        return path_str
+        return s
+    if "/" in s:
+        s = s.replace("/", "\\")
+    while s.startswith("\\\\?\\\\\\?\\"):
+        s = s[4:]
+    return s
+
+
+def _to_long_path(path_str: str) -> str:
+    r"""Windows 上 >= 180 字符的绝对路径转成 \\?\ 前缀, 绕开 MAX_PATH=260.
+
+    v0.4.36: 入口先走 _normalize_windows_path 修 tkinter //?/ 混斜杠坑.
+    """
+    if os.name != "nt":
+        return str(path_str)
+    path_str = _normalize_windows_path(path_str)
     if path_str.startswith("\\\\?\\") or path_str.startswith("\\?\\"):
         return path_str
-    if len(path_str) < 200:
+    if len(path_str) < 180:
         return path_str
     if path_str.startswith("\\\\"):
         return "\\\\?\\UNC\\" + path_str.lstrip("\\")
@@ -574,6 +601,8 @@ class DedupeGUI:
             messagebox.showinfo("正在运行", "已经有任务在跑，请先停止或等待完成。")
             return
         target = self._target_var.get().strip()
+        # v0.4.36 归一化: tkinter/手输可能是 Z:/... 或 //?/Z:/..., 全部转 Windows 惯用形式
+        target = _normalize_windows_path(target)
         if not target or not Path(target).is_dir():
             messagebox.showerror("参数错误", f"目标目录无效：{target}"); return
 
@@ -584,7 +613,7 @@ class DedupeGUI:
                 "未找到 dedupe_pic.exe，请放到本 GUI 同目录或 System32 后重试。")
             return
 
-        target_p = Path(target)
+        target_p = Path(target)  # target 已在上面归一化
         mode = self._mode_var.get()
         dirs = _find_dedupe_targets(target_p, mode, logger=self._log)
         if not dirs:
@@ -598,6 +627,7 @@ class DedupeGUI:
             messagebox.showerror("配置缺失",
                                  "请先设置『Marker 根』目录。多机共享盘时所有机器应指向同一位置。")
             return
+        mr = _normalize_windows_path(mr)   # v0.4.36 同 target
         markers_root = Path(mr)
         try:
             markers_root.mkdir(parents=True, exist_ok=True)
@@ -614,11 +644,22 @@ class DedupeGUI:
                 rel = Path(d.name)
             marker_dir = markers_root / rel if str(rel) != "." else markers_root
             pairs.append((d, marker_dir))
+        # v0.4.36 诊断: 打前 3 对 + 关键路径, 便于排查 marker 位置错的 bug
+        self._log(f"[诊断] target_p = {target_p}")
+        self._log(f"[诊断] markers_root = {markers_root}")
+        for i, (d, md) in enumerate(pairs[:3]):
+            marker_file = md / DEDUP_DONE_MARKER
+            exists = _is_regular_file(str(marker_file))
+            self._log(f"[诊断] pair[{i}] target={d}")
+            self._log(f"[诊断]         marker_dir={md}")
+            self._log(f"[诊断]         marker_file={marker_file}  exists={exists}")
+        if len(pairs) > 3:
+            self._log(f"[诊断] ... 共 {len(pairs)} 对, 只显示前 3 对")
 
         # 过滤已完成 marker（除非强制重跑）
         if not self._force_rerun_var.get():
-            skipped = [(d, md) for d, md in pairs if (md / DEDUP_DONE_MARKER).exists()]
-            pairs = [(d, md) for d, md in pairs if not (md / DEDUP_DONE_MARKER).exists()]
+            skipped = [(d, md) for d, md in pairs if _is_regular_file(str(md / DEDUP_DONE_MARKER))]
+            pairs = [(d, md) for d, md in pairs if not _is_regular_file(str(md / DEDUP_DONE_MARKER))]
             if skipped:
                 self._log(f"[跳过] {len(skipped)} 个目录已有 {DEDUP_DONE_MARKER}，"
                           "如需强制重跑请勾选左下选项")
