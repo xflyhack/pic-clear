@@ -41,7 +41,7 @@ import pipeline  # noqa: E402
 
 
 APP_TITLE = "pic-clear 抽帧工具"
-APP_VERSION = "v0.3.0"
+APP_VERSION = "v0.3.1"
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "extract_gui.json"
 HOTKEY_DEFAULT = "ctrl+alt+e"
@@ -152,13 +152,19 @@ class ExtractGUI:
         saved_geo = self._cfg.get("window_geometry")
         if saved_geo:
             saved_geo = _pg._sanitize_saved_geometry(self.root, saved_geo)
+        # extract_gui 主页内容较多，额外要求高度 >= 560, 否则回退默认
+        # 避免历史保存的过矮窗口导致底部"开始抽帧"按钮被挤出可视区
+        if saved_geo:
+            parsed = _pg._parse_geometry_str(saved_geo)
+            if parsed and parsed[1] < int(560 * self._ui_scale):
+                saved_geo = None
         if saved_geo:
             self.root.geometry(saved_geo)
         else:
             self.root.geometry(_pg._compute_default_geometry(
                 self.root, self._ui_scale,
-                base_w=760, base_h=620, min_w=680, min_h=500))
-        self.root.minsize(int(680 * self._ui_scale), int(500 * self._ui_scale))
+                base_w=760, base_h=620, min_w=680, min_h=560))
+        self.root.minsize(int(680 * self._ui_scale), int(560 * self._ui_scale))
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         try:
@@ -215,8 +221,23 @@ class ExtractGUI:
 
     def _build_ui(self):
         _pg.apply_tab_style(self.root)
+
+        # 底部按钮条：必须先 pack(side="bottom") 占位，
+        # 否则窗口太矮时会被上方 expand=True 的 Notebook 挤到窗口外看不见。
+        bar = ttk.Frame(self.root)
+        bar.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
+        self._run_btn = ttk.Button(bar, text="▶ 开始抽帧", command=self._on_run)
+        self._run_btn.pack(side="left")
+        self._stop_btn = ttk.Button(bar, text="■ 停止", command=self._on_stop,
+                                    state="disabled")
+        self._stop_btn.pack(side="left", padx=6)
+        ttk.Button(bar, text="最小化到托盘",
+                   command=self.hide_to_tray).pack(side="left", padx=6)
+        ttk.Button(bar, text="退出", command=self.quit_all).pack(side="right")
+
+        # Notebook 放在按钮条上方，吃掉剩余空间
         nb = ttk.Notebook(self.root)
-        nb.pack(fill="both", expand=True, padx=8, pady=6)
+        nb.pack(side="top", fill="both", expand=True, padx=8, pady=6)
 
         # 主页 tab
         page = ttk.Frame(nb)
@@ -227,18 +248,6 @@ class ExtractGUI:
         about = ttk.Frame(nb)
         nb.add(about, text="关于")
         self._build_about_tab(about)
-
-        # 底部按钮条
-        bar = ttk.Frame(self.root)
-        bar.pack(fill="x", padx=8, pady=(0, 8))
-        self._run_btn = ttk.Button(bar, text="▶ 开始抽帧", command=self._on_run)
-        self._run_btn.pack(side="left")
-        self._stop_btn = ttk.Button(bar, text="■ 停止", command=self._on_stop,
-                                    state="disabled")
-        self._stop_btn.pack(side="left", padx=6)
-        ttk.Button(bar, text="最小化到托盘",
-                   command=self.hide_to_tray).pack(side="left", padx=6)
-        ttk.Button(bar, text="退出", command=self.quit_all).pack(side="right")
 
     def _build_main_tab(self, page: ttk.Frame):
         pad = {"padx": 6, "pady": 4}
