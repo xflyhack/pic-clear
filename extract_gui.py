@@ -41,7 +41,13 @@ import pipeline  # noqa: E402
 
 
 APP_TITLE = "pic-clear 抽帧工具"
-APP_VERSION = "v0.3.1"
+# 版本号: CI 会在打包前覆盖 _version.py 里的 VERSION 成 tag 名 (如 v0.4.30);
+# 本地跑 py 时 fallback 到 'dev', 找不到 _version.py 也能启动.
+try:
+    from _version import VERSION as _V
+except Exception:
+    _V = 'dev'
+APP_VERSION = _V
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "extract_gui.json"
 HOTKEY_DEFAULT = "ctrl+alt+e"

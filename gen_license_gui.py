@@ -15,7 +15,13 @@ gen_license_gui.py —— license.lic 签发工具（GUI 版）
 from __future__ import annotations
 
 # ---- 版本 / 版权 ----
-APP_VERSION = "v0.1.10"
+# 版本号: CI 会在打包前覆盖 _version.py 里的 VERSION 成 tag 名 (如 v0.4.30);
+# 本地跑 py 时 fallback 到 'dev', 找不到 _version.py 也能启动.
+try:
+    from _version import VERSION as _V
+except Exception:
+    _V = 'dev'
+APP_VERSION = _V
 COPYRIGHT_TEXT = "本工具版权归山东数旗信息科技有限公司所有"
 
 import base64

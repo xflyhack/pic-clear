@@ -502,6 +502,14 @@ def _is_no_frame_error(stderr_text: str) -> bool:
 
 # ------------------------------ CLI + main ---------------------------------
 
+def _read_version() -> str:
+    try:
+        from _version import VERSION
+        return VERSION
+    except Exception:
+        return "dev"
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
@@ -509,6 +517,8 @@ def parse_args() -> argparse.Namespace:
             "遇到名叫 VLM 的目录整棵子树跳过。"
         )
     )
+    p.add_argument("--version", action="version",
+                   version=f"extract_frames {_read_version()}")
     p.add_argument("src_root", type=Path, help="视频源根目录")
     p.add_argument("dst_root", type=Path, help="抽帧输出根目录（自动创建）")
     p.add_argument(

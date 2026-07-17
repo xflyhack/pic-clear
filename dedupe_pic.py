@@ -701,6 +701,14 @@ def do_delete(
 
 # ------------------------------- main ---------------------------------------
 
+def _read_version() -> str:
+    try:
+        from _version import VERSION
+        return VERSION
+    except Exception:
+        return "dev"
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
@@ -708,6 +716,8 @@ def parse_args() -> argparse.Namespace:
             "默认 dry-run 仅输出 CSV 报告；加 --apply 才真正删除。"
         )
     )
+    p.add_argument("--version", action="version",
+                   version=f"dedupe_pic {_read_version()}")
     p.add_argument(
         "root",
         type=Path,
