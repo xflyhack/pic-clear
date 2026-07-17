@@ -298,7 +298,8 @@ if not exist "!STATS_BAT!" (
 )
 set "STATS_TMP=%TEMP%\dedupe_stats_%RANDOM%_%RANDOM%.txt"
 REM append_stats.bat stdout = 当日累计已删张数 (跨所有目录的 sum)
-call "!STATS_BAT!" "!TDIR!" > "!STATS_TMP!" 2>nul
+REM 保留 stderr 直通到 watcher 窗口, 才看得到 [append_stats] 诊断行与错误
+call "!STATS_BAT!" "!TDIR!" > "!STATS_TMP!"
 set "CUM_DELETED="
 for /f "usebackq delims=" %%C in ("!STATS_TMP!") do set "CUM_DELETED=%%C"
 del "!STATS_TMP!" 2>nul

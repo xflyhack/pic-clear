@@ -88,6 +88,9 @@ if not exist "%STATS_CSV%" (
     > "%STATS_CSV%" echo folder_name,total,deleted,remain,abs_path,timestamp
 )
 
+REM 文件夹名 = TARGET_DIR 的最后一段, 后面统计诊断日志要用
+for %%N in ("%TARGET_DIR%") do set "FOLDER_NAME=%%~nxN"
+
 REM ---- 数图片总数(不递归)----
 set "TOTAL=0"
 REM 用 dir /b /a-d 数图片文件, 每种扩展名逐条读实际文件名, 才是真实数量
@@ -97,20 +100,20 @@ for %%E in (jpg jpeg png) do (
     )
 )
 
-REM ---- 数 DELETE 行数 ----
-REM dedupe_pic.py 用 utf-8-sig 写 CSV, 首行有 BOM; findstr 遇到 UTF-8 BOM
-REM 或非 ASCII path 时行为不稳. 直接用 for /f skip=1 逐行读第 2 列做等号比较,
-REM 跟编码/BOM 无关.
+REM ---- 数 DELETE 行数 (走 PowerShell, cmd for/f 遇 BOM/中文/空字段不稳) ----
 set "DELETED=0"
-for /f "usebackq skip=1 tokens=2 delims=," %%A in ("%REPORT%") do (
-    if /I "%%A"=="DELETE" set /a DELETED+=1
+for /f %%D in ('powershell -NoProfile -Command "try { (Import-Csv '%REPORT%' | Where-Object { $_.action -eq 'DELETE' }).Count } catch { 0 }"') do set "DELETED=%%D"
+REM 兜底: 如果 PowerShell 也没数出来, 退化到 for /f
+if "!DELETED!"=="0" (
+    for /f "usebackq skip=1 tokens=2 delims=," %%A in ("%REPORT%") do (
+        if /I "%%A"=="DELETE" set /a DELETED+=1
+    )
 )
+REM 调试: stderr 打一行, 便于排查; 累计还是 0 时先看这一行是不是有值
+>&2 echo [append_stats] %FOLDER_NAME%: total=!TOTAL! deleted=!DELETED! report="%REPORT%"
 
 set /a REMAIN=TOTAL - DELETED
 if %REMAIN% LSS 0 set "REMAIN=0"
-
-REM 文件夹名 = TARGET_DIR 的最后一段
-for %%N in ("%TARGET_DIR%") do set "FOLDER_NAME=%%~nxN"
 
 REM 时间戳 (YYYY-MM-DD HH:MM:SS)
 REM 上面把 %DATE% 的拆分提取删了,这里改用 PowerShell 拿完整时间戳.
