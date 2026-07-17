@@ -4,22 +4,45 @@ setlocal EnableExtensions EnableDelayedExpansion
 @echo off
 title %~n0
 
+REM ---- verify chcp 65001 actually took effect ----
+REM  Some old Windows / VM environments silently ignore 'chcp 65001'.
+REM  If it fails, non-ASCII bytes below are parsed as GBK and the whole
+REM  bat blows up. Detect and abort early with an ASCII-only message.
+set "CHCP_OK=0"
+for /f "tokens=* delims=" %%A in ('chcp') do set "CHCP_LINE=%%A"
+echo(!CHCP_LINE! | findstr /C:"65001" >nul && set "CHCP_OK=1"
+if not "!CHCP_OK!"=="1" (
+    echo [FATAL] chcp 65001 did not take effect on this machine.
+    echo         current: !CHCP_LINE!
+    echo.
+    echo   How to fix:
+    echo     1^) run 'chcp 65001' in this cmd window and try again, or
+    echo     2^) use extract_gui.exe instead ^(no code-page issue^), or
+    echo     3^) ask ops to enable UTF-8 in Region ^> Administrative
+    echo        ^> "Beta: Use Unicode UTF-8 for worldwide language support".
+    pause
+    exit /b 4
+)
+
 REM ============================================================
 REM  run_all.bat
-REM  一站式：先抽帧，(可选) 由 dedupe_watcher 后台并行去重，否则串行去重
-REM  依赖：extract_frames.exe / dedupe_pic.exe 在 PATH，同目录下有 license.lic
+REM  one-stop: extract frames, then optionally spawn dedupe_watcher
+REM  or run dedupe serially.
+REM  Requires: extract_frames.exe / dedupe_pic.exe in PATH,
+REM            license.lic in the same dir as the exe.
 REM ============================================================
 
+REM ---- config (edit here if your paths differ) ----
 set "DATA_DRIVE=Z:"
 set "OUT_ROOT=%DATA_DRIVE%\切帧结果"
-REM MARKERS_ROOT: 抽帧锁 / _done.marker 集中存放的根目录，
-REM 多机共享盘时所有机器应指向同一位置。默认放到数据盘同级。
+REM MARKERS_ROOT: dir holding _extract.lock / _done.marker per video.
+REM All machines on the shared drive MUST point to the same location.
 set "MARKERS_ROOT=%DATA_DRIVE%\切帧标记"
 set "DATA_PREFIX=sjbz_"
-REM 车运动保护阈值：越大越严格（车必须挪得越明显才算动，删得越多）
-REM   0.05 = exe 默认，只要肉眼几乎看不出的抖动就算动
-REM   0.12 = 目前 bat 默认，车得挪超过画面 12%%（宽或高）才算动
-REM   0.20 = 更严格，几乎必须开走才算动
+REM MOTION_THRESHOLD: car motion guard, larger = stricter (delete more).
+REM   0.05 = exe default, even sub-pixel jitter counts as motion
+REM   0.12 = bat default, must move >12%% of frame width/height
+REM   0.20 = very strict, car must basically drive away
 set "MOTION_THRESHOLD=0.12"
 
 echo ============================================================
@@ -33,7 +56,7 @@ echo ============================================================
 echo.
 
 if not exist "%DATA_DRIVE%\" (
-    call :LOG_ERR "数据盘 %DATA_DRIVE% 不存在，请先挂载或检查 net use"
+    call :LOG_ERR "数据盘 %DATA_DRIVE% 不存在,请先挂载或检查 net use"
     pause & exit /b 2
 )
 
@@ -49,14 +72,14 @@ for /d %%D in ("%DATA_DRIVE%\%DATA_PREFIX%*") do (
 
 if "%MATCH_COUNT%"=="0" (
     call :LOG_WARN "在 %DATA_DRIVE%\ 下没有找到 %DATA_PREFIX%* 目录"
-    call :LOG_INFO "请把源目录路径拖到本窗口，或手工输入，然后回车："
+    call :LOG_INFO "请把源目录路径拖到本窗口,或手工输入,然后回车:"
     set /p "SRC_ROOT=源目录: "
-    if not defined SRC_ROOT ( call :LOG_ERR "未提供，退出" & pause & exit /b 2 )
+    if not defined SRC_ROOT ( call :LOG_ERR "未提供,退出" & pause & exit /b 2 )
     for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
 ) else if "%MATCH_COUNT%"=="1" (
     call :LOG_INFO "唯一 sjbz 目录: !SRC_ROOT!"
 ) else (
-    call :LOG_INFO "找到多个 %DATA_PREFIX%* 目录，请选择："
+    call :LOG_INFO "找到多个 %DATA_PREFIX%* 目录,请选择:"
     set "IDX=0"
     for /d %%D in ("%DATA_DRIVE%\%DATA_PREFIX%*") do (
         set /a IDX+=1
@@ -66,7 +89,7 @@ if "%MATCH_COUNT%"=="0" (
     echo.
     set /p "PICK=请输入编号: "
     call set "SRC_ROOT=%%ROOT_!PICK!%%"
-    if not defined SRC_ROOT ( call :LOG_ERR "无效选择，退出" & pause & exit /b 2 )
+    if not defined SRC_ROOT ( call :LOG_ERR "无效选择,退出" & pause & exit /b 2 )
     for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
 )
 
@@ -82,7 +105,7 @@ for /d %%D in ("%SRC_ROOT%\*") do (
 )
 
 if "%SUB_COUNT%"=="0" (
-    call :LOG_WARN "%SRC_ROOT% 下没有一级子目录，将直接对整个目录处理"
+    call :LOG_WARN "%SRC_ROOT% 下没有一级子目录,将直接对整个目录处理"
     set "SELECTED[1]=."
     set "SELECTED_COUNT=1"
     goto :SUB_DONE
@@ -93,13 +116,13 @@ for /l %%i in (1,1,%SUB_COUNT%) do (
     call echo         [%%i] %%SUB_%%i%%
 )
 echo.
-call :LOG_INFO "输入方式（可组合）："
+call :LOG_INFO "输入方式(可组合):"
 call :LOG_INFO "  - 序号列表 (逗号分隔) : 1,2"
 call :LOG_INFO "  - 序号区间             : 1-3"
 call :LOG_INFO "  - 全部                 : all"
 echo.
 set /p "SEL=请输入你要处理的子目录: "
-if not defined SEL ( call :LOG_ERR "未输入，退出" & pause & exit /b 2 )
+if not defined SEL ( call :LOG_ERR "未输入,退出" & pause & exit /b 2 )
 set "SELECTED_COUNT=0"
 
 if /I "!SEL!"=="all" (
@@ -148,12 +171,12 @@ goto :EOF
 
 :SUB_DONE
 echo.
-call :LOG_INFO "已选 !SELECTED_COUNT! 个子目录，将依次处理:"
+call :LOG_INFO "已选 !SELECTED_COUNT! 个子目录,将依次处理:"
 for /l %%i in (1,1,!SELECTED_COUNT!) do (
     call echo         - %%SELECTED[%%i]%%
 )
 echo.
-call :LOG_INFO "提示: 若窗口看似卡住无输出，按一下 Enter 或 Esc 恢复"
+call :LOG_INFO "提示: 若窗口看似卡住无输出,按一下 Enter 或 Esc 恢复"
 call :LOG_INFO "      建议永久关闭快速编辑模式: 右键窗口标题 -^> 属性 -^> 编辑选项"
 echo.
 
@@ -168,11 +191,11 @@ if errorlevel 1 (
     pause & exit /b 3
 )
 
-REM ---- 命名规则二选一（新版 / 老版），bat 只支持这两种预设 ----
+REM ---- image name style: new or old, bat only supports these two ----
 echo.
-call :LOG_INFO "图片命名规则："
-call :LOG_INFO "  N = 新版  video1 - 副本_0001.jpg  (parent + 4 位补零，推荐)"
-call :LOG_INFO "  O = 老版  frame_000001.jpg        (legacy + 6 位补零，兼容历史)"
+call :LOG_INFO "图片命名规则:"
+call :LOG_INFO "  N = 新版  video1 - 副本_0001.jpg  (parent + 4 位补零,推荐)"
+call :LOG_INFO "  O = 老版  frame_000001.jpg        (legacy + 6 位补零,兼容历史)"
 choice /C NO /M "请选择命名规则 (N=新版 / O=老版)"
 set "NAME_ARGS=--name-style parent --name-digits 4"
 set "NAME_LABEL=新版 parent + 4 位"
@@ -184,31 +207,31 @@ call :LOG_INFO "命名规则   : !NAME_LABEL!"
 call :LOG_INFO "命名参数   : !NAME_ARGS!"
 echo.
 
-REM 时间戳（cmd 内置变量拼装，不启动 powershell）
+REM 时间戳(cmd 内置变量拼装,不启动 powershell)
 set "TS_D=%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%"
 set "TS_T=%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
 set "TS_T=%TS_T: =0%"
 set "TS=%TS_D%_%TS_T%"
 
-REM ---- 是否开启场景保护（纯色/渐变屏等异常帧不删） ----
+REM ---- 是否开启场景保护(纯色/渐变屏等异常帧不删) ----
 echo.
-call :LOG_INFO "场景保护: 把明显的纯色/渐变屏（传感器遮挡等）识别为异常帧，强制保留"
-call :LOG_INFO "  Y = 开启（多保留一些图，严格不删纯色屏）"
-call :LOG_INFO "  N = 关闭（与旧版一致，纯色屏也可能被删）"
+call :LOG_INFO "场景保护: 把明显的纯色/渐变屏(传感器遮挡等)识别为异常帧,强制保留"
+call :LOG_INFO "  Y = 开启(多保留一些图,严格不删纯色屏)"
+call :LOG_INFO "  N = 关闭(与旧版一致,纯色屏也可能被删)"
 choice /C YN /M "是否开启场景保护 (Y=开启 / N=不开启)"
 set "SCENE_FLAG="
 if errorlevel 2 goto :SCENE_DONE
 set "SCENE_FLAG=--scene-protect"
-call :LOG_INFO "场景保护已开启（会传 --scene-protect 给 dedupe_pic.exe）"
+call :LOG_INFO "场景保护已开启(会传 --scene-protect 给 dedupe_pic.exe)"
 :SCENE_DONE
 echo.
 REM ---- 是否启动 dedupe_watcher 后台窗口 ----
 echo.
-call :LOG_INFO "并行模式: 抽帧的同时后台窗口自动去重，磁盘不攒垃圾"
-call :LOG_INFO "  - watcher 会持续扫描 %OUT_ROOT%\%SRC_ROOT_NAME%，看到 _done.marker 就去重"
-call :LOG_INFO "  - 抽帧下一个视频时，上一个已在被清理"
+call :LOG_INFO "并行模式: 抽帧的同时后台窗口自动去重,磁盘不攒垃圾"
+call :LOG_INFO "  - watcher 会持续扫描 %OUT_ROOT%\%SRC_ROOT_NAME%,看到 _done.marker 就去重"
+call :LOG_INFO "  - 抽帧下一个视频时,上一个已在被清理"
 echo.
-choice /C YN /M "现在启动一个去重监听后台窗口 (Y=启动真删 / N=不启动，改走串行去重)"
+choice /C YN /M "现在启动一个去重监听后台窗口 (Y=启动真删 / N=不启动,改走串行去重)"
 set "USE_WATCHER=0"
 if errorlevel 2 goto :SKIP_WATCHER
 set "USE_WATCHER=1"
@@ -221,7 +244,7 @@ if not exist "!WATCHER_BAT!" (
     for %%W in (dedupe_watcher.bat) do set "WATCHER_BAT=%%~$PATH:W"
 )
 if not defined WATCHER_BAT (
-    call :LOG_WARN "找不到 dedupe_watcher.bat，跳过监听窗口"
+    call :LOG_WARN "找不到 dedupe_watcher.bat,跳过监听窗口"
     set "USE_WATCHER=0"
     goto :SKIP_WATCHER
 )
@@ -236,8 +259,8 @@ call :LOG_INFO "监听目录     : !WATCH_TARGET!"
 set "WATCH_SCENE="
 if defined SCENE_FLAG set "WATCH_SCENE=/scene"
 start "dedupe_watcher" cmd /k ""!WATCHER_BAT!" "!WATCH_TARGET!" /apply /motion %MOTION_THRESHOLD% !WATCH_SCENE!"
-call :LOG_INFO "监听窗口已弹出 (真删模式，重复图会被永久删除，不落回收站)"
-call :LOG_INFO "如需 dry-run 观察，可另开: dedupe_watcher.bat \"!WATCH_TARGET!\""
+call :LOG_INFO "监听窗口已弹出 (真删模式,重复图会被永久删除,不落回收站)"
+call :LOG_INFO "如需 dry-run 观察,可另开: dedupe_watcher.bat \"!WATCH_TARGET!\""
 echo.
 
 :SKIP_WATCHER
@@ -257,7 +280,7 @@ echo ============================================================
 if "%OVERALL_RC%"=="0" (
     call :LOG_OK "全部子目录处理完成"
 ) else (
-    call :LOG_ERR "处理完成，但至少 1 个子目录出错，请翻窗口日志"
+    call :LOG_ERR "处理完成,但至少 1 个子目录出错,请翻窗口日志"
 )
 echo ============================================================
 pause
@@ -298,7 +321,7 @@ set "T=%TIME:~0,8%"
 call :LOG_OK "  %T%  抽帧完成: !SUBNAME!"
 
 if "%USE_WATCHER%"=="1" (
-    call :LOG_INFO "  后续去重已交给 dedupe_watcher 后台窗口，跳过本进程去重"
+    call :LOG_INFO "  后续去重已交给 dedupe_watcher 后台窗口,跳过本进程去重"
     endlocal & exit /b 0
 )
 
@@ -313,7 +336,7 @@ if errorlevel 1 (
 )
 
 echo.
-choice /C YNA /M "子目录 !SUBNAME! dry-run 完毕，Y=真删 / N=跳过此目录 / A=对剩余全部真删"
+choice /C YNA /M "子目录 !SUBNAME! dry-run 完毕,Y=真删 / N=跳过此目录 / A=对剩余全部真删"
 set "CHOICE_RC=!ERRORLEVEL!"
 if !CHOICE_RC! EQU 2 (
     call :LOG_INFO "  跳过真删: !SUBNAME!"
@@ -321,7 +344,7 @@ if !CHOICE_RC! EQU 2 (
 )
 
 set "T=%TIME:~0,8%"
-call :LOG_INFO "  %T%  真删开始 (永久删除，不落回收站)"
+call :LOG_INFO "  %T%  真删开始 (永久删除,不落回收站)"
 dedupe_pic.exe "!DST_DIR!" --threshold 3 !SCENE_FLAG! --apply --hard-delete --report "!REPORT_CSV!"
 if errorlevel 1 (
     set "T=%TIME:~0,8%"

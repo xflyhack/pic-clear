@@ -4,18 +4,39 @@ setlocal EnableExtensions EnableDelayedExpansion
 @echo off
 title %~n0
 
+REM ---- verify chcp 65001 actually took effect ----
+REM  Some old Windows / VM environments silently ignore 'chcp 65001'.
+REM  If it fails, non-ASCII bytes below are parsed as GBK and the whole
+REM  bat blows up. Detect and abort early with an ASCII-only message.
+set "CHCP_OK=0"
+for /f "tokens=* delims=" %%A in ('chcp') do set "CHCP_LINE=%%A"
+echo(!CHCP_LINE! | findstr /C:"65001" >nul && set "CHCP_OK=1"
+if not "!CHCP_OK!"=="1" (
+    echo [FATAL] chcp 65001 did not take effect on this machine.
+    echo         current: !CHCP_LINE!
+    echo.
+    echo   How to fix:
+    echo     1^) run 'chcp 65001' in this cmd window and try again, or
+    echo     2^) use extract_gui.exe instead ^(no code-page issue^), or
+    echo     3^) ask ops to enable UTF-8 in Region ^> Administrative
+    echo        ^> "Beta: Use Unicode UTF-8 for worldwide language support".
+    pause
+    exit /b 4
+)
+
 REM ============================================================
 REM  step1_extract.bat
-REM  只做抽帧：从 Z:\sjbz_YYYYMMDD\子目录 -> Z:\切帧结果\sjbz_YYYYMMDD\子目录
-REM  依赖：
-REM   - extract_frames.exe 在 PATH (推荐 C:\Windows\System32)
-REM   - 每个 exe 同目录下有 license.lic
+REM  extract only: SRC/sjbz_*/subdir -> OUT_ROOT/sjbz_*/subdir
+REM  Requires:
+REM   - extract_frames.exe in PATH (e.g. C:\Windows\System32)
+REM   - license.lic next to each exe
 REM ============================================================
 
+REM ---- config (edit here if your paths differ) ----
 set "DATA_DRIVE=Z:"
 set "OUT_ROOT=%DATA_DRIVE%\切帧结果"
-REM MARKERS_ROOT: 抽帧锁 / _done.marker 集中存放的根目录，
-REM 多机共享盘时所有机器应指向同一位置。默认放到数据盘同级。
+REM MARKERS_ROOT: dir holding _extract.lock / _done.marker per video.
+REM All machines on the shared drive MUST point to the same location.
 set "MARKERS_ROOT=%DATA_DRIVE%\切帧标记"
 set "DATA_PREFIX=sjbz_"
 
@@ -30,7 +51,7 @@ echo ============================================================
 echo.
 
 if not exist "%DATA_DRIVE%\" (
-    call :LOG_ERR "数据盘 %DATA_DRIVE% 不存在，请先挂载或检查 net use"
+    call :LOG_ERR "数据盘 %DATA_DRIVE% 不存在,请先挂载或检查 net use"
     pause & exit /b 2
 )
 
@@ -46,14 +67,14 @@ for /d %%D in ("%DATA_DRIVE%\%DATA_PREFIX%*") do (
 
 if "%MATCH_COUNT%"=="0" (
     call :LOG_WARN "在 %DATA_DRIVE%\ 下没有找到 %DATA_PREFIX%* 目录"
-    call :LOG_INFO "请把源目录路径拖到本窗口，或手工输入，然后回车："
+    call :LOG_INFO "请把源目录路径拖到本窗口,或手工输入,然后回车:"
     set /p "SRC_ROOT=源目录: "
-    if not defined SRC_ROOT ( call :LOG_ERR "未提供，退出" & pause & exit /b 2 )
+    if not defined SRC_ROOT ( call :LOG_ERR "未提供,退出" & pause & exit /b 2 )
     for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
 ) else if "%MATCH_COUNT%"=="1" (
     call :LOG_INFO "唯一 sjbz 目录: !SRC_ROOT!"
 ) else (
-    call :LOG_INFO "找到多个 %DATA_PREFIX%* 目录，请选择："
+    call :LOG_INFO "找到多个 %DATA_PREFIX%* 目录,请选择:"
     set "IDX=0"
     for /d %%D in ("%DATA_DRIVE%\%DATA_PREFIX%*") do (
         set /a IDX+=1
@@ -63,7 +84,7 @@ if "%MATCH_COUNT%"=="0" (
     echo.
     set /p "PICK=请输入编号: "
     call set "SRC_ROOT=%%ROOT_!PICK!%%"
-    if not defined SRC_ROOT ( call :LOG_ERR "无效选择，退出" & pause & exit /b 2 )
+    if not defined SRC_ROOT ( call :LOG_ERR "无效选择,退出" & pause & exit /b 2 )
     for %%X in ("!SRC_ROOT!") do set "SRC_ROOT_NAME=%%~nxX"
 )
 
@@ -79,7 +100,7 @@ for /d %%D in ("%SRC_ROOT%\*") do (
 )
 
 if "%SUB_COUNT%"=="0" (
-    call :LOG_WARN "%SRC_ROOT% 下没有一级子目录，将直接对整个目录处理"
+    call :LOG_WARN "%SRC_ROOT% 下没有一级子目录,将直接对整个目录处理"
     set "SELECTED[1]=."
     set "SELECTED_COUNT=1"
     goto :SUB_DONE
@@ -90,13 +111,13 @@ for /l %%i in (1,1,%SUB_COUNT%) do (
     call echo         [%%i] %%SUB_%%i%%
 )
 echo.
-call :LOG_INFO "输入方式（可组合）："
+call :LOG_INFO "输入方式(可组合):"
 call :LOG_INFO "  - 序号列表 (逗号分隔) : 1,2"
 call :LOG_INFO "  - 序号区间             : 1-3"
 call :LOG_INFO "  - 全部                 : all"
 echo.
 set /p "SEL=请输入你要处理的子目录: "
-if not defined SEL ( call :LOG_ERR "未输入，退出" & pause & exit /b 2 )
+if not defined SEL ( call :LOG_ERR "未输入,退出" & pause & exit /b 2 )
 set "SELECTED_COUNT=0"
 
 if /I "!SEL!"=="all" (
@@ -145,12 +166,12 @@ goto :EOF
 
 :SUB_DONE
 echo.
-call :LOG_INFO "已选 !SELECTED_COUNT! 个子目录，将依次抽帧:"
+call :LOG_INFO "已选 !SELECTED_COUNT! 个子目录,将依次抽帧:"
 for /l %%i in (1,1,!SELECTED_COUNT!) do (
     call echo         - %%SELECTED[%%i]%%
 )
 echo.
-call :LOG_INFO "提示: 若窗口看似卡住无输出，按一下 Enter 或 Esc 恢复"
+call :LOG_INFO "提示: 若窗口看似卡住无输出,按一下 Enter 或 Esc 恢复"
 call :LOG_INFO "      建议永久关闭快速编辑模式: 右键窗口标题 -^> 属性 -^> 编辑选项"
 echo.
 
@@ -160,11 +181,11 @@ if errorlevel 1 (
     pause & exit /b 3
 )
 
-REM ---- 命名规则二选一（新版 / 老版），bat 只支持这两种预设 ----
+REM ---- image name style: new or old, bat only supports these two ----
 echo.
-call :LOG_INFO "图片命名规则："
-call :LOG_INFO "  N = 新版  video1 - 副本_0001.jpg  (parent + 4 位补零，推荐)"
-call :LOG_INFO "  O = 老版  frame_000001.jpg        (legacy + 6 位补零，兼容历史)"
+call :LOG_INFO "图片命名规则:"
+call :LOG_INFO "  N = 新版  video1 - 副本_0001.jpg  (parent + 4 位补零,推荐)"
+call :LOG_INFO "  O = 老版  frame_000001.jpg        (legacy + 6 位补零,兼容历史)"
 choice /C NO /M "请选择命名规则 (N=新版 / O=老版)"
 set "NAME_ARGS=--name-style parent --name-digits 4"
 set "NAME_LABEL=新版 parent + 4 位"
@@ -188,7 +209,7 @@ echo ============================================================
 if "%OVERALL_RC%"=="0" (
     call :LOG_OK "全部子目录抽帧完成"
 ) else (
-    call :LOG_ERR "抽帧完成，但至少 1 个子目录出错，请翻窗口日志"
+    call :LOG_ERR "抽帧完成,但至少 1 个子目录出错,请翻窗口日志"
 )
 echo ============================================================
 pause
