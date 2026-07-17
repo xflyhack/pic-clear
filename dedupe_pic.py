@@ -349,16 +349,29 @@ def _safe_stat(p) -> "os.stat_result":
 
 
 def _safe_unlink(p) -> None:
-    """Path.unlink 的长路径安全版."""
+    r"""Path.unlink 的长路径安全版.
+
+    v0.4.38 修 bug: 老版本 FileNotFoundError 直接 return, 静默把"长路径卡在 CRT 层
+    根本没到 SMB 就报 WinError 3"跟"真的不存在"混为一谈, 导致 42 张图删除计数 +1
+    但实际一个都没删. 现在无论 FileNotFoundError 还是 OSError, 都先走 \?\ 长路径
+    fallback 再试一次, 只有 fallback 也报 FileNotFoundError 才认为真不存在.
+    """
     try:
         os.unlink(str(p))
-    except FileNotFoundError:
         return
-    except OSError:
+    except OSError as e_short:
         long_p = _to_long_path(str(p))
         if long_p == str(p):
+            # 没有长路径可换, 只能相信短路径的报错
+            if isinstance(e_short, FileNotFoundError):
+                return
             raise
-        os.unlink(long_p)
+        try:
+            os.unlink(long_p)
+            return
+        except FileNotFoundError:
+            return  # 长路径都说不存在, 那就真不存在
+        # 其他 OSError 冒泡, 让调用方计入 failed 列表
 
 
 def _safe_exists(p) -> bool:
@@ -394,7 +407,11 @@ def _safe_is_file(p) -> bool:
 
 
 def _safe_move(src, dst) -> None:
-    """shutil.move 的长路径安全版. 目录已由调用方 mkdir."""
+    r"""shutil.move 的长路径安全版. 目录已由调用方 mkdir.
+
+    v0.4.38: 跟 _safe_unlink 同源修法 - FileNotFoundError 不再当"真不存在",
+    先走 \?\ 长路径 fallback.
+    """
     try:
         shutil.move(str(src), str(dst))
         return
@@ -914,6 +931,12 @@ def do_delete(
                     target = trash_dir / f"{int(time.time() * 1000)}_{rel}"
                     trash_dir.mkdir(parents=True, exist_ok=True)
                     _safe_move(item.path, target)
+                # v0.4.38 sanity check: 确认文件真的没了, 否则计入 errors 不算成功.
+                # 防止 _safe_unlink / _safe_move 静默失败 (老版本 42 张删除计数 +1
+                # 但实际一张都没删的坑就在这).
+                if _safe_is_file(item.path):
+                    errors.append(f"{item.path}: 删除后文件仍存在, 疑似静默失败")
+                    continue
                 deleted += 1
                 freed += item.size
             except OSError as e:
