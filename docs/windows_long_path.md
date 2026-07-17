@@ -1,0 +1,277 @@
+# Windows 长路径 / 映射盘 / tkinter 混合斜杠 —— 踩坑史与硬规则
+
+> **本文档给所有以后开发新 Windows 工具（GUI 或 CLI）的开发者**。凡是要在 Windows
+> 上做文件 IO（读图、扫盘、删除、写 marker 等）就必须完整看一遍。
+>
+> 涵盖 v0.4.30 → v0.4.35 的完整踩坑过程与最终硬规则。**这里踩过的每一个坑都真实
+> 出现过在堡垒机 Windows Server 2022 SMB 挂载 Z: 上，代价是 5 个 tag、诊断反复**。
+
+---
+
+## 一句话总结
+
+> **`\\?\` 只是绕开 CRT `MAX_PATH=260` 的入口；真正安全的做法是"入口归一化 +
+> pathlib 每一个 IO 操作套长路径 helper + 静默 except 全删掉"**，三个动作缺一不可。
+
+---
+
+## 症状速查表（新工具遇到类似日志请先来这里对照）
+
+| 症状 | 大概率是 |
+|---|---|
+| `[打开失败-stat] ... WinError 3 系统找不到指定的路径。` | `Path.stat()` 没走长路径兜底（本文 §5） |
+| `[打开失败-hash]` / `[PIL诊断]  Image.open ERR FileNotFoundError` | PIL / detector 没走 `_to_long_path`（本文 §4） |
+| `[扫描完成] 有效图片 0，打开失败 N` 但**同一张图 diag_pic 能开** | 入口路径归一化没做 —— tkinter 返回 `//?/Z:/...`（本文 §3） |
+| dedupe 跑完了但 markers_root 里一个 marker 都没有 | `done_marker.write_text` 里 `except Exception: pass` 静默吞了（本文 §6） |
+| 断线续跑不生效，重跑还是所有目录 | 同上 |
+| `Could not find a part of the path '\\?\UNC\server\share\...'` | 别做 UNC 展开，`\\?\Z:\` 就够（本文 §2） |
+| bat 里 `net use Z:` 有输出，但 `\\?\Z:\` 在 dedupe 里打不开 | 100% 是 tkinter 混斜杠或 Path.stat 漏兜底 |
+
+---
+
+## §1 背景：MAX_PATH=260 到底怎么回事
+
+Windows Win32 API 的历史包袱：
+- **短 API**（`fopen`, `CreateFileA` 无 `\\?\` 前缀）：路径受 `MAX_PATH=260` 限制
+- **长 API**（`CreateFileW` + `\\?\` 前缀）：**直通 NT 命名空间**，理论上支持 32767 字符
+- Python 的 `pathlib.Path.stat()` / `open()` / `Image.open()` 在 Windows 上**基本都是走 CRT 的短 API**，所以路径一长就挂
+- 加 `\\?\` 前缀是标准解法。但 `\\?\` 有一堆坑，见下文
+
+**堡垒机的雪上加霜**：目录被 SMB 挂载到 `Z:` 上（`Z: → \\filestor01.cloud-prod.seres.cn\kj-e68-datamark-100`），实际 SMB 层路径比盘符看着长。业务目录动辄 200-330 字符，天生落在崩溃区。
+
+---
+
+## §2 弯路 1：以为映射盘要展开成 `\\?\UNC\`（v0.4.31 走错方向）
+
+**当时的假设**：微软老文档 "Maximum Path Length Limitation" 里写着——
+> If your path uses a mapped drive letter, you must convert the path to the equivalent UNC path form before prepending "\\?\"
+
+所以 v0.4.31 加了 `WNetGetConnectionW(Z:)` 把 `Z:` 展开为 `\\filestor01...\kj-e68-datamark-100`，再套 `\\?\UNC\...`。
+
+**堡垒机实测结果（Windows Server 2022 build 20348）**：
+```
+[B2] \\?\Z:\...      OK size=180283   ← 能开！
+[B3] \\?\UNC\...     ERR "Could not find a part of the path"  ← 反而不能开！
+```
+
+**教训**：老文档对新 Windows 已经**不成立**。Windows 新版本上 `\\?\Z:\...` 本身直通，不用管映射不映射。**v0.4.32 立刻撤销了 UNC 展开分支**。
+
+**硬规则**：**别做 UNC 展开**。`_to_long_path` 只做两件事：
+- UNC 已经是 `\\server\share\...` → 前缀 `\\?\UNC\` 
+- 其他一律 `\\?\` + 原路径（包括映射盘 `Z:\`）
+
+---
+
+## §3 弯路 2：tkinter filedialog 会偷偷加 `//?/` + 混合斜杠（v0.4.34 真根因）
+
+**diag_pic 帮我们抓到的关键日志**：
+```
+[原始路径] //?/Z:/切帧结果/sjbz_20260715/02/...jpg
+[规范路径] \\?\Z:\切帧结果\sjbz_20260715\02\...jpg   (已把 / -> \ + 去重复 \\?\)
+```
+
+**发生了什么**：
+1. `filedialog.askopenfilename()` 在长路径下**返回带前缀的路径**，但**斜杠方向是正的**：`//?/Z:/...`
+2. Python 代码里 `s.startswith("\\\\?\\")` 用的是反斜杠版本，**匹配不上**
+3. `_to_long_path` 又叠一层前缀 → `\\?\//?/Z:/...` **双重前缀**
+4. `FileNotFoundError: [Errno 2]`
+
+**修法**：入口先归一化。任何进入 `_to_long_path` 的字符串**必须先过 `_normalize_windows_path`**：
+```python
+def _normalize_windows_path(image_path) -> str:
+    s = str(image_path)
+    if os.name != "nt":
+        return s
+    if "/" in s:
+        s = s.replace("/", "\\")          # 正斜杠转反斜杠
+    while s.startswith("\\\\?\\\\\\?\\"): # 折叠误加的双重 \\?\
+        s = s[4:]
+    return s
+```
+
+**硬规则**（新工具必备）：
+- **所有** `_to_long_path` / `_long_path_prefix` 类 helper 的第一行必须是 `s = _normalize_windows_path(image_path)`
+- 判断 `startswith("\\\\?\\")` **之前**必须归一化
+- 只要 GUI 用 tkinter 就必踩，不要指望"我们没长路径不会遇到"
+
+---
+
+## §4 弯路 3：`\\?\` 只保护 PIL，忘了给 `pathlib.Path.stat/unlink` 套（v0.4.35 真最终根因）
+
+**现象**：v0.4.34 修完归一化后，`diag_pic` 能开图，但 dedupe_pic 还是报：
+```
+[打开失败-stat] Z:\切帧结果\...jpg len=272 err=FileNotFoundError: [WinError 3]
+```
+一批 156 张全挂在 `stat`，PIL 那一层根本没跑到。
+
+**根因**：`_to_long_path` 只被 `_pil_open` 调用了。`build_index` 里的 `p.stat()` 是 `pathlib.Path.stat()` 直调 CRT，走短 API，长路径 → `WinError 3`。
+
+同理踩坑的还有：
+- `p.unlink()`（删除阶段，图片可能删不掉）
+- `p.exists()` / `p.is_file()`（marker 判断可能永远返回 False，导致断线续跑不生效）
+- `shutil.move()`（回收站模式的兜底移动）
+- `done_marker.write_text()`（marker 目录本身很深时写不进）
+
+**修法**：`dedupe_pic.py v0.4.35` 里加了 5 个 helper —— **模板照抄即可**：
+
+```python
+def _safe_stat(p) -> "os.stat_result":
+    try:
+        return os.stat(str(p))
+    except OSError:
+        long_p = _to_long_path(str(p))
+        if long_p == str(p):
+            raise
+        return os.stat(long_p)
+
+
+def _safe_unlink(p) -> None:
+    try:
+        os.unlink(str(p))
+    except FileNotFoundError:
+        return
+    except OSError:
+        long_p = _to_long_path(str(p))
+        if long_p == str(p):
+            raise
+        os.unlink(long_p)
+
+
+def _safe_exists(p) -> bool:
+    try:
+        if os.path.exists(str(p)):
+            return True
+    except OSError:
+        pass
+    long_p = _to_long_path(str(p))
+    if long_p == str(p):
+        return False
+    try:
+        return os.path.exists(long_p)
+    except OSError:
+        return False
+
+
+def _safe_is_file(p) -> bool:
+    try:
+        if os.path.isfile(str(p)):
+            return True
+    except OSError:
+        pass
+    long_p = _to_long_path(str(p))
+    if long_p == str(p):
+        return False
+    try:
+        return os.path.isfile(long_p)
+    except OSError:
+        return False
+
+
+def _safe_move(src, dst) -> None:
+    try:
+        shutil.move(str(src), str(dst))
+        return
+    except OSError:
+        pass
+    long_src = _to_long_path(str(src))
+    long_dst = _to_long_path(str(dst))
+    if long_src == str(src) and long_dst == str(dst):
+        raise
+    shutil.move(long_src, long_dst)
+```
+
+**硬规则**（新工具照做）：
+- **绝对不允许**直接调 `Path.stat()` / `Path.unlink()` / `Path.exists()` / `Path.is_file()` / `shutil.move()`
+- 一律走 `_safe_*` helper
+- **例外**：明确知道路径 <180 字符的临时文件（如 lock 文件、config 文件）可以直调，但一定加注释说明"这里路径短、无需兜底"
+
+---
+
+## §5 弯路 4：`except Exception: pass` 静默吞异常，断线续跑失效无声无息（v0.4.35 顺带修）
+
+**现象**：dedupe 跑完 100 个目录，Ctrl+C 停，再跑还是全部 100 个都跑。
+
+**根因**：
+```python
+if rc == 0 and done_marker is not None:
+    try:
+        done_marker.write_text("done", encoding="utf-8")
+    except Exception:
+        pass                       # ← 罪魁祸首
+```
+如果 marker 目录路径太深、SMB 抖动、权限问题，写失败被吞，用户永远不知道。下次跑 marker 不存在，一切重来。
+
+**修法**：
+```python
+if rc == 0 and done_marker is not None:
+    try:
+        try:
+            done_marker.write_text("done", encoding="utf-8")
+        except OSError:
+            # 长路径兜底
+            long_mk = _to_long_path(str(done_marker))
+            if long_mk != str(done_marker):
+                with open(long_mk, "w", encoding="utf-8") as _fw:
+                    _fw.write("done")
+            else:
+                raise
+    except Exception as e:
+        print(f"[ERROR] 写 done marker 失败: {done_marker} -> "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+```
+
+**硬规则**（新工具照做）：
+- **`except Exception: pass` 永远不允许出现在**：marker / lock / 断线续跑 / 授权 / 状态持久化 相关代码
+- 允许静默 `except` 只有一个场景：**已经确认副作用只是"日志好看点"的辅助分支**（例如 detector 的 `try_step`）
+- 每次审 PR 见到 `except: pass` 都要问一遍："这里静默失败会不会让某个功能变成幽灵成功？"
+
+---
+
+## §6 诊断利器：`diag_pic.exe`（v0.4.33 新增）
+
+**长路径问题很多年前就见过一次，然后忘了**。为了不再靠"改代码 → 出 tag → 堡垒机验证 → 反复"这个 O(30min) 循环，做了独立诊断 exe：
+
+- 单文件 tkinter GUI
+- `filedialog` 选一张真实图片
+- 一次跑 **6 种打开方式**：原路径 / `\\?\Z:` / `\\?\UNC` / open+BytesIO 三分身
+- 附加：`os.stat` / `WNetGetConnectionW` / `net use` / 文件头 hex dump
+- 全部塞进大文本框，一键复制
+
+**使用姿势**：以后新工具在堡垒机上报"某种路径打不开"，先让用户跑 `diag_pic.exe` 选一张问题图片，贴报告过来。**5 分钟能定位到底是 6 种打开方式的哪一种能开、哪种不能开**。
+
+**位置**：仓库根目录 `diag_pic.py`，CI workflow `.github/workflows/build-diag-pic-exe.yml`。
+
+---
+
+## §7 新工具接入清单（复制去打勾）
+
+在 Windows 上做文件 IO 的新工具（GUI 或 CLI），照下面 6 步来，可以避掉这文档里的所有坑：
+
+- [ ] **1. 复制** `_normalize_windows_path` 和 `_to_long_path` 到新代码（`dedupe_pic.py` 里现成的）
+- [ ] **2. 所有 IO 入口第一行** = `s = _normalize_windows_path(image_path)`
+- [ ] **3. 复制** `_safe_stat` / `_safe_unlink` / `_safe_exists` / `_safe_is_file` / `_safe_move` 家族
+- [ ] **4. 全局搜** `.stat()` / `.unlink()` / `.exists()` / `.is_file()` / `shutil.move` —— **每一处**都要过 `_safe_*`
+- [ ] **5. 全局搜** `except Exception: pass` / `except: pass` / `except OSError: pass` —— 涉及 marker / lock / 状态持久化的**全部改成 stderr 打日志**
+- [ ] **6. tkinter GUI** 里 `filedialog.askopen*` 返回值必须 `_normalize_windows_path` 一次再往下传
+
+**PR 检查清单**（自己写完自查）：
+- 有没有直接调 pathlib 的 IO 方法？（应该全走 `_safe_*`）
+- 有没有 `except: pass`？（marker 相关必须打日志）
+- 有没有做 UNC 展开？（如果做了，去掉）
+- 长路径判断阈值多少？（180 更保险，不要用 200 或 260）
+- 长度 300 字符的路径能不能跑通？（本地模拟或上堡垒机测）
+
+---
+
+## §8 版本演进快速索引
+
+| 版本 | 改动 | 结果 |
+|---|---|---|
+| v0.4.28 | PIL Image.open 加 `\\?\` helper | 修本地 D: 长路径, 堡垒机 Z: 还挂 |
+| v0.4.31 | 加 `WNetGetConnectionW` 展开 UNC | ❌ 弯路, `\\?\UNC\` 反而打不开 |
+| v0.4.32 | 撤 UNC 展开 + BytesIO 兜底 + PIL 诊断 | 还挂, 但日志更详细 |
+| v0.4.33 | 新增 `diag_pic.exe` + 失败日志分类 | 诊断利器就位, 日志能看到"stat 挂了" |
+| v0.4.34 | `_normalize_windows_path` 修 `//?/` 混斜杠 | diag_pic 能开图, dedupe 还挂 stat |
+| **v0.4.35** | `_safe_stat/unlink/exists/is_file/move` + marker 写失败打日志 | ✅ **通了** |
+
+**关键教训**：改一个 helper 影响面看似小，实际打包成 exe 分发要 20 分钟 CI + 5 分钟堡垒机验证。**能提前用 `diag_pic.exe` 摊事实的场景，永远不要靠 tag 迭代猜方向**。

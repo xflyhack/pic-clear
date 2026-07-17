@@ -4,6 +4,26 @@
 - 默认中文回复
 - Git 提交注释用中文，格式：`类型(范围): 中文描述`（示例：`修复(bat): xxx`、`新增(pipe_gui): xxx`）
 
+## Windows 文件 IO 必读（新工具开发者硬规则）
+
+**任何要在 Windows 上做文件 IO（读图、扫盘、删除、写 marker）的新工具, 先读
+`docs/windows_long_path.md`. 覆盖从 v0.4.28 到 v0.4.35 的完整踩坑史,
+5 个 tag 的血泪总结.**
+
+**必抄的 4 件事**（细节和模板代码在文档里）:
+
+1. **入口归一化**: `_normalize_windows_path` 一定要有, 修 tkinter 返回 `//?/Z:/...` 的坑
+2. **`\\?\` 前缀**: `_to_long_path` 只加 `\\?\`, **别做 UNC 展开** (新 Windows 上反而打不开)
+3. **所有 pathlib IO 全套 `_safe_*` helper**: `_safe_stat` / `_safe_unlink` / `_safe_exists` /
+   `_safe_is_file` / `_safe_move` —— 只保护 PIL 是不够的
+4. **`except Exception: pass` 全删**: 涉及 marker / lock / 状态持久化的静默吞异常一律
+   改成 `[ERROR]` stderr 打日志, 断线续跑失效再也无法无声无息
+
+**诊断利器**: 堡垒机上遇到"某路径打不开"先跑 `diag_pic.exe`, 6 种打开方式一次摸清,
+比出 exe 迭代猜快 O(10min).
+
+---
+
 ## 写 bat 脚本时必读
 
 **任何情况下写新的 `.bat`，先看 `docs/bat_conventions.md`。**
