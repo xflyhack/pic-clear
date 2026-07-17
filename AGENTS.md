@@ -198,6 +198,20 @@ git tag 打到 `v0.4.29` 时用户在堡垒机上截图 dedupe_gui 显示 `v0.3.
     [PIL诊断]   BytesIO Image.open ERR ...  file bytes read OK, size=180283
     ```
 
+### 14. `\\?\` 前缀只保护了 PIL, 却漏了 `Path.stat` / `Path.unlink`
+- **现象 (v0.4.34 遗留)**: 图片能 diag_pic 打开, 但 dedupe_pic 报 156 张 `[打开失败-stat]`
+- **根因**: `_pil_open` 内部走 `_to_long_path` OK, 但 `build_index` 里 `p.stat()` 是 `pathlib` 直调,
+  Windows 上 CRT 层 MAX_PATH=260 卡住, 返回 `WinError 3 系统找不到指定的路径`.
+  同理 `p.unlink()` (删除阶段) / `p.exists()` / `p.is_file()` (marker 判断) 全部踩坑.
+- **修法 (v0.4.35)**: 新增 5 个 helper: `_safe_stat` / `_safe_unlink` / `_safe_exists` /
+  `_safe_is_file` / `_safe_move`. 每个都先试原路径, 挂了自动走 `_to_long_path` 兜底.
+  改造 4 个热点调用: `build_index` stat / 删除 unlink+move / `args.root.exists` /
+  `done_marker.is_file`.
+- **顺带修**: `done_marker.write_text` 原本 `except Exception: pass` 静默吞异常,
+  改成 stderr 打 `[ERROR] 写 done marker 失败`, 断线续跑失效不再无声无息.
+- **教训**: 上长路径修复不能只盯 PIL, 所有 `pathlib.Path` 上的 IO 方法都要过一遍;
+  静默 `except: pass` 是 marker/lock/断点续跑类功能的大杀器, 一律改成明确日志.
+
 ### 4. PyArmor trial 版对单次 `pyarmor gen` 有配额
 - 现象：CI 报 `ERROR out of license`，`dist_obf` 空目录，后续 copy 全失败
 - 根因：一次给 3+ 个文件，最近脚本变大后爆额度

@@ -329,6 +329,84 @@ def _pil_open(image_path):
             raise
 
 
+
+
+# ----- 长路径安全的 stat / unlink / exists (v0.4.35) -----
+# 背景: Windows 上 Path.stat/Path.unlink 会走 CRT, MAX_PATH=260 卡住.
+# _to_long_path 已经把长路径转成 \\?\... 直通 NT 命名空间, 但只对 PIL 生效,
+# 这里补齐 stat/unlink/exists 三个热点操作, 让 build_index/删除阶段也不受长路径影响.
+
+
+def _safe_stat(p) -> "os.stat_result":
+    r"""Path.stat 的长路径安全版. 先尝试原路径 (兼容非 Windows), 挂了再走 \\?\ 兜底."""
+    try:
+        return os.stat(str(p))
+    except OSError:
+        long_p = _to_long_path(str(p))
+        if long_p == str(p):
+            raise
+        return os.stat(long_p)
+
+
+def _safe_unlink(p) -> None:
+    """Path.unlink 的长路径安全版."""
+    try:
+        os.unlink(str(p))
+    except FileNotFoundError:
+        return
+    except OSError:
+        long_p = _to_long_path(str(p))
+        if long_p == str(p):
+            raise
+        os.unlink(long_p)
+
+
+def _safe_exists(p) -> bool:
+    """Path.exists 的长路径安全版. Windows Path.exists 走 stat, 长路径同样会挂."""
+    try:
+        if os.path.exists(str(p)):
+            return True
+    except OSError:
+        pass
+    long_p = _to_long_path(str(p))
+    if long_p == str(p):
+        return False
+    try:
+        return os.path.exists(long_p)
+    except OSError:
+        return False
+
+
+def _safe_is_file(p) -> bool:
+    """Path.is_file 的长路径安全版."""
+    try:
+        if os.path.isfile(str(p)):
+            return True
+    except OSError:
+        pass
+    long_p = _to_long_path(str(p))
+    if long_p == str(p):
+        return False
+    try:
+        return os.path.isfile(long_p)
+    except OSError:
+        return False
+
+
+def _safe_move(src, dst) -> None:
+    """shutil.move 的长路径安全版. 目录已由调用方 mkdir."""
+    try:
+        shutil.move(str(src), str(dst))
+        return
+    except OSError:
+        pass
+    long_src = _to_long_path(str(src))
+    long_dst = _to_long_path(str(dst))
+    if long_src == str(src) and long_dst == str(dst):
+        raise
+    shutil.move(long_src, long_dst)
+
+
 # ----------------------------- dHash ---------------------------------------
 
 def dhash(image_path: Path, hash_size: int = 8) -> int | None:
@@ -527,7 +605,7 @@ def build_index(
             print(f"  [dir] {current_dir}", flush=True)
         count += 1
         try:
-            st = p.stat()
+            st = _safe_stat(p)
         except OSError as _e_stat:
             stat_failed.append(p)
             if _first_open_fail_left > 0:
@@ -830,12 +908,12 @@ def do_delete(
                 continue
             try:
                 if hard_delete or trash_dir is None:
-                    item.path.unlink()
+                    _safe_unlink(item.path)
                 else:
                     rel = item.path.name
                     target = trash_dir / f"{int(time.time() * 1000)}_{rel}"
                     trash_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(item.path), str(target))
+                    _safe_move(item.path, target)
                 deleted += 1
                 freed += item.size
             except OSError as e:
@@ -1054,7 +1132,7 @@ def main() -> int:
         done_marker = marker_dir / _DEDUP_DONE_NAME
 
         # 已完成：--force 不加就直接跳过
-        if done_marker.is_file() and not args.force:
+        if _safe_is_file(done_marker) and not args.force:
             print(f"[跳过] 已存在 {_DEDUP_DONE_NAME}（marker_dir={marker_dir}），不重跑。"
                   " 加 --force 可强制重跑。")
             return 0
@@ -1072,9 +1150,20 @@ def main() -> int:
 
     if rc == 0 and done_marker is not None:
         try:
-            done_marker.write_text("done", encoding="utf-8")
-        except Exception:
-            pass
+            # 长路径兜底: 若 write_text 因 marker 目录本身 >260 挂掉, 走 \\?\
+            try:
+                done_marker.write_text("done", encoding="utf-8")
+            except OSError:
+                long_mk = _to_long_path(str(done_marker))
+                if long_mk != str(done_marker):
+                    with open(long_mk, "w", encoding="utf-8") as _fw:
+                        _fw.write("done")
+                else:
+                    raise
+        except Exception as e:
+            # 不再静默吞: 一旦 marker 写失败, 断线续跑会失效, 必须让用户看到
+            print(f"[ERROR] 写 done marker 失败: {done_marker} -> "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
 
     return rc
 
@@ -1082,7 +1171,7 @@ def main() -> int:
 def _run_dedupe(args: argparse.Namespace) -> int:
     """去重主体逻辑（原 main 尾部）。"""
 
-    if not args.root.exists():
+    if not _safe_exists(args.root):
         print(f"[ERROR] 根目录不存在: {args.root}", file=sys.stderr)
         return 2
 
