@@ -90,21 +90,20 @@ if not exist "%STATS_CSV%" (
 
 REM ---- 数图片总数(不递归)----
 set "TOTAL=0"
-for %%X in ("%TARGET_DIR%\*.jpg" "%TARGET_DIR%\*.jpeg" "%TARGET_DIR%\*.png") do (
-    if exist "%%~X" set /a TOTAL+=1
+REM 用 dir /b /a-d 数图片文件, 每种扩展名逐条读实际文件名, 才是真实数量
+for %%E in (jpg jpeg png) do (
+    for /f "delims=" %%F in ('dir /b /a-d "%TARGET_DIR%\*.%%E" 2^>nul') do (
+        set /a TOTAL+=1
+    )
 )
 
 REM ---- 数 DELETE 行数 ----
+REM dedupe_pic.py 用 utf-8-sig 写 CSV, 首行有 BOM; findstr 遇到 UTF-8 BOM
+REM 或非 ASCII path 时行为不稳. 直接用 for /f skip=1 逐行读第 2 列做等号比较,
+REM 跟编码/BOM 无关.
 set "DELETED=0"
-for /f "usebackq delims=" %%L in (`findstr /R /C:",DELETE," "%REPORT%" 2^>nul`) do (
-    set /a DELETED+=1
-)
-
-REM 兜底:如果 CSV 表头不是标准的(第 2 列 action),上面 findstr 找不到就用另一个模式
-if "%DELETED%"=="0" (
-    for /f "usebackq delims=" %%L in (`findstr /R /C:"^[0-9][0-9]*,DELETE," "%REPORT%" 2^>nul`) do (
-        set /a DELETED+=1
-    )
+for /f "usebackq skip=1 tokens=2 delims=," %%A in ("%REPORT%") do (
+    if /I "%%A"=="DELETE" set /a DELETED+=1
 )
 
 set /a REMAIN=TOTAL - DELETED
