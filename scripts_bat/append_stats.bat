@@ -67,12 +67,12 @@ REM 3) fallback: wmic os get localdatetime (Win7+ 都有)
 REM 三种都失败 -> stderr 报错, stdout 打 -1, 让 watcher 跳过阈值判断
 set "TODAY="
 for /f %%d in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd" 2^>nul') do set "TODAY=%%d"
+REM fallback 用 %DATE% 拆前 4/6/8 位, 中文 Win 通常是 2026-07-17 或 2026/07/17
+REM 拿完后 findstr 校验必须是 8 位纯数字, 否则清空触发下一级兜底
 if not defined TODAY (
     >&2 echo [append_stats] WARN: PowerShell 拿日期失败, fallback 到 %%DATE%%
-    REM 中文 Win 的 %DATE% 通常是 2026-07-17 或 2026/07/17
     set "D_RAW=%DATE%"
     set "TODAY=!D_RAW:~0,4!!D_RAW:~5,2!!D_RAW:~8,2!"
-    REM 校验拿到的是不是 8 位纯数字
     echo(!TODAY!| findstr /R "^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$" >nul || set "TODAY="
 )
 if not defined TODAY (
@@ -122,7 +122,7 @@ for %%E in (jpg jpeg png) do (
 
 REM ---- 数 DELETE 行数 (走 PowerShell, cmd for/f 遇 BOM/中文/空字段不稳) ----
 set "DELETED=0"
-for /f %%D in ('powershell -NoProfile -Command "try { (Import-Csv '%REPORT%' | Where-Object { $_.action -eq 'DELETE' }).Count } catch { 0 }"') do set "DELETED=%%D"
+for /f %%D in ('powershell -NoProfile -Command "try { (Import-Csv '%REPORT%' | Where-Object { $_.action -eq 'DELETE' }).Count } catch { 0 }" 2^>nul') do set "DELETED=%%D"
 REM 兜底: 如果 PowerShell 也没数出来, 退化到 for /f
 if "!DELETED!"=="0" (
     for /f "usebackq skip=1 tokens=2 delims=," %%A in ("%REPORT%") do (
