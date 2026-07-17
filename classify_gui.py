@@ -21,7 +21,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import (
     Tk, StringVar, IntVar, DoubleVar, END, DISABLED, NORMAL,
-    filedialog, messagebox,
+    BooleanVar, filedialog, messagebox,
 )
 from tkinter import ttk
 
@@ -34,7 +34,7 @@ from classify_pic import (
 
 
 APP_TITLE = "pic-clear 二次分类工具"
-APP_VERSION = "v0.4.25"
+APP_VERSION = "v0.4.26"
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "classify_gui.json"
 
@@ -77,7 +77,7 @@ class ClassifyApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
         root.title(f"{APP_TITLE}  {APP_VERSION}")
-        root.geometry("980x800")
+        root.geometry("1000x880")
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
         self.worker: threading.Thread | None = None
@@ -99,6 +99,11 @@ class ClassifyApp:
         self.kp_min_var = IntVar(value=8)
         self.limit_var = IntVar(value=0)
         self.embed_default_var = DoubleVar(value=0.75)
+        # 多线程 + marker（v0.4.26）
+        self.markers_root_var = StringVar(value="")
+        self.jobs_var = IntVar(value=1)
+        self.lock_ttl_var = IntVar(value=900)
+        self.force_rerun_var = BooleanVar(value=False)
         # 每桶阈值
         self.bucket_thres_vars: dict[str, DoubleVar] = {
             b: DoubleVar(value=0.75) for b in BUCKET_ORDER
@@ -150,6 +155,7 @@ class ClassifyApp:
         add_path_row(top, "输入根目录", self.in_var, True)
         add_path_row(top, "输出根目录", self.out_var, True)
         add_path_row(top, "样例目录 (rules)", self.rules_var, True)
+        add_path_row(top, "Marker 根目录", self.markers_root_var, True)
 
         def add_text_row(parent, label, var, tip=""):
             nonlocal row
@@ -216,6 +222,38 @@ class ClassifyApp:
             ).grid(row=i, column=3, sticky="w", **pad)
 
         emb.columnconfigure(3, weight=1)
+
+        # 多机 / 并发 / marker
+        conc = ttk.LabelFrame(outer, text="多机并发 & 完成标记")
+        conc.pack(fill="x", pady=(4, 4))
+
+        ttk.Label(conc, text="并发数").grid(row=0, column=0, sticky="e", **pad)
+        ttk.Spinbox(
+            conc, from_=1, to=16, increment=1, width=6,
+            textvariable=self.jobs_var,
+        ).grid(row=0, column=1, sticky="w", **pad)
+        ttk.Label(
+            conc,
+            text="camera 目录粒度并发，共享盘多机并发安全",
+            foreground="#888",
+        ).grid(row=0, column=2, columnspan=3, sticky="w", **pad)
+
+        ttk.Label(conc, text="锁 TTL(s)").grid(row=1, column=0, sticky="e", **pad)
+        ttk.Spinbox(
+            conc, from_=30, to=86400, increment=60, width=8,
+            textvariable=self.lock_ttl_var,
+        ).grid(row=1, column=1, sticky="w", **pad)
+        ttk.Label(
+            conc,
+            text="_classify.lock 超时后可被别机抢占（默认 900s = 15 分钟）",
+            foreground="#888",
+        ).grid(row=1, column=2, columnspan=3, sticky="w", **pad)
+
+        ttk.Checkbutton(
+            conc,
+            text="强制重跑（忽略 _classify_done.marker）",
+            variable=self.force_rerun_var,
+        ).grid(row=2, column=0, columnspan=4, sticky="w", **pad)
 
         # 按钮
         btn = ttk.Frame(outer)
@@ -328,6 +366,12 @@ class ClassifyApp:
         out_root = self.out_var.get().strip()
         if not in_root or not out_root:
             raise ValueError("输入 / 输出目录不能为空")
+        markers_str = self.markers_root_var.get().strip()
+        if not markers_str:
+            raise ValueError(
+                "Marker 根目录必填。请指定一个（多机共享盘时所有机器应指向同一位置）"
+            )
+        markers_path = Path(os.path.expanduser(markers_str)).resolve()
         rules_str = self.rules_var.get().strip()
         rules_path = Path(rules_str).expanduser().resolve() if rules_str else None
 
@@ -361,6 +405,10 @@ class ClassifyApp:
             embed_sim_per_bucket=per_bucket,
             limit=int(self.limit_var.get()),
             camera_dir_name=self.camera_var.get().strip() or "camera",
+            markers_root=markers_path,
+            jobs=max(1, int(self.jobs_var.get())),
+            lock_ttl=max(30, int(self.lock_ttl_var.get())),
+            force_rerun=bool(self.force_rerun_var.get()),
         )
 
     # ---------------------------------------------------------- logging
@@ -435,7 +483,9 @@ class ClassifyApp:
                   "  · 前备箱防夹检测\n"
                   "  · 前机盖开关检测（少样本 embedding）\n"
                   "  · 动态手势（少样本 embedding）\n"
-                  "  · 遮挡（少样本 embedding）"),
+                  "  · 遮挡（少样本 embedding）\n\n"
+                  "支持多机并发：camera 目录级 _classify.lock + _classify_done.marker\n"
+                  "多机共享盘时所有机器请指向同一 Marker 根目录"),
             foreground="#555", justify="left",
         ).pack(anchor="w", **pad)
         ttk.Label(
@@ -466,6 +516,10 @@ class ClassifyApp:
             "bucket_thres": {
                 b: float(v.get()) for b, v in self.bucket_thres_vars.items()
             },
+            "markers_root": self.markers_root_var.get(),
+            "jobs": int(self.jobs_var.get()),
+            "lock_ttl": int(self.lock_ttl_var.get()),
+            "force_rerun": bool(self.force_rerun_var.get()),
         }
 
     def _apply_config(self, cfg: dict) -> None:
@@ -492,6 +546,10 @@ class ClassifyApp:
         _set(self.limit_var, "limit", int)
         _set(self.camera_var, "camera_dir_name")
         _set(self.embed_default_var, "embed_default", float)
+        _set(self.markers_root_var, "markers_root")
+        _set(self.jobs_var, "jobs", int)
+        _set(self.lock_ttl_var, "lock_ttl", int)
+        _set(self.force_rerun_var, "force_rerun", bool)
         thres = cfg.get("bucket_thres") or {}
         for b, v in self.bucket_thres_vars.items():
             if b in thres:

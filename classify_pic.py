@@ -32,8 +32,11 @@ import csv
 import io
 import os
 import shutil
+import socket
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Callable, Iterable
@@ -92,6 +95,89 @@ DEFAULT_FRONT_KEYWORDS: tuple[str, ...] = (
     "前视", "左前周视", "右前周视", "左前环视", "右前环视",
 )
 
+# ---------------------------------------------------------------------------
+#  camera 目录级 lock & done marker（多机安全）
+# ---------------------------------------------------------------------------
+#  语义跟 dedupe_pic.py 的 _dedup.lock / _dedup_done.marker 对齐：
+#  - marker_dir = markers_root / <camera 相对 in_root 的路径>
+#  - 抢 _classify.lock（TTL 判断，超时自动抢占，多机共享盘安全）
+#  - 跑完写 _classify_done.marker，加 --force / GUI"强制重跑"忽略
+
+_CLASSIFY_LOCK_NAME = "_classify.lock"
+_CLASSIFY_DONE_NAME = "_classify_done.marker"
+_HOSTNAME = socket.gethostname()
+
+
+def _classify_lock_payload() -> str:
+    return f"{_HOSTNAME}|{os.getpid()}|{int(time.time())}"
+
+
+def _classify_lock_is_stale(lock_path: Path, ttl_seconds: float) -> bool:
+    try:
+        content = lock_path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        return True
+    parts = content.split("|")
+    if len(parts) < 3:
+        return True
+    try:
+        ts = int(parts[2])
+    except Exception:
+        return True
+    return (time.time() - ts) > ttl_seconds
+
+
+def _acquire_classify_lock(lock_path: Path, ttl_seconds: float) -> bool:
+    """原子抢占 camera 级去分类锁。True=抢到、False=别人占用且未过期。"""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _classify_lock_payload().encode("utf-8")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    try:
+        fd = os.open(str(lock_path), flags, 0o644)
+    except FileExistsError:
+        if _classify_lock_is_stale(lock_path, ttl_seconds):
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                return False
+            try:
+                fd = os.open(str(lock_path), flags, 0o644)
+            except Exception:
+                return False
+        else:
+            return False
+    except Exception:
+        return False
+    try:
+        os.write(fd, payload)
+    finally:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+    return True
+
+
+def _release_classify_lock(lock_path: Path) -> None:
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+class _NullLock:
+    """占位锁，jobs=1 时 with 语句零开销。"""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
 
 # ---------------------------------------------------------------------------
 #  配置 & 结果
@@ -127,6 +213,12 @@ class ClassifyConfig:
     limit: int = 0
     report_path: Path | None = None
     camera_dir_name: str = "camera"  # 分水岭目录名，精确匹配
+
+    # ---- 多线程 + marker（v0.4.26） ----
+    markers_root: Path | None = None    # marker/lock 集中存放的根（多机共享盘推荐）
+    jobs: int = 1                       # camera 目录并发数（线程池）
+    lock_ttl: int = 900                 # camera 锁 TTL 秒，超时可被别机抢占
+    force_rerun: bool = False           # 忽略 _classify_done.marker
 
 
 @dataclass
@@ -416,12 +508,97 @@ def process_all(
         log(f"[提示] 未在 {in_root} 下找到任何 {cfg.camera_dir_name!r} 目录")
         return
 
+    # 计算每个 camera 的 marker_dir（markers_root 下的镜像位置）
+    markers_root = cfg.markers_root
+    tasks: list[tuple[Path, Path, Path | None]] = []
     for camera_dir in camera_dirs:
+        camera_out = _resolve_camera_out(in_root, cfg.out_root, camera_dir, same_root)
+        marker_dir: Path | None = None
+        if markers_root is not None:
+            try:
+                rel = camera_dir.relative_to(in_root)
+            except ValueError:
+                rel = Path(camera_dir.name)
+            marker_dir = markers_root / rel if str(rel) != "." else markers_root
+        tasks.append((camera_dir, camera_out, marker_dir))
+
+    # 过滤已完成 marker（除非 --force）
+    if markers_root is not None and not cfg.force_rerun:
+        pending: list[tuple[Path, Path, Path | None]] = []
+        skipped_done = 0
+        for camera_dir, camera_out, marker_dir in tasks:
+            if marker_dir is not None and (marker_dir / _CLASSIFY_DONE_NAME).is_file():
+                skipped_done += 1
+                log(f"[跳过] {camera_dir} 已存在 {_CLASSIFY_DONE_NAME}（marker_dir={marker_dir}）")
+                continue
+            pending.append((camera_dir, camera_out, marker_dir))
+        if skipped_done:
+            log(f"[跳过] 合计 {skipped_done} 个 camera 已完成，如需重跑请勾选『强制重跑』或 --force")
+        tasks = pending
+
+    if not tasks:
+        log("[提示] 所有 camera 目录都已有完成 marker，无需处理")
+        return
+
+    jobs = max(1, int(cfg.jobs or 1))
+    ttl = max(30, int(cfg.lock_ttl or 900))
+    io_lock: threading.Lock | None = threading.Lock() if jobs > 1 else None
+    log_lock = threading.Lock()   # 保护 log 打印顺序，避免多线程日志交叉
+
+    def _thread_log(msg: str) -> None:
+        with log_lock:
+            log(msg)
+
+    def _run_one(task: tuple[Path, Path, Path | None]) -> None:
+        camera_dir, camera_out, marker_dir = task
         if cancel and cancel():
             return
-        camera_out = _resolve_camera_out(in_root, cfg.out_root, camera_dir, same_root)
-        log(f"[camera] {camera_dir} -> {camera_out}")
-        _process_one_camera(camera_dir, camera_out, cfg, yolo, pose, embed, stats, writer, log, cancel)
+        # marker/lock 抢占
+        lock_path: Path | None = None
+        if marker_dir is not None:
+            marker_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = marker_dir / _CLASSIFY_LOCK_NAME
+            if not _acquire_classify_lock(lock_path, ttl):
+                _thread_log(f"[跳过] {camera_dir} 锁被占用且未过期（TTL={ttl}s），可能别机在跑")
+                return
+        _thread_log(f"[camera] {camera_dir} -> {camera_out}"
+                    + (f"  marker={marker_dir}" if marker_dir is not None else ""))
+        ok = False
+        try:
+            _process_one_camera(
+                camera_dir, camera_out, cfg,
+                yolo, pose, embed, stats, writer,
+                _thread_log, cancel, io_lock=io_lock,
+            )
+            ok = True
+        except Exception as e:
+            _thread_log(f"[错误] {camera_dir} 处理异常: {e}")
+        finally:
+            if lock_path is not None:
+                _release_classify_lock(lock_path)
+            # 只有正常跑完 & 未被取消才写 done marker
+            if ok and marker_dir is not None and not (cancel and cancel()):
+                try:
+                    (marker_dir / _CLASSIFY_DONE_NAME).write_text(
+                        "done", encoding="utf-8"
+                    )
+                except Exception as e:
+                    _thread_log(f"[警告] 写 {_CLASSIFY_DONE_NAME} 失败: {e}")
+
+    if jobs == 1:
+        for t in tasks:
+            if cancel and cancel():
+                break
+            _run_one(t)
+    else:
+        log(f"[并发] 启动线程池 workers={jobs}，camera 目录粒度并发")
+        with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix="classify") as ex:
+            futures = [ex.submit(_run_one, t) for t in tasks]
+            for fut in futures:
+                try:
+                    fut.result()
+                except Exception as e:
+                    log(f"[异常] {type(e).__name__}: {e}")
 
 
 def _process_one_camera(
@@ -433,7 +610,12 @@ def _process_one_camera(
     writer,
     log: LogFn,
     cancel: CancelFn | None,
+    io_lock: "threading.Lock | None" = None,
 ) -> None:
+    """处理单个 camera 目录。多线程调用时传入 io_lock 保护 stats/writer。"""
+    _noop_lock = _NullLock()
+    lk = io_lock if io_lock is not None else _noop_lock
+
     in_root = camera_dir
     for dirpath, dirs, files in os.walk(in_root):
         if cancel and cancel():
@@ -450,15 +632,19 @@ def _process_one_camera(
                 pruned.append(d)
                 dirs.remove(d)
         if pruned:
-            stats.skipped_filter += len(pruned)
+            with lk:
+                stats.skipped_filter += len(pruned)
             log(f"  [跳过] {Path(dirpath).relative_to(in_root)} 下过滤: {pruned}")
 
         # 处理这一层的图片
         for name in files:
             if cancel and cancel():
                 return
-            if cfg.limit and stats.scanned >= cfg.limit:
-                return
+            if cfg.limit:
+                with lk:
+                    reached = stats.scanned >= cfg.limit
+                if reached:
+                    return
             dot = name.rfind(".")
             if dot < 0:
                 continue
@@ -467,34 +653,38 @@ def _process_one_camera(
             }:
                 continue
             img = Path(dirpath) / name
-            stats.scanned += 1
+            with lk:
+                stats.scanned += 1
 
             rel_in = img.relative_to(in_root)
 
             # 分类判定（v0.4.23：不再做全量镜像复制，只按命中桶复制）
             r = classify_one(img, rel_in, yolo, pose, embed, cfg)
-            if r.error:
-                stats.errors += 1
-            if BUCKET_LIVENESS in r.buckets:
-                stats.liveness += 1
-            if BUCKET_KEYPOINT in r.buckets:
-                stats.keypoint += 1
-            if BUCKET_FRUNK in r.buckets:
-                stats.frunk += 1
-            if BUCKET_HOOD in r.buckets:
-                stats.hood += 1
-            if BUCKET_GESTURE in r.buckets:
-                stats.gesture += 1
-            if BUCKET_OCCLUSION in r.buckets:
-                stats.occlusion += 1
+            with lk:
+                if r.error:
+                    stats.errors += 1
+                if BUCKET_LIVENESS in r.buckets:
+                    stats.liveness += 1
+                if BUCKET_KEYPOINT in r.buckets:
+                    stats.keypoint += 1
+                if BUCKET_FRUNK in r.buckets:
+                    stats.frunk += 1
+                if BUCKET_HOOD in r.buckets:
+                    stats.hood += 1
+                if BUCKET_GESTURE in r.buckets:
+                    stats.gesture += 1
+                if BUCKET_OCCLUSION in r.buckets:
+                    stats.occlusion += 1
 
             for bucket in r.buckets:
                 dst = _bucket_path_for(bucket, camera_out) / rel_in
                 try:
                     _copy_overwrite(img, dst)
-                    stats.copied_bucket += 1
+                    with lk:
+                        stats.copied_bucket += 1
                 except Exception as e:
-                    stats.errors += 1
+                    with lk:
+                        stats.errors += 1
                     log(f"  [错误] 桶复制失败 {img} -> {dst}: {e}")
 
             if writer is not None:
@@ -502,20 +692,28 @@ def _process_one_camera(
                     f"{b}:{sim:.2f}({sample})"
                     for b, (sim, sample) in sorted(r.embed_matches.items())
                 )
-                writer.writerow([
-                    str(rel_in), "|".join(r.buckets),
-                    f"{r.person_conf:.3f}", r.vehicle_hit,
-                    r.kp_visible,
-                    embed_str,
-                    r.error,
-                ])
+                with lk:
+                    writer.writerow([
+                        str(rel_in), "|".join(r.buckets),
+                        f"{r.person_conf:.3f}", r.vehicle_hit,
+                        r.kp_visible,
+                        embed_str,
+                        r.error,
+                    ])
 
-            if stats.scanned % 200 == 0:
+            with lk:
+                should_log = (stats.scanned % 200 == 0)
+                snapshot = (
+                    stats.scanned, stats.liveness, stats.keypoint,
+                    stats.frunk, stats.hood, stats.gesture, stats.occlusion,
+                )
+            if should_log:
+                sc, lv, kp, fr, hd, gs, oc = snapshot
                 log(
-                    f"  [进度] {stats.scanned} 张  "
-                    f"活体={stats.liveness} 关节={stats.keypoint} "
-                    f"前备箱={stats.frunk} 前机盖={stats.hood} "
-                    f"手势={stats.gesture} 遮挡={stats.occlusion}"
+                    f"  [进度] {sc} 张  "
+                    f"活体={lv} 关节={kp} "
+                    f"前备箱={fr} 前机盖={hd} "
+                    f"手势={gs} 遮挡={oc}"
                 )
 
 
@@ -572,6 +770,15 @@ def run(
     # 是否同目录原地操作
     same_root = str(cfg.in_root).strip() == str(cfg.out_root).strip()
     log(f"[模式] 输入==输出 : {same_root}  分水岭目录名: {cfg.camera_dir_name!r}")
+    log(f"[模式] 并发数    : {cfg.jobs}  锁 TTL: {cfg.lock_ttl}s  强制重跑: {cfg.force_rerun}")
+    if cfg.markers_root is not None:
+        try:
+            cfg.markers_root.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            raise RuntimeError(f"无法创建 markers_root: {cfg.markers_root} ({e})")
+        log(f"[模式] markers_root: {cfg.markers_root}")
+    else:
+        log("[模式] markers_root: (未设置，不写 lock / done marker)")
 
     from detector import YoloDetector, resolve_model_path
     from pose_detector import PoseDetector, resolve_pose_model_path
@@ -676,6 +883,15 @@ def parse_args() -> argparse.Namespace:
                    help="某个桶的单独阈值：--embed-sim-bucket 遮挡=0.7 可多次")
     p.add_argument("--camera-dir-name", type=str, default="camera",
                    help="分水岭目录名，精确匹配（默认 camera）")
+    p.add_argument("--markers-root", type=Path, default=None,
+                   help="marker/lock 集中存放目录（多机共享盘推荐）；"
+                        "留空则不写 _classify.lock / _classify_done.marker")
+    p.add_argument("--jobs", type=int, default=1,
+                   help="camera 目录并发数（线程池），默认 1")
+    p.add_argument("--lock-ttl", type=int, default=900,
+                   help="_classify.lock TTL 秒，超时后可被别机抢占，默认 900")
+    p.add_argument("--force", action="store_true",
+                   help="忽略 _classify_done.marker，强制重跑")
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--report", type=Path, default=None)
     p.add_argument("--fingerprint", action="store_true")
@@ -753,6 +969,10 @@ def main() -> int:
         limit=a.limit,
         camera_dir_name=a.camera_dir_name,
         report_path=a.report,
+        markers_root=a.markers_root.resolve() if a.markers_root else None,
+        jobs=a.jobs,
+        lock_ttl=a.lock_ttl,
+        force_rerun=a.force,
     )
     run(cfg)
     return 0
