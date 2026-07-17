@@ -217,6 +217,18 @@ call :LOG_INFO "命名参数   : !NAME_ARGS!"
 call :LOG_INFO "视频扩展名 : %VIDEO_EXTS%"
 echo.
 
+REM ---- 强制重切: 忽略 _done.marker, 所有视频重抽 ----
+call :LOG_INFO "强制重切: 忽略已完成标记, 所有视频重抽 (会覆盖已抽帧)"
+call :LOG_INFO "  N = 不强制(默认, 有 marker 就跳过, 断点续跑)"
+call :LOG_INFO "  Y = 强制重切(会重新写图, 慎用)"
+choice /C NY /M "是否强制重切 (N=否 / Y=是)"
+set "FORCE_EXTRACT="
+if errorlevel 2 (
+    set "FORCE_EXTRACT=--no-skip-existing"
+    call :LOG_INFO "已开启强制重切: 会传 --no-skip-existing 给 extract_frames.exe"
+)
+echo.
+
 set "OVERALL_RC=0"
 for /l %%i in (1,1,!SELECTED_COUNT!) do (
     call set "SUBNAME=%%SELECTED[%%i]%%"
@@ -259,7 +271,7 @@ call :LOG_INFO "  标记 : !MK_DIR!"
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  开始"
 
-extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext %VIDEO_EXTS% --lock-ttl %LOCK_TTL% --markers-root "!MK_DIR!" %NAME_ARGS%
+extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext %VIDEO_EXTS% --lock-ttl %LOCK_TTL% --markers-root "!MK_DIR!" %NAME_ARGS% %FORCE_EXTRACT%
 set "RC=!ERRORLEVEL!"
 
 set "T=%TIME:~0,8%"
