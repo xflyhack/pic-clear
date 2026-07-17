@@ -49,8 +49,7 @@ echo ============================================================
 echo   run_all  一站式抽帧 + 去重
 echo ============================================================
 call :LOG_INFO "数据盘   : %DATA_DRIVE%"
-call :LOG_INFO "输出根   : %OUT_ROOT%"
-call :LOG_INFO "标记根   : %MARKERS_ROOT%"
+call :LOG_INFO "默认输出根: %OUT_ROOT%  (启动时可覆盖)"
 call :LOG_INFO "目录前缀 : %DATA_PREFIX%*"
 echo ============================================================
 echo.
@@ -95,6 +94,26 @@ if "%MATCH_COUNT%"=="0" (
 
 echo.
 call :LOG_INFO "sjbz 根目录: %SRC_ROOT%"
+echo.
+
+REM ---- Step A2: choose / override OUT_ROOT ----
+REM  Empty input = keep the default at the top of this bat.
+REM  MARKERS_ROOT follows OUT_ROOT: if user overrides OUT_ROOT,
+REM  markers go to '<new OUT_ROOT>\.markers' automatically so both
+REM  machines on a shared drive stay in sync without a second prompt.
+call :LOG_INFO "默认输出根: %OUT_ROOT%"
+call :LOG_INFO "  - 直接回车 = 用默认;  或输入新的绝对路径,例如 D:\pic-clear\frames"
+set "OUT_INPUT="
+set /p "OUT_INPUT=输出根 (回车=默认): "
+if defined OUT_INPUT (
+    set "OUT_ROOT=!OUT_INPUT!"
+    REM 用户覆盖了 OUT_ROOT, markers 跟着走,避免二次输入
+    set "MARKERS_ROOT=!OUT_INPUT!\.markers"
+)
+if not exist "!OUT_ROOT!" mkdir "!OUT_ROOT!" 2>nul
+if not exist "!MARKERS_ROOT!" mkdir "!MARKERS_ROOT!" 2>nul
+call :LOG_INFO "实际输出根: !OUT_ROOT!"
+call :LOG_INFO "实际标记根: !MARKERS_ROOT!"
 echo.
 
 REM ---- Step B: 选一级子目录 ----
