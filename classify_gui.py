@@ -28,18 +28,20 @@ from tkinter import ttk
 import classify_pic
 from classify_pic import (
     ClassifyConfig, DEFAULT_FRONT_KEYWORDS, DEFAULT_IMAGE_EXT, run,
-    BUCKET_LIVENESS, BUCKET_KEYPOINT, BUCKET_FRUNK, BUCKET_HOOD, BUCKET_OCCLUSION,
+    BUCKET_LIVENESS, BUCKET_KEYPOINT, BUCKET_FRUNK, BUCKET_HOOD,
+    BUCKET_GESTURE, BUCKET_OCCLUSION,
 )
 
 
 APP_TITLE = "pic-clear 二次分类工具"
-APP_VERSION = "v0.4.24"
+APP_VERSION = "v0.4.25"
 APP_COMPANY = "山东数旗信息科技有限公司"
 CONFIG_NAME = "classify_gui.json"
 
-# GUI 里给用户显示的桶列表（跟 classify_pic 里保持一致）
+# GUI 里给用户显示的 6 大类桶列表（跟 classify_pic 里保持一致）
 BUCKET_ORDER = [
-    BUCKET_LIVENESS, BUCKET_KEYPOINT, BUCKET_FRUNK, BUCKET_HOOD, BUCKET_OCCLUSION,
+    BUCKET_LIVENESS, BUCKET_KEYPOINT, BUCKET_FRUNK, BUCKET_HOOD,
+    BUCKET_GESTURE, BUCKET_OCCLUSION,
 ]
 
 
@@ -75,7 +77,7 @@ class ClassifyApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
         root.title(f"{APP_TITLE}  {APP_VERSION}")
-        root.geometry("980x760")
+        root.geometry("980x800")
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
         self.worker: threading.Thread | None = None
@@ -432,6 +434,7 @@ class ClassifyApp:
                   "  · 人体关键点（步行/站立）\n"
                   "  · 前备箱防夹检测\n"
                   "  · 前机盖开关检测（少样本 embedding）\n"
+                  "  · 动态手势（少样本 embedding）\n"
                   "  · 遮挡（少样本 embedding）"),
             foreground="#555", justify="left",
         ).pack(anchor="w", **pad)

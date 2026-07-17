@@ -2,14 +2,15 @@
 """
 classify_pic.py — 对**已经去重完**的图片目录做二次分类。
 
-v1 规则：
+v1 规则（共 6 桶）：
   规则 1 舱外活体检测   —— YOLO 检出 person + 载具（bicycle/motorcycle）
                           [骑行 / 滑板 / 三轮上的人]
   规则 2 人体关键点     —— YOLO-pose 检出 person 且**同框无载具**，
                           关节可见数够 [步行 / 站立]
   规则 4 前备箱防夹     —— 路径含前视关键字 + person 命中即可（车内视角）
   规则 5 前机盖开关     —— 少样本 embedding 匹配（走 embed_detector）
-  规则 3 动态手势       —— 暂不做
+  规则 3 动态手势       —— 少样本 embedding 匹配（走 embed_detector）
+  规则 6 遮挡           —— 少样本 embedding 匹配（走 embed_detector）
 
 输出目录结构（嵌套 = 目录组织，不代表包含关系）：
 
@@ -18,7 +19,8 @@ v1 规则：
   ├── 人体关键点/                  ← 规则 2
   │   ├── 前备箱防夹检测/          ← 规则 4
   │   └── 前机盖开关检测/          ← 规则 5
-  └── <未处理的原子目录>
+  ├── 动态手势/                    ← 规则 3（少样本 embedding）
+  └── 遮挡/                        ← 规则 6（少样本 embedding，跟活体同级）
 
 一张图命中多桶各复制一份（真 copy，覆盖同名）。
 """
@@ -71,7 +73,7 @@ BUCKET_LIVENESS = "舱外活体检测"       # 规则 1（YOLO：人+载具）
 BUCKET_KEYPOINT = "人体关键点"         # 规则 2（YOLO-pose：步行/站立）
 BUCKET_FRUNK = "前备箱防夹检测"        # 规则 4（路径关键字+人）
 BUCKET_HOOD = "前机盖开关检测"         # 规则 5（embedding）
-BUCKET_GESTURE = "动态手势"            # 规则 3（占位，暂不做）
+BUCKET_GESTURE = "动态手势"            # 规则 3（少样本 embedding）
 BUCKET_OCCLUSION = "遮挡"              # 纯 embedding，跟活体/关键点平级
 
 BUCKET_NAMES = {
@@ -134,6 +136,7 @@ class Stats:
     keypoint: int = 0
     frunk: int = 0
     hood: int = 0
+    gesture: int = 0
     occlusion: int = 0
     embed_extra: int = 0        # embedding 补充命中的图片次数（跨桶累加）
     copied_original: int = 0
@@ -402,7 +405,7 @@ def process_all(
       camera_out/舱外活体检测/<子目录>/*.jpg
       camera_out/舱外活体检测/人体关键点/<子目录>/*.jpg
       camera_out/舱外活体检测/人体关键点/前备箱防夹检测/<子目录>/*.jpg
-      camera_out/舱外活体检测/人体关键点/动态手势/<子目录>/*.jpg      (占位，暂不分类)
+      camera_out/舱外活体检测/人体关键点/动态手势/<子目录>/*.jpg
       camera_out/舱外活体检测/人体关键点/前机盖开关检测/<子目录>/*.jpg
       camera_out/遮挡/<子目录>/*.jpg
     """
@@ -480,6 +483,8 @@ def _process_one_camera(
                 stats.frunk += 1
             if BUCKET_HOOD in r.buckets:
                 stats.hood += 1
+            if BUCKET_GESTURE in r.buckets:
+                stats.gesture += 1
             if BUCKET_OCCLUSION in r.buckets:
                 stats.occlusion += 1
 
@@ -510,7 +515,7 @@ def _process_one_camera(
                     f"  [进度] {stats.scanned} 张  "
                     f"活体={stats.liveness} 关节={stats.keypoint} "
                     f"前备箱={stats.frunk} 前机盖={stats.hood} "
-                    f"遮挡={stats.occlusion}"
+                    f"手势={stats.gesture} 遮挡={stats.occlusion}"
                 )
 
 
@@ -630,6 +635,7 @@ def run(
     log(f"  规则 2 人体关键点 : {stats.keypoint}")
     log(f"  规则 4 前备箱防夹 : {stats.frunk}")
     log(f"  规则 5 前机盖     : {stats.hood}")
+    log(f"  规则 3 动态手势   : {stats.gesture}")
     log(f"  遮挡              : {stats.occlusion}")
     log(f"  镜像复制 / 桶复制 : {stats.copied_original} / {stats.copied_bucket}")
     log(f"  过滤跳过 / 错误   : {stats.skipped_filter} / {stats.errors}")
