@@ -59,14 +59,34 @@ if not exist "%REPORT%" (
 REM ---- 统计输出路径 ----
 REM STATS_ROOT 优先取环境变量, 让 watcher/run_all 传进来, 兼容多盘符.
 if not defined STATS_ROOT set "STATS_ROOT=Z:\data_source"
-REM 关键:%DATE% 在中文 Windows 上可能包含"周一/星期日"这样的前缀,
-REM tokens 拆分会把星期名当成 YYYY,最终生成"周一0714"这种错目录.
-REM 用 PowerShell 拿日期,绕开 %DATE% 陷阱,输出永远是 8 位 yyyyMMdd.
-for /f %%d in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"') do set "TODAY=%%d"
+
+REM ---- 取当天日期 yyyyMMdd, 三级兜底 ----
+REM 1) 首选 PowerShell, 输出稳定; 但某些堡垒机上启动慢/被禁
+REM 2) fallback: %DATE% 假设 yyyy-MM-dd 或 yyyy/MM/dd, 切前 4/6/8 位
+REM 3) fallback: wmic os get localdatetime (Win7+ 都有)
+REM 三种都失败 -> stderr 报错, stdout 打 -1, 让 watcher 跳过阈值判断
+set "TODAY="
+for /f %%d in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd" 2^>nul') do set "TODAY=%%d"
 if not defined TODAY (
-    echo [append_stats] ERROR: 无法获取当前日期(PowerShell 可用吗?)
+    >&2 echo [append_stats] WARN: PowerShell 拿日期失败, fallback 到 %%DATE%%
+    REM 中文 Win 的 %DATE% 通常是 2026-07-17 或 2026/07/17
+    set "D_RAW=%DATE%"
+    set "TODAY=!D_RAW:~0,4!!D_RAW:~5,2!!D_RAW:~8,2!"
+    REM 校验拿到的是不是 8 位纯数字
+    echo(!TODAY!| findstr /R "^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$" >nul || set "TODAY="
+)
+if not defined TODAY (
+    >&2 echo [append_stats] WARN: %%DATE%% 也拿不到, fallback 到 wmic
+    for /f "tokens=2 delims==" %%d in ('wmic os get localdatetime /value 2^>nul ^| findstr "="') do set "TODAY=%%d"
+    if defined TODAY set "TODAY=!TODAY:~0,8!"
+    echo(!TODAY!| findstr /R "^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$" >nul || set "TODAY="
+)
+if not defined TODAY (
+    >&2 echo [append_stats] ERROR: 三种方式都拿不到日期, 无法按天分目录
+    echo -1
     endlocal ^& exit /b 3
 )
+>&2 echo [append_stats] today=!TODAY! stats_root=%STATS_ROOT%
 set "STATS_DIR=%STATS_ROOT%\%TODAY%"
 set "STATS_CSV=%STATS_DIR%\machine_id_%COMPUTERNAME%.csv"
 
