@@ -138,7 +138,11 @@ if %REMAIN% LSS 0 set "REMAIN=0"
 REM 时间戳 (YYYY-MM-DD HH:MM:SS)
 REM 上面把 %DATE% 的拆分提取删了,这里改用 PowerShell 拿完整时间戳.
 REM Get-Date -Format s 输出 ISO8601 :2026-07-14T10:23:45,无空格最亲 for /f
-for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format s"') do set "TS_RAW=%%t"
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format s" 2^>nul') do set "TS_RAW=%%t"
+if not defined TS_RAW (
+    >&2 echo [append_stats] WARN: PowerShell 拿时间戳失败, fallback 到 %%TIME%%
+    set "TS_RAW=!TODAY:~0,4!-!TODAY:~4,2!-!TODAY:~6,2!T%TIME:~0,8%"
+)
 set "TS=!TS_RAW:T= !"
 
 REM ---- 追加一行 ----

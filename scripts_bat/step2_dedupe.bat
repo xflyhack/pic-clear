@@ -181,11 +181,15 @@ if errorlevel 1 (
     pause & exit /b 3
 )
 
-REM 用 cmd 内置变量拼时间戳,不再 spawn powershell
-set "TS_D=%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%"
-set "TS_T=%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
-set "TS_T=%TS_T: =0%"
-set "TS=%TS_D%_%TS_T%"
+REM ---- 时间戳 TS=yyyyMMdd_HHmmss, 优先 PowerShell (堡垒机 %%DATE%% 格式不定) ----
+set "TS="
+for /f %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss" 2^>nul') do set "TS=%%t"
+if not defined TS (
+    set "TS_D=%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%"
+    set "TS_T=%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
+    set "TS_T=!TS_T: =0!"
+    set "TS=!TS_D!_!TS_T!"
+)
 
 set "OVERALL_RC=0"
 for /l %%i in (1,1,!SELECTED_COUNT!) do (
