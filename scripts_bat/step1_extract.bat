@@ -14,6 +14,9 @@ REM ============================================================
 
 set "DATA_DRIVE=Z:"
 set "OUT_ROOT=%DATA_DRIVE%\切帧结果"
+REM MARKERS_ROOT: 抽帧锁 / _done.marker 集中存放的根目录，
+REM 多机共享盘时所有机器应指向同一位置。默认放到数据盘同级。
+set "MARKERS_ROOT=%DATA_DRIVE%\切帧标记"
 set "DATA_PREFIX=sjbz_"
 
 echo ============================================================
@@ -21,6 +24,7 @@ echo   step1_extract  只做抽帧
 echo ============================================================
 call :LOG_INFO "数据盘   : %DATA_DRIVE%"
 call :LOG_INFO "输出根   : %OUT_ROOT%"
+call :LOG_INFO "标记根   : %MARKERS_ROOT%"
 call :LOG_INFO "目录前缀 : %DATA_PREFIX%*"
 echo ============================================================
 echo.
@@ -156,6 +160,22 @@ if errorlevel 1 (
     pause & exit /b 3
 )
 
+REM ---- 命名规则二选一（新版 / 老版），bat 只支持这两种预设 ----
+echo.
+call :LOG_INFO "图片命名规则："
+call :LOG_INFO "  N = 新版  video1 - 副本_0001.jpg  (parent + 4 位补零，推荐)"
+call :LOG_INFO "  O = 老版  frame_000001.jpg        (legacy + 6 位补零，兼容历史)"
+choice /C NO /M "请选择命名规则 (N=新版 / O=老版)"
+set "NAME_ARGS=--name-style parent --name-digits 4"
+set "NAME_LABEL=新版 parent + 4 位"
+if errorlevel 2 (
+    set "NAME_ARGS=--name-style legacy --name-digits 6"
+    set "NAME_LABEL=老版 legacy + 6 位"
+)
+call :LOG_INFO "命名规则   : !NAME_LABEL!"
+call :LOG_INFO "命名参数   : !NAME_ARGS!"
+echo.
+
 set "OVERALL_RC=0"
 for /l %%i in (1,1,!SELECTED_COUNT!) do (
     call set "SUBNAME=%%SELECTED[%%i]%%"
@@ -181,20 +201,24 @@ setlocal EnableDelayedExpansion
 if "!SUBNAME!"=="." (
     set "SRC_DIR=%SRC_ROOT%"
     set "DST_DIR=%OUT_ROOT%\%SRC_ROOT_NAME%"
+    set "MK_DIR=%MARKERS_ROOT%\%SRC_ROOT_NAME%"
 ) else (
     set "SRC_DIR=%SRC_ROOT%\!SUBNAME!"
     set "DST_DIR=%OUT_ROOT%\%SRC_ROOT_NAME%\!SUBNAME!"
+    set "MK_DIR=%MARKERS_ROOT%\%SRC_ROOT_NAME%\!SUBNAME!"
 )
 if not exist "!DST_DIR!" mkdir "!DST_DIR!" 2>nul
+if not exist "!MK_DIR!" mkdir "!MK_DIR!" 2>nul
 
 echo.
 call :LOG_STEP "(%1/!SELECTED_COUNT!) 抽帧: !SUBNAME!"
 call :LOG_INFO "  源   : !SRC_DIR!"
 call :LOG_INFO "  目标 : !DST_DIR!"
+call :LOG_INFO "  标记 : !MK_DIR!"
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  开始"
 
-extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext .h265
+extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext .h265 --markers-root "!MK_DIR!" %NAME_ARGS%
 set "RC=!ERRORLEVEL!"
 
 set "T=%TIME:~0,8%"
