@@ -85,8 +85,28 @@ REM 用户覆盖了 OUT_ROOT, markers 跟着走,避免二次输入
 set "MARKERS_ROOT=!OUT_INPUT!\.markers"
 :OUT_ROOT_READY
 if not exist "!OUT_ROOT!" mkdir "!OUT_ROOT!" 2>nul
-if not exist "!MARKERS_ROOT!" mkdir "!MARKERS_ROOT!" 2>nul
 call :LOG_INFO "实际输出根: !OUT_ROOT!"
+echo.
+
+REM ---- Step A3: choose / override MARKERS_ROOT ----
+REM  Marker root holds _extract.lock and _done.marker files.
+REM  When multiple machines share the disk (Z:), they MUST all
+REM  point to the same MARKERS_ROOT so they can coordinate:
+REM  - _extract.lock prevents two machines from grabbing the same video
+REM  - _done.marker lets a restarted job resume from the last video
+REM  Empty input = keep current value (shown as '当前').
+call :LOG_INFO "当前标记根: !MARKERS_ROOT!"
+call :LOG_INFO "  - 直接回车 = 保持当前"
+call :LOG_INFO "  - 或输入新的绝对路径,多机并发时所有机器要指向同一个位置"
+call :LOG_INFO "    例如 Z:\pic-clear-markers"
+set "MK_INPUT="
+set /p "MK_INPUT=标记根 (回车=保持): "
+if not defined MK_INPUT goto :MARKERS_ROOT_READY
+REM strip quotes if user dragged a folder with spaces
+set "MK_INPUT=!MK_INPUT:"=!"
+set "MARKERS_ROOT=!MK_INPUT!"
+:MARKERS_ROOT_READY
+if not exist "!MARKERS_ROOT!" mkdir "!MARKERS_ROOT!" 2>nul
 call :LOG_INFO "实际标记根: !MARKERS_ROOT!"
 echo.
 
