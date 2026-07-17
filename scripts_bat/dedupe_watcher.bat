@@ -41,6 +41,9 @@ REM    /interval N      scan interval seconds, default 5
 REM    /motion N        adjacent-frame car motion threshold
 REM    /scene           enable --scene-protect
 REM    /once            run one pass and exit (default: loop forever)
+REM    /markers-root D  scan this dir for _done.marker (multi-machine mode)
+REM                     dedup targets the mirror location under /out-root
+REM    /out-root D      image root that mirrors /markers-root (required with it)
 REM ============================================================
 
 set "WATCH_ROOT="
@@ -50,6 +53,8 @@ set "INTERVAL=5"
 set "MOTION="
 set "SCENE_ARG="
 set "RUN_ONCE=0"
+set "MARKERS_ROOT="
+set "OUT_ROOT_ARG="
 REM LOCK_TTL: stale-lock TTL in seconds (multi-machine dedupe).
 REM   Must match run_all / dedupe_gui defaults or the two won't coordinate.
 set "LOCK_TTL=900"
@@ -70,17 +75,46 @@ if /I "%~1"=="/motion"    ( set "MOTION=%~2"    & shift & shift & goto :PARSE_AR
 if /I "%~1"=="/scene"     ( set "SCENE_ARG=--scene-protect" & shift & goto :PARSE_ARGS )
 if /I "%~1"=="--scene"    ( set "SCENE_ARG=--scene-protect" & shift & goto :PARSE_ARGS )
 if /I "%~1"=="--scene-protect" ( set "SCENE_ARG=--scene-protect" & shift & goto :PARSE_ARGS )
+if /I "%~1"=="/markers-root"   ( set "MARKERS_ROOT=%~2" & shift & shift & goto :PARSE_ARGS )
+if /I "%~1"=="--markers-root"  ( set "MARKERS_ROOT=%~2" & shift & shift & goto :PARSE_ARGS )
+if /I "%~1"=="/out-root"       ( set "OUT_ROOT_ARG=%~2" & shift & shift & goto :PARSE_ARGS )
+if /I "%~1"=="--out-root"      ( set "OUT_ROOT_ARG=%~2" & shift & shift & goto :PARSE_ARGS )
 if not defined WATCH_ROOT set "WATCH_ROOT=%~1"
 shift
 goto :PARSE_ARGS
 
 :PARSED
-if not defined WATCH_ROOT set "WATCH_ROOT=Z:\切帧结果"
+REM ---- resolve scan/image roots ----
+REM  Two modes:
+REM   (a) legacy: markers live inside images, scan WATCH_ROOT
+REM   (b) split:  markers under MARKERS_ROOT, images under OUT_ROOT_ARG
+REM               (both required, must mirror each other)
+set "SPLIT_MODE=0"
+if defined MARKERS_ROOT (
+    if not defined OUT_ROOT_ARG (
+        call :LOG_ERR "指定了 /markers-root 就必须同时指定 /out-root"
+        pause ^& exit /b 2
+    )
+    set "SCAN_ROOT=%MARKERS_ROOT%"
+    set "IMG_ROOT=%OUT_ROOT_ARG%"
+    set "SPLIT_MODE=1"
+    if not defined WATCH_ROOT set "WATCH_ROOT=%OUT_ROOT_ARG%"
+) else (
+    if not defined WATCH_ROOT set "WATCH_ROOT=Z:\切帧结果"
+    set "SCAN_ROOT=%WATCH_ROOT%"
+    set "IMG_ROOT=%WATCH_ROOT%"
+)
 
-if not exist "%WATCH_ROOT%\" (
-    call :LOG_ERR "监听根目录不存在: %WATCH_ROOT%"
+if not exist "%SCAN_ROOT%\" (
+    call :LOG_ERR "扫描根目录不存在: %SCAN_ROOT%"
     call :LOG_ERR "示例: dedupe_watcher.bat \"Z:\切帧结果\""
-    pause & exit /b 2
+    pause ^& exit /b 2
+)
+if "%SPLIT_MODE%"=="1" (
+    if not exist "%IMG_ROOT%\" (
+        call :LOG_ERR "图片根目录不存在: %IMG_ROOT%"
+        pause ^& exit /b 2
+    )
 )
 
 where dedupe_pic.exe >nul 2>nul
@@ -96,6 +130,9 @@ echo ============================================================
 echo   dedupe_watcher
 echo ============================================================
 call :LOG_INFO "监听根目录 : %WATCH_ROOT%"
+call :LOG_INFO "扫描根     : %SCAN_ROOT%"
+call :LOG_INFO "图片根     : %IMG_ROOT%"
+if "%SPLIT_MODE%"=="1" call :LOG_INFO "分离模式   : marker 与图片不在同一目录树"
 call :LOG_INFO "模式       : %APPLY_TXT%"
 call :LOG_INFO "阈值       : %THRESHOLD%"
 call :LOG_INFO "扫描间隔   : %INTERVAL% 秒"
@@ -123,7 +160,7 @@ if "%DAILY_LIMIT_HIT%"=="1" (
 )
 set "FOUND_THIS_ROUND=0"
 
-for /f "delims=" %%M in ('dir /s /b /a-d "%WATCH_ROOT%\_done.marker" 2^>nul') do (
+for /f "delims=" %%M in ('dir /s /b /a-d "%SCAN_ROOT%\_done.marker" 2^>nul') do (
     set "MARKER=%%M"
     call :PROCESS_ONE
 )
@@ -152,46 +189,75 @@ REM ====================================================================
 if "%DAILY_LIMIT_HIT%"=="1" goto :EOF
 setlocal EnableDelayedExpansion
 
-for %%F in ("!MARKER!") do set "TARGET_DIR=%%~dpF"
-if "!TARGET_DIR:~-1!"=="\" set "TARGET_DIR=!TARGET_DIR:~0,-1!"
+REM MK_DIR = marker 所在目录; TARGET_DIR = 图片所在目录 (镜像映射)
+for %%F in ("!MARKER!") do set "MK_DIR=%%~dpF"
+if "!MK_DIR:~-1!"=="\" set "MK_DIR=!MK_DIR:~0,-1!"
 
-if exist "!TARGET_DIR!\_dedup_done.marker"    ( endlocal & goto :EOF )
-if exist "!TARGET_DIR!\_dedup_failed.marker"  ( endlocal & goto :EOF )
-if exist "!TARGET_DIR!\_dedup_running.marker" ( endlocal & goto :EOF )
+REM 计算 TARGET_DIR: split 模式下 substring replace 把 SCAN_ROOT 前缀替成 IMG_ROOT
+if "%SPLIT_MODE%"=="1" (
+    set "SR=%SCAN_ROOT%"
+    set "IR=%IMG_ROOT%"
+    if "!SR:~-1!"=="\" set "SR=!SR:~0,-1!"
+    set "MKX=!MK_DIR!"
+    if "!MKX:~-1!"=="\" set "MKX=!MKX:~0,-1!"
+    REM %%MKX:!SR!=%% 二次展开: 把 MKX 里首个 SR 段替换成空 -> 剩相对路径
+    call set "REL=%%MKX:!SR!=%%"
+    if "!REL!"=="!MKX!" (
+        call :LOG_ERR "无法把 marker !MK_DIR! 映射回图片根,跳过 (SR=!SR!)"
+        endlocal ^& goto :EOF
+    )
+    set "TARGET_DIR=!IR!!REL!"
+) else (
+    set "TARGET_DIR=!MK_DIR!"
+)
 
-> "!TARGET_DIR!\_dedup_running.marker" echo running
+if not exist "!TARGET_DIR!\" (
+    call :LOG_ERR "图片目录不存在: !TARGET_DIR!  (marker=!MK_DIR!)"
+    endlocal ^& goto :EOF
+)
+
+REM 完成/失败/进行中 标记与 marker 同目录,与 extract 一致,多机可见
+if exist "!MK_DIR!\_dedup_done.marker"    ( endlocal & goto :EOF )
+if exist "!MK_DIR!\_dedup_failed.marker"  ( endlocal & goto :EOF )
+if exist "!MK_DIR!\_dedup_running.marker" ( endlocal & goto :EOF )
+
+> "!MK_DIR!\_dedup_running.marker" echo running
 
 set "T=%TIME:~0,8%"
 echo.
-call :LOG_STEP "!T!  发现待处理: !TARGET_DIR!"
+if "%SPLIT_MODE%"=="1" (
+    call :LOG_STEP "!T!  发现待处理: !TARGET_DIR!  (marker=!MK_DIR!)"
+) else (
+    call :LOG_STEP "!T!  发现待处理: !TARGET_DIR!"
+)
 
 set "REPORT_CSV=!TARGET_DIR!\dedupe_report.csv"
 
 if "%APPLY%"=="1" (
     REM hard-delete, skip _trash so no second cleanup pass is needed
     if defined MOTION (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --marker-dir "!TARGET_DIR!" --lock-ttl %LOCK_TTL% !SCENE_ARG! --motion-threshold %MOTION% --apply --hard-delete --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --marker-dir "!MK_DIR!" --lock-ttl %LOCK_TTL% !SCENE_ARG! --motion-threshold %MOTION% --apply --hard-delete --report "!REPORT_CSV!"
     ) else (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --marker-dir "!TARGET_DIR!" --lock-ttl %LOCK_TTL% !SCENE_ARG! --apply --hard-delete --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --marker-dir "!MK_DIR!" --lock-ttl %LOCK_TTL% !SCENE_ARG! --apply --hard-delete --report "!REPORT_CSV!"
     )
 ) else (
     if defined MOTION (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --marker-dir "!TARGET_DIR!" --lock-ttl %LOCK_TTL% !SCENE_ARG! --motion-threshold %MOTION% --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --marker-dir "!MK_DIR!" --lock-ttl %LOCK_TTL% !SCENE_ARG! --motion-threshold %MOTION% --report "!REPORT_CSV!"
     ) else (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --marker-dir "!TARGET_DIR!" --lock-ttl %LOCK_TTL% !SCENE_ARG! --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --marker-dir "!MK_DIR!" --lock-ttl %LOCK_TTL% !SCENE_ARG! --report "!REPORT_CSV!"
     )
 )
 set "RC=!ERRORLEVEL!"
 
-del "!TARGET_DIR!\_dedup_running.marker" 2>nul
+del "!MK_DIR!\_dedup_running.marker" 2>nul
 
 set "T2=%TIME:~0,8%"
 if "!RC!"=="0" (
-    > "!TARGET_DIR!\_dedup_done.marker" echo done
+    > "!MK_DIR!\_dedup_done.marker" echo done
     call :LOG_OK "!T2!  完成: !TARGET_DIR!"
     call :DO_STATS "!TARGET_DIR!"
 ) else (
-    > "!TARGET_DIR!\_dedup_failed.marker" echo rc=!RC!
+    > "!MK_DIR!\_dedup_failed.marker" echo rc=!RC!
     call :LOG_ERR "!T2!  dedupe 失败 rc=!RC!  目录: !TARGET_DIR!"
     call :LOG_ERR "        已写入 _dedup_failed.marker,本轮不再重试此目录"
     call :LOG_ERR "        排查后手工删除 _dedup_failed.marker 即可让下轮继续"
