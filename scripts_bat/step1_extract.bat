@@ -40,6 +40,9 @@ set "MARKERS_ROOT=Z:\切帧标记"
 REM VIDEO_EXTS: comma-separated video extensions to extract.
 REM Passed as --ext to extract_frames.exe; keep in sync with extract_gui defaults.
 set "VIDEO_EXTS=h265,mp4"
+REM LOCK_TTL: stale-lock TTL in seconds (multi-machine coordination).
+REM   Must match run_all / extract_gui defaults.
+set "LOCK_TTL=900"
 
 echo ============================================================
 echo   step1_extract  只做抽帧
@@ -256,7 +259,7 @@ call :LOG_INFO "  标记 : !MK_DIR!"
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  开始"
 
-extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext %VIDEO_EXTS% --markers-root "!MK_DIR!" %NAME_ARGS%
+extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext %VIDEO_EXTS% --lock-ttl %LOCK_TTL% --markers-root "!MK_DIR!" %NAME_ARGS%
 set "RC=!ERRORLEVEL!"
 
 set "T=%TIME:~0,8%"

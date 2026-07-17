@@ -45,6 +45,12 @@ REM   0.05 = exe default, even sub-pixel jitter counts as motion
 REM   0.12 = bat default, must move >12%% of frame width/height
 REM   0.20 = very strict, car must basically drive away
 set "MOTION_THRESHOLD=0.12"
+REM DEDUPE_THRESHOLD: hamming distance threshold, larger = looser.
+REM   default 3 keeps behavior identical to previous bats.
+set "DEDUPE_THRESHOLD=3"
+REM LOCK_TTL: seconds a stale lock is considered dead (multi-machine).
+REM   same default as extract_gui / dedupe_gui.
+set "LOCK_TTL=900"
 
 echo ============================================================
 echo   run_all  一站式抽帧 + 去重
@@ -328,7 +334,7 @@ call :LOG_INFO "  标记 : !MK_DIR!"
 
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  抽帧开始"
-extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext %VIDEO_EXTS% --markers-root "!MK_DIR!" %NAME_ARGS%
+extract_frames.exe "!SRC_DIR!" "!DST_DIR!" --fps 1 --ext %VIDEO_EXTS% --lock-ttl %LOCK_TTL% --markers-root "!MK_DIR!" %NAME_ARGS%
 if errorlevel 1 (
     set "T=%TIME:~0,8%"
     call :LOG_ERR "  %T%  抽帧失败: !SUBNAME!"
@@ -346,7 +352,7 @@ set "REPORT_CSV=!DST_DIR!\dedupe_report_%TS%.csv"
 
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  去重 dry-run 开始"
-dedupe_pic.exe "!DST_DIR!" --threshold 3 !SCENE_FLAG! --report "!REPORT_CSV!"
+dedupe_pic.exe "!DST_DIR!" --threshold %DEDUPE_THRESHOLD% --motion-threshold %MOTION_THRESHOLD% --marker-dir "!MK_DIR!" --lock-ttl %LOCK_TTL% !SCENE_FLAG! --report "!REPORT_CSV!"
 if errorlevel 1 (
     call :LOG_ERR "  dry-run 失败: !SUBNAME!"
     endlocal & exit /b 1
@@ -362,7 +368,7 @@ if !CHOICE_RC! EQU 2 (
 
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  真删开始 (永久删除,不落回收站)"
-dedupe_pic.exe "!DST_DIR!" --threshold 3 !SCENE_FLAG! --apply --hard-delete --report "!REPORT_CSV!"
+dedupe_pic.exe "!DST_DIR!" --threshold %DEDUPE_THRESHOLD% --motion-threshold %MOTION_THRESHOLD% --marker-dir "!MK_DIR!" --lock-ttl %LOCK_TTL% !SCENE_FLAG! --apply --hard-delete --report "!REPORT_CSV!"
 if errorlevel 1 (
     set "T=%TIME:~0,8%"
     call :LOG_ERR "  %T%  真删失败: !SUBNAME!"

@@ -33,6 +33,13 @@ REM ============================================================
 set "DATA_DRIVE=Z:"
 set "OUT_ROOT=%DATA_DRIVE%\切帧结果"
 set "DATA_PREFIX=sjbz_"
+REM MARKERS_ROOT: dir holding _dedup.lock / _dedup_done.marker.
+REM   Multi-machine dedupe MUST share this location (e.g. Z:\pic-clear-markers).
+set "MARKERS_ROOT=Z:\切帧标记"
+REM MOTION_THRESHOLD / DEDUPE_THRESHOLD / LOCK_TTL: match run_all defaults
+set "MOTION_THRESHOLD=0.12"
+set "DEDUPE_THRESHOLD=3"
+set "LOCK_TTL=900"
 
 echo ============================================================
 echo   step2_dedupe  只做去重
@@ -205,10 +212,13 @@ setlocal EnableDelayedExpansion
 if "!SUBNAME!"=="." (
     set "DST_DIR=%OUT_ROOT%\%SRC_ROOT_NAME%"
     set "SRC_DIR=%SRC_ROOT%"
+    set "MK_DIR=%MARKERS_ROOT%\%SRC_ROOT_NAME%"
 ) else (
     set "DST_DIR=%OUT_ROOT%\%SRC_ROOT_NAME%\!SUBNAME!"
     set "SRC_DIR=%SRC_ROOT%\!SUBNAME!"
+    set "MK_DIR=%MARKERS_ROOT%\%SRC_ROOT_NAME%\!SUBNAME!"
 )
+if not exist "!MK_DIR!" mkdir "!MK_DIR!" 2>nul
 
 set "TARGET_DIR=!DST_DIR!"
 if not exist "!TARGET_DIR!\" (
@@ -224,7 +234,7 @@ set "REPORT_CSV=!DST_DIR!\dedupe_report_%TS%.csv"
 
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  开始 dry-run"
-dedupe_pic.exe "!TARGET_DIR!" --threshold 3 --report "!REPORT_CSV!"
+dedupe_pic.exe "!TARGET_DIR!" --threshold %DEDUPE_THRESHOLD% --motion-threshold %MOTION_THRESHOLD% --marker-dir "!MK_DIR!" --lock-ttl %LOCK_TTL% --report "!REPORT_CSV!"
 if errorlevel 1 (
     call :LOG_ERR "  dry-run 失败: !SUBNAME!"
     endlocal & exit /b 1
@@ -239,7 +249,7 @@ if errorlevel 2 (
 
 set "T=%TIME:~0,8%"
 call :LOG_INFO "  %T%  开始真删 (永久删除,不落回收站)"
-dedupe_pic.exe "!TARGET_DIR!" --threshold 3 --apply --hard-delete --report "!REPORT_CSV!"
+dedupe_pic.exe "!TARGET_DIR!" --threshold %DEDUPE_THRESHOLD% --motion-threshold %MOTION_THRESHOLD% --marker-dir "!MK_DIR!" --lock-ttl %LOCK_TTL% --apply --hard-delete --report "!REPORT_CSV!"
 set "RC=!ERRORLEVEL!"
 
 set "T=%TIME:~0,8%"

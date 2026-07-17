@@ -50,6 +50,9 @@ set "INTERVAL=5"
 set "MOTION="
 set "SCENE_ARG="
 set "RUN_ONCE=0"
+REM LOCK_TTL: stale-lock TTL in seconds (multi-machine dedupe).
+REM   Must match run_all / dedupe_gui defaults or the two won't coordinate.
+set "LOCK_TTL=900"
 REM Stop watcher after this many cumulative remaining images.
 REM Set to 0 to disable.
 set "DAILY_REMAIN_LIMIT=8000000000"
@@ -167,15 +170,15 @@ set "REPORT_CSV=!TARGET_DIR!\dedupe_report.csv"
 if "%APPLY%"=="1" (
     REM hard-delete, skip _trash so no second cleanup pass is needed
     if defined MOTION (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% !SCENE_ARG! --motion-threshold %MOTION% --apply --hard-delete --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --marker-dir "!TARGET_DIR!" --lock-ttl %LOCK_TTL% !SCENE_ARG! --motion-threshold %MOTION% --apply --hard-delete --report "!REPORT_CSV!"
     ) else (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% !SCENE_ARG! --apply --hard-delete --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --marker-dir "!TARGET_DIR!" --lock-ttl %LOCK_TTL% !SCENE_ARG! --apply --hard-delete --report "!REPORT_CSV!"
     )
 ) else (
     if defined MOTION (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% !SCENE_ARG! --motion-threshold %MOTION% --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --marker-dir "!TARGET_DIR!" --lock-ttl %LOCK_TTL% !SCENE_ARG! --motion-threshold %MOTION% --report "!REPORT_CSV!"
     ) else (
-        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% !SCENE_ARG! --report "!REPORT_CSV!"
+        dedupe_pic.exe "!TARGET_DIR!" --threshold %THRESHOLD% --marker-dir "!TARGET_DIR!" --lock-ttl %LOCK_TTL% !SCENE_ARG! --report "!REPORT_CSV!"
     )
 )
 set "RC=!ERRORLEVEL!"
