@@ -28,6 +28,18 @@ jobs:
           pip install pystray>=0.19.5 Pillow>=10.0.0 keyboard>=0.13.5
           pip install pyinstaller pyarmor
 
+      - name: Write _version.py from git ref
+        # 把 git ref (tag 名 v0.4.30 / 分支 main) 写入 _version.py,
+        # 打包出来的 exe 版本号跟 git tag 对齐, GUI 的关于页 / --version 都能看到.
+        run: |
+          if "%GITHUB_REF_TYPE%"=="tag" (
+            echo VERSION = "%GITHUB_REF_NAME%" > _version.py
+          ) else (
+            echo VERSION = "%GITHUB_REF_NAME%-%GITHUB_SHA:~0,7%" > _version.py
+          )
+          type _version.py
+        shell: cmd
+
       - name: Prepare build folder
         run: |
           mkdir build_dedupe_gui
@@ -36,6 +48,7 @@ jobs:
           copy dedupe_gui.py build_dedupe_gui\
           copy licensing.py build_dedupe_gui\
           copy otp_utils.py build_dedupe_gui\
+          copy _version.py build_dedupe_gui\
         shell: cmd
 
       - name: Obfuscate with PyArmor
@@ -64,6 +77,7 @@ jobs:
             --add-data "..\icon.ico;." ^
             --add-data "..\icon.png;." ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
+            --hidden-import _version ^
             --hidden-import json ^
             --hidden-import base64 ^
             --hidden-import hashlib ^

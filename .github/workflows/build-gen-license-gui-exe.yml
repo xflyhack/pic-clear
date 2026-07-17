@@ -31,10 +31,23 @@ jobs:
           pip install cryptography>=41.0
           pip install pyinstaller
 
+      - name: Write _version.py from git ref
+        # 把 git ref (tag 名 v0.4.30 / 分支 main) 写入 _version.py,
+        # 打包出来的 exe 版本号跟 git tag 对齐, GUI 的关于页 / --version 都能看到.
+        run: |
+          if "%GITHUB_REF_TYPE%"=="tag" (
+            echo VERSION = "%GITHUB_REF_NAME%" > _version.py
+          ) else (
+            echo VERSION = "%GITHUB_REF_NAME%-%GITHUB_SHA:~0,7%" > _version.py
+          )
+          type _version.py
+        shell: cmd
+
       - name: Prepare build folder
         run: |
           mkdir build_gen_license_gui
           copy gen_license_gui.py build_gen_license_gui\
+          copy _version.py build_gen_license_gui\
           mkdir build_gen_license_gui\secrets
           copy secrets\private.pem build_gen_license_gui\secrets\
         shell: cmd
@@ -47,6 +60,7 @@ jobs:
             --add-data "..\icon.ico;." ^
             --add-data "..\icon.png;." ^
             --add-data "secrets\private.pem;secrets" ^
+            --hidden-import _version ^
             --hidden-import cryptography ^
             --hidden-import cryptography.hazmat.primitives.asymmetric.padding ^
             --hidden-import cryptography.hazmat.primitives.hashes ^

@@ -35,6 +35,18 @@ jobs:
         run: |
           pip install ultralytics onnx onnxslim torch torchvision onnxscript
 
+      - name: Write _version.py from git ref
+        # 把 git ref (tag 名 v0.4.30 / 分支 main) 写入 _version.py,
+        # 打包出来的 exe 版本号跟 git tag 对齐, GUI 的关于页 / --version 都能看到.
+        run: |
+          if "%GITHUB_REF_TYPE%"=="tag" (
+            echo VERSION = "%GITHUB_REF_NAME%" > _version.py
+          ) else (
+            echo VERSION = "%GITHUB_REF_NAME%-%GITHUB_SHA:~0,7%" > _version.py
+          )
+          type _version.py
+        shell: cmd
+
       - name: Export yolov8n.onnx & yolov8n-pose.onnx & mobilenetv3_embed.onnx
         env:
           PYTHONIOENCODING: utf-8
@@ -78,6 +90,7 @@ jobs:
             --add-data "yolov8n-pose.onnx;." ^
             --add-data "mobilenetv3_embed.onnx;." ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
+            --hidden-import _version ^
             --hidden-import onnxruntime ^
             --hidden-import PIL ^
             --hidden-import PIL.Image ^
