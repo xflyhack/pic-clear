@@ -344,7 +344,34 @@ extract_frames.exe <SRC_ROOT> <DST_ROOT> [选项]
   --dry-run                只列出计划，不真抽
   --ffmpeg PATH            ffmpeg.exe 路径（默认自动查找 exe 同目录）
   --fingerprint            打印本机指纹后退出（申请授权用）
+  --name-style STYLE       图片命名规则：legacy / parent / custom，默认 legacy
+  --name-template TMPL     自定义模板（占位符 {parent} / {seq}），
+                           填了就视同 --name-style custom
+  --name-digits N          {seq} 补零位数（1-8），默认 6
 ```
+
+### 图片命名规则
+
+抽帧的图片名支持三种模式（GUI 里可切换，命令行用 `--name-style`）：
+
+| style | 示例（`--name-digits 4`） | 说明 |
+|---|---|---|
+| `legacy`（默认） | `frame_0001.jpg` | 老规则，兼容历史 |
+| `parent` | `video1 - 副本_0001.jpg` | `video1` 是视频同名子文件夹（`out_dir.name`） |
+| `custom` | 由 `--name-template` 决定 | 支持占位符 `{parent}` 和 `{seq}` |
+
+示例：
+
+```cmd
+:: 新规则、4 位补零
+extract_frames.exe D:\videos D:\frames --name-style parent --name-digits 4 ...
+
+:: 自定义
+extract_frames.exe D:\videos D:\frames ^
+    --name-template "{parent}_snap_{seq}" --name-digits 5 ...
+```
+
+> 切换命名规则不影响 `_done.marker`，但同一视频若已经用旧规则抽过、又想用新规则重抽，需要加 `--no-skip-existing`（GUI 里就是"强制重切"）。
 
 ### 跟 dedupe_pic.exe 串起来
 

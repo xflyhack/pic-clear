@@ -9,6 +9,12 @@ extract_frames.py — 递归遍历一个视频根目录，把每个 .h265 文件
                                     frame_000002.jpg
                                     ...
 
+图片文件名支持通过 --name-style / --name-template / --name-digits 配置：
+  legacy 规则（默认）：frame_000001.jpg
+  parent 规则       ：video1 - 副本_0001.jpg（parent = 视频同名子文件夹）
+  custom 规则       ：--name-template '{parent} - 副本_{seq}' 之类，
+                     占位符 {parent}/{seq} 会分别替换成父目录名和补零序号。
+
 硬规则：任何叫 VLM 的目录（含子目录）整棵子树跳过。
 
 依赖：与本 exe 同目录（或系统 PATH）里的 ffmpeg.exe。
@@ -130,6 +136,74 @@ class VideoTask:
     out_dir: Path        # 抽帧输出目录（视频同名文件夹）
     rel_path: Path       # 相对于 src_root 的路径（打印用）
     marker_dir: Path     # marker/lock 存放目录（集中在 markers_root 下的镜像位置）
+
+
+# ------------------------------ 命名规则 ------------------------------------
+#
+# 抽帧输出的图片文件名以前是硬编码的 frame_000001.jpg（6 位补零），
+# 现在改成可配置：
+#   --name-style legacy    → frame_{seq}.jpg（旧规则）
+#   --name-style parent    → {parent} - 副本_{seq}.jpg（新规则，parent 是 out_dir.name）
+#   --name-template "..."  → 完全自定义，占位符 {parent}/{seq}
+#   --name-digits N        → {seq} 的补零位数（对 legacy/parent/custom 都生效）
+#
+# 内部会算出两样东西：
+#   ffmpeg_pattern : 传给 ffmpeg -i 的输出路径，序号用 %0Nd 表示
+#   glob_pattern   : 用来找当前规则下已生成的帧，形如 "prefix*.jpg"
+
+NAME_STYLE_LEGACY = "legacy"
+NAME_STYLE_PARENT = "parent"
+NAME_STYLE_CUSTOM = "custom"
+
+_ALLOWED_TEMPLATE_CHARS_EXTRA = " -_.()[]（）【】"
+
+
+def _resolve_template(style: str, template: str | None) -> str:
+    """按 style / template 组合返回最终模板字符串（含 {parent} / {seq} 占位符）。"""
+    if template:
+        return template
+    if style == NAME_STYLE_PARENT:
+        return "{parent} - 副本_{seq}"
+    # 兜底：legacy
+    return "frame_{seq}"
+
+
+def _validate_template(template: str) -> None:
+    """轻量校验：不允许出现路径分隔符 / ffmpeg 会误解的 % 号 / 控制字符。
+    允许中文、字母、数字、下划线、空格、连字符、点、括号等常见装饰字符。"""
+    if not template:
+        raise ValueError("命名模板不能为空")
+    if "{seq}" not in template:
+        raise ValueError("命名模板必须包含 {seq} 占位符")
+    bad = set("/\\%\n\r\t\0:*?\"<>|")
+    for ch in template:
+        if ch in bad:
+            raise ValueError(f"命名模板中不允许的字符: {ch!r}")
+
+
+def build_name_pattern(
+    out_dir: Path,
+    style: str,
+    template: str | None,
+    digits: int,
+) -> tuple[str, str]:
+    """根据规则算出 (ffmpeg_pattern, glob_pattern)。
+
+    - ffmpeg_pattern: 传给 ffmpeg 的完整输出路径，形如
+        DST/.../video1/video1 - 副本_%04d.jpg
+    - glob_pattern  : 供 Path.glob() 用来枚举已生成帧，形如
+        "video1 - 副本_*.jpg"（不含目录部分）
+    """
+    digits = max(1, min(8, int(digits or 4)))
+    tmpl = _resolve_template(style, template)
+    _validate_template(tmpl)
+    parent_name = out_dir.name
+    # 先替换 {parent}；{seq} 单独处理成 %0Nd / *
+    resolved = tmpl.replace("{parent}", parent_name)
+    ffmpeg_name = resolved.replace("{seq}", f"%0{digits}d") + ".jpg"
+    glob_name = resolved.replace("{seq}", "*") + ".jpg"
+    ffmpeg_pattern = str(out_dir / ffmpeg_name)
+    return ffmpeg_pattern, glob_name
 
 
 def collect_tasks(
@@ -261,6 +335,9 @@ def extract_one(
     quality: int,
     skip_existing: bool,
     lock_ttl: float = 900.0,
+    name_style: str = NAME_STYLE_LEGACY,
+    name_template: str | None = None,
+    name_digits: int = 6,
 ) -> tuple[str, int, str]:
     """
     对一个视频执行抽帧。返回 (stage, 帧数, 说明)。stage 有三种：
@@ -276,8 +353,15 @@ def extract_one(
     marker_dir.mkdir(parents=True, exist_ok=True)
     marker = marker_dir / "_done.marker"
     lock_path = marker_dir / _LOCK_NAME
+    # 计算本次运行使用的命名 pattern；out_dir 一定存在（或即将创建），name 只用到 out_dir.name
+    ffmpeg_pattern, glob_pattern = build_name_pattern(
+        out_dir, name_style, name_template, name_digits,
+    )
     if skip_existing and marker.is_file():
-        existing = list(out_dir.glob("frame_*.jpg"))
+        # marker 存在时按当前命名规则数帧；也兜底扫一下旧的 frame_*.jpg
+        existing = list(out_dir.glob(glob_pattern))
+        if not existing and glob_pattern != "frame_*.jpg":
+            existing = list(out_dir.glob("frame_*.jpg"))
         # 老 marker 里可能写着 'done' 或 'empty'，都当已处理，直接跳过
         try:
             content = marker.read_text(encoding="utf-8", errors="replace").strip().lower()
@@ -295,7 +379,10 @@ def extract_one(
 
     # 抢到锁之后再清理半成品（此时只有本进程会碰这个目录，安全）
     if skip_existing:
-        stale = list(out_dir.glob("frame_*.jpg"))
+        stale = list(out_dir.glob(glob_pattern))
+        # 若切换过命名规则，把老前缀的半成品也清掉，避免混着两套图
+        if glob_pattern != "frame_*.jpg":
+            stale += list(out_dir.glob("frame_*.jpg"))
         if stale:
             for f in stale:
                 try:
@@ -304,7 +391,10 @@ def extract_one(
                     pass
 
     try:
-        return _do_extract(task, ffmpeg, fps, quality, out_dir, marker)
+        return _do_extract(
+            task, ffmpeg, fps, quality, out_dir, marker,
+            ffmpeg_pattern, glob_pattern,
+        )
     finally:
         _release_lock(lock_path)
 
@@ -316,9 +406,11 @@ def _do_extract(
     quality: int,
     out_dir: Path,
     marker: Path,
+    ffmpeg_pattern: str,
+    glob_pattern: str,
 ) -> tuple[str, int, str]:
     """真正跑 ffmpeg 的部分。已在锁保护内。"""
-    out_pattern = str(out_dir / "frame_%06d.jpg")
+    out_pattern = ffmpeg_pattern
 
     # ffmpeg 命令：
     #   -hide_banner / -loglevel error：静默
@@ -373,7 +465,7 @@ def _do_extract(
             )
         return "failed", 0, f"ffmpeg 返回 {proc.returncode}: {err}"
 
-    frames = sorted(out_dir.glob("frame_*.jpg"))
+    frames = sorted(out_dir.glob(glob_pattern))
     if not frames:
         # rc=0 但真的一帧没出来（比如极短视频 / fps 太低）——也算 empty，写 marker
         try:
@@ -471,6 +563,29 @@ def parse_args() -> argparse.Namespace:
             "会按视频输出的层级建镜像子目录。"
         ),
     )
+    p.add_argument(
+        "--name-style", default=NAME_STYLE_LEGACY,
+        choices=[NAME_STYLE_LEGACY, NAME_STYLE_PARENT, NAME_STYLE_CUSTOM],
+        help=(
+            "图片命名规则。"
+            "legacy=frame_{seq}.jpg（旧默认，兼容历史）；"
+            "parent={parent} - 副本_{seq}.jpg（parent 为视频同名文件夹）；"
+            "custom=使用 --name-template 指定的自定义模板。"
+            "默认: %(default)s"
+        ),
+    )
+    p.add_argument(
+        "--name-template", default=None,
+        help=(
+            "自定义命名模板，支持占位符 {parent} 和 {seq}，"
+            "示例：'{parent} - 副本_{seq}' 或 'frame_{seq}'。"
+            "填了本参数即视同 --name-style custom。"
+        ),
+    )
+    p.add_argument(
+        "--name-digits", type=int, default=6,
+        help="序号 {seq} 的补零位数，范围 1-8。旧版是 6，新版一般用 4。默认: %(default)s",
+    )
     return p.parse_args()
 
 
@@ -554,6 +669,18 @@ def main() -> int:
         d.strip() for d in args.skip_dir.split(",") if d.strip()
     }
 
+    # 命名规则参数：template 一填即视为 custom；先做一次静态校验（不带 {parent} 实值）
+    name_style = args.name_style
+    name_template = args.name_template
+    if name_template:
+        name_style = NAME_STYLE_CUSTOM
+    name_digits = max(1, min(8, int(args.name_digits)))
+    try:
+        _validate_template(_resolve_template(name_style, name_template))
+    except ValueError as e:
+        print(f"[FATAL] 命名模板非法: {e}", file=sys.stderr)
+        return 2
+
     print("=" * 60)
     print(f"  视频源目录: {args.src_root}")
     print(f"  输出根目录: {args.dst_root}")
@@ -567,6 +694,7 @@ def main() -> int:
     print(f"  并发数    : {args.jobs}")
     print(f"  锁 TTL    : {int(args.lock_ttl)}s")
     print(f"  markers   : {args.markers_root}")
+    print(f"  命名规则  : {name_style}  模板={_resolve_template(name_style, name_template)!r}  位数={name_digits}")
     print(f"  hostname  : {_HOSTNAME}")
     print("=" * 60)
 
@@ -588,8 +716,9 @@ def main() -> int:
     if args.dry_run:
         print("\n[dry-run] 将会做的事：")
         for i, t in enumerate(tasks, 1):
+            _, gp = build_name_pattern(t.out_dir, name_style, name_template, name_digits)
             print(f"  {i:4d}. {t.src_path}")
-            print(f"        → {t.out_dir}{os.sep}frame_*.jpg")
+            print(f"        → {t.out_dir}{os.sep}{gp}")
         print(f"\n[dry-run] 共 {len(tasks)} 个视频，未真正执行。")
         return 0
 
@@ -613,6 +742,9 @@ def main() -> int:
                 task, ffmpeg, args.fps, args.quality,
                 skip_existing=not args.no_skip_existing,
                 lock_ttl=args.lock_ttl,
+                name_style=name_style,
+                name_template=name_template,
+                name_digits=name_digits,
             )
         except Exception as e:
             return task, "failed", 0, f"内部异常: {type(e).__name__}: {e}", time.time() - t0
@@ -668,6 +800,9 @@ def main() -> int:
                     task, ffmpeg, args.fps, args.quality,
                     skip_existing=not args.no_skip_existing,
                     lock_ttl=args.lock_ttl,
+                    name_style=name_style,
+                    name_template=name_template,
+                    name_digits=name_digits,
                 )
             except KeyboardInterrupt:
                 interrupted["v"] = True

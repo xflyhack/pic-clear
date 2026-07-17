@@ -181,6 +181,15 @@ class ExtractGUI:
         self._markers_root_var = tk.StringVar(value=self._cfg.get("markers_root", ""))
         self._force_reextract_var = tk.BooleanVar(
             value=bool(self._cfg.get("force_reextract", False)))
+        # 命名规则相关（新版：video1 - 副本_0009.jpg / 老版：frame_000002.jpg）
+        # name_style: legacy / parent / custom
+        self._name_style_var = tk.StringVar(
+            value=str(self._cfg.get("name_style", "parent")))
+        self._name_template_var = tk.StringVar(
+            value=str(self._cfg.get("name_template", "{parent} - 副本_{seq}")))
+        self._name_digits_var = tk.IntVar(
+            value=int(self._cfg.get("name_digits", 4)))
+        self._name_preview_var = tk.StringVar(value="")
         self._minimize_to_tray_var = tk.BooleanVar(
             value=bool(self._cfg.get("minimize_to_tray", True)))
         self._hotkey_var = tk.StringVar(
@@ -313,6 +322,59 @@ class ExtractGUI:
         ttk.Label(row,
                   text="  极端场景使用；会覆盖已完成的视频，默认不勾选",
                   foreground="#a00").pack(side="left", padx=8)
+
+        # 命名规则：新版 / 老版 / 自定义 + 位数 + 预览
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="命名规则：", width=12).pack(side="left")
+        self._name_style_combo = ttk.Combobox(
+            row, width=32, state="readonly",
+            values=[
+                "新版 ({parent} - 副本_{seq})",
+                "老版 (frame_{seq})",
+                "自定义（下方模板生效）",
+            ],
+        )
+        # 内部值与显示值映射
+        self._name_style_display_map = {
+            "parent": "新版 ({parent} - 副本_{seq})",
+            "legacy": "老版 (frame_{seq})",
+            "custom": "自定义（下方模板生效）",
+        }
+        self._name_style_reverse_map = {
+            v: k for k, v in self._name_style_display_map.items()
+        }
+        cur_style = self._name_style_var.get() or "parent"
+        self._name_style_combo.set(
+            self._name_style_display_map.get(cur_style,
+                                             self._name_style_display_map["parent"]))
+        self._name_style_combo.pack(side="left")
+        self._name_style_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: self._on_name_style_changed())
+        ttk.Label(row, text="  序号位数：",
+                  foreground="#666").pack(side="left", padx=(8, 0))
+        ttk.Spinbox(row, from_=1, to=8, increment=1, width=4,
+                    textvariable=self._name_digits_var,
+                    command=self._refresh_name_preview).pack(side="left")
+
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="模板：", width=12).pack(side="left")
+        self._name_template_entry = ttk.Entry(
+            row, textvariable=self._name_template_var, width=44)
+        self._name_template_entry.pack(side="left")
+        ttk.Label(row, text="  占位符 {parent}=视频同名文件夹  {seq}=序号",
+                  foreground="#666").pack(side="left", padx=6)
+        # 用户手动改模板时刷新预览
+        self._name_template_var.trace_add(
+            "write", lambda *_: self._refresh_name_preview())
+        self._name_digits_var.trace_add(
+            "write", lambda *_: self._refresh_name_preview())
+
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="预览：", width=12).pack(side="left")
+        ttk.Label(row, textvariable=self._name_preview_var,
+                  foreground="#0066cc").pack(side="left")
+        # 初始状态同步一次
+        self._on_name_style_changed(persist=False)
 
         # 子目录多选
         row = ttk.Frame(page); row.pack(fill="x", **pad)
@@ -472,6 +534,69 @@ class ExtractGUI:
         for _, v in self._sub_vars:
             v.set(state)
 
+    # ---------- 命名规则 ----------
+
+    def _on_name_style_changed(self, persist: bool = True) -> None:
+        """Combobox 切换：更新内部 style 变量、切换 Entry 使能、刷新预览。"""
+        display = self._name_style_combo.get()
+        style = self._name_style_reverse_map.get(display, "parent")
+        self._name_style_var.set(style)
+        # 老版 / 新版：模板固定，Entry 只读展示；自定义时才可编辑
+        preset_map = {
+            "parent": "{parent} - 副本_{seq}",
+            "legacy": "frame_{seq}",
+        }
+        if style in preset_map:
+            self._name_template_var.set(preset_map[style])
+            try:
+                self._name_template_entry.configure(state="readonly")
+            except Exception:
+                pass
+        else:
+            try:
+                self._name_template_entry.configure(state="normal")
+            except Exception:
+                pass
+        self._refresh_name_preview()
+
+    def _refresh_name_preview(self) -> None:
+        """按当前 style/template/digits 算一个示例文件名放到预览 Label。"""
+        try:
+            style = self._name_style_var.get() or "parent"
+            template = self._name_template_var.get().strip()
+            digits = int(self._name_digits_var.get() or 4)
+        except Exception:
+            self._name_preview_var.set("(参数不合法)")
+            return
+        digits = max(1, min(8, digits))
+        if style == "custom":
+            tmpl = template or "{parent} - 副本_{seq}"
+        else:
+            tmpl = {"parent": "{parent} - 副本_{seq}",
+                    "legacy": "frame_{seq}"}.get(style, "{parent} - 副本_{seq}")
+        try:
+            example = (tmpl.replace("{parent}", "video1")
+                           .replace("{seq}", f"{9:0{digits}d}") + ".jpg")
+        except Exception as e:
+            example = f"(模板非法：{e})"
+        self._name_preview_var.set(example)
+
+    def _current_name_params(self) -> tuple[str, str, int]:
+        """返回 (style, template, digits)。用于组装 CLI 参数。"""
+        style = self._name_style_var.get() or "parent"
+        template = self._name_template_var.get().strip()
+        try:
+            digits = int(self._name_digits_var.get() or 4)
+        except Exception:
+            digits = 4
+        digits = max(1, min(8, digits))
+        # 非 custom 时，模板保持与 preset 一致，避免用户误改后不生效
+        if style == "parent":
+            template = "{parent} - 副本_{seq}"
+        elif style == "legacy":
+            template = "frame_{seq}"
+        return style, template, digits
+
     # ---------- 环境检查 ----------
 
     def _check_environment(self):
@@ -501,6 +626,21 @@ class ExtractGUI:
             messagebox.showerror("参数错误",
                                  "Marker 根不能为空。多机共享盘时所有机器应指向同一位置。")
             return
+
+        # 命名规则参数校验（模板必须含 {seq}，不能含路径/非法字符）
+        name_style, name_template, name_digits = self._current_name_params()
+        if "{seq}" not in name_template:
+            messagebox.showerror(
+                "参数错误",
+                f"命名模板必须包含 {{seq}} 占位符：{name_template}")
+            return
+        bad_chars = set("/\\%\n\r\t\0:*?\"<>|")
+        for ch in name_template:
+            if ch in bad_chars:
+                messagebox.showerror(
+                    "参数错误",
+                    f"命名模板中不允许的字符：{ch!r}\n模板={name_template}")
+                return
 
         exe = _find_extract_exe()
         if not exe:
@@ -576,6 +716,12 @@ class ExtractGUI:
                        "--jobs", str(int(self._extract_jobs_var.get())),
                        "--lock-ttl", str(int(self._lock_ttl_var.get())),
                        "--markers-root", str(sub_mr)]
+                # 命名规则参数（GUI 全局配置，对所有子目录任务生效）
+                name_style, name_template, name_digits = self._current_name_params()
+                cmd += ["--name-style", name_style,
+                        "--name-digits", str(name_digits)]
+                if name_style == "custom" and name_template:
+                    cmd += ["--name-template", name_template]
                 if bool(self._force_reextract_var.get()):
                     cmd.append("--no-skip-existing")
                     self._log("[警告] 已开启强制重切：所有视频将忽略已完成标记，覆盖重抽")
@@ -753,6 +899,10 @@ class ExtractGUI:
             "minimize_to_tray": bool(self._minimize_to_tray_var.get()),
             "hotkey": self._hotkey_var.get(),
             "selected_subs": [name for name, v in self._sub_vars if v.get()],
+            # 命名规则
+            "name_style": self._name_style_var.get() or "parent",
+            "name_template": self._name_template_var.get(),
+            "name_digits": int(self._name_digits_var.get() or 4),
         }
         try:
             geo = self.root.winfo_geometry()
