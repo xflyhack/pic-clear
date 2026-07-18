@@ -1,7 +1,7 @@
 # 统计数据库设计文档（stats.db）
 
 **状态**：设计中，未实现（v0.4.49 起接入）
-**目的**：把 extract / dedupe 长任务的产出量落库，方便跨天/跨机汇总、导出、可视化。
+**目的**：把 extract / dedupe / classify 长任务的产出量落库，方便跨天/跨机汇总、导出、可视化。
 
 ---
 
@@ -11,8 +11,8 @@
 
 - 默认路径：`~/.pic-clear/stats_<hostname>.db`
   - Windows：`%USERPROFILE%\.pic-clear\stats_<hostname>.db`
-  - hostname 从 `socket.gethostname()` 取，特殊字符做 `[A-Za-z0-9_-]` 过滤
-- GUI 可覆盖：新加 `stats_db_path` 配置项，写在 `~/.pic-clear/dedupe_gui.json` / `extract_gui.json`
+  - hostname 从 `socket.gethostname()` 取，特殊字符过滤为 `[A-Za-z0-9_-]`
+- GUI 可覆盖：新加 `stats_db_path` 配置项，写在 `~/.pic-clear/dedupe_gui.json` / `extract_gui.json` / `classify_gui.json`
 
 **为什么不放共享盘**（血泪教训）：
 - Z 盘是 SMB 共享，SQLite 的文件锁在 SMB 上不可靠
@@ -31,56 +31,84 @@
 **建库时开启 WAL**：
 ```sql
 PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;  -- WAL 下够安全, 快
+PRAGMA synchronous=NORMAL;   -- WAL 下够安全, 更快
+PRAGMA busy_timeout=5000;    -- 单机并发的关键: 遇锁自动重试 5 秒
 PRAGMA foreign_keys=ON;
 ```
 
 ### 2.1 `extract_stats`（抽帧记录）
 
+**含义**：extract_frames.exe 每抽完一个视频写一条。
+
 ```sql
 CREATE TABLE IF NOT EXISTS extract_stats (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts            TEXT    NOT NULL,        -- ISO8601 本地时间 '2026-07-18 14:23:45'
-    ts_date       TEXT    NOT NULL,        -- '2026-07-18' 冗余, 便于按天 group
-    host          TEXT    NOT NULL,        -- 机器名 (来源 socket.gethostname)
-    task_id       TEXT,                    -- 一次抽帧任务的 uuid, 便于把同一批归组
-    source_root   TEXT,                    -- 用户点开始时填的 "视频源目录"
-    video_path    TEXT    NOT NULL,        -- 具体这条视频的绝对路径
-    output_dir    TEXT    NOT NULL,        -- 帧输出目录
-    frames        INTEGER NOT NULL,        -- 本次抽出多少张
-    duration_sec  REAL,                    -- 视频时长 (秒), NULL=没探到
-    fps           REAL,                    -- 抽帧频率 (每秒 x 张)
-    naming_style  TEXT,                    -- 'parent' 或 'legacy'
-    seq_digits    INTEGER,                 -- 序号补零位数
-    elapsed_sec   REAL,                    -- 本视频抽帧耗时
-    exit_code     INTEGER,                 -- 0 成功, 非 0 失败
-    error_msg     TEXT                     -- 失败时记原因
+    ts            TEXT    NOT NULL,
+    ts_date       TEXT    NOT NULL,
+    host          TEXT    NOT NULL,
+    task_id       TEXT,
+    source_root   TEXT,
+    video_path    TEXT    NOT NULL,
+    output_dir    TEXT    NOT NULL,
+    frames        INTEGER NOT NULL,
+    duration_sec  REAL,
+    fps           REAL,
+    naming_style  TEXT,
+    seq_digits    INTEGER,
+    elapsed_sec   REAL,
+    exit_code     INTEGER,
+    error_msg     TEXT
 );
 CREATE INDEX idx_ex_date ON extract_stats(ts_date);
 CREATE INDEX idx_ex_task ON extract_stats(task_id);
 CREATE INDEX idx_ex_source_root ON extract_stats(source_root);
 ```
 
+**字段中文注释**：
+
+| 字段 | 类型 | 中文含义 | 示例 |
+|---|---|---|---|
+| `id` | INTEGER PK | 自增主键 | 1, 2, ... |
+| `ts` | TEXT | 抽帧完成时间（本地时区，ISO8601） | `2026-07-18 14:23:45` |
+| `ts_date` | TEXT | 完成日期（冗余，方便按天分组） | `2026-07-18` |
+| `host` | TEXT | 机器名（`socket.gethostname()`） | `DESKTOP-M7ET7A6` |
+| `task_id` | TEXT | 一次抽帧任务的短 uuid（同一批视频共用） | `a3f1b2c9d4e5` |
+| `source_root` | TEXT | 用户点开始时填的"视频源目录" | `Z:\sjbz_20260715` |
+| `video_path` | TEXT | 具体这条视频的绝对路径 | `Z:\sjbz_...\1.mp4` |
+| `output_dir` | TEXT | 帧输出目录 | `D:\切帧结果\...\camera01` |
+| `frames` | INTEGER | 本视频抽出多少张图 | `179` |
+| `duration_sec` | REAL | 视频时长（秒），未探到=NULL | `18.5` |
+| `fps` | REAL | 抽帧频率（每秒 x 张） | `1.0` |
+| `naming_style` | TEXT | 图片命名规则 | `parent` / `legacy` |
+| `seq_digits` | INTEGER | 序号补零位数 | `4` / `6` |
+| `elapsed_sec` | REAL | 本视频抽帧耗时（秒） | `2.3` |
+| `exit_code` | INTEGER | 子进程退出码，0=成功 | `0` |
+| `error_msg` | TEXT | 失败时的错误说明 | `ffmpeg: no such file` |
+
+---
+
 ### 2.2 `dedupe_stats`（去重记录）
+
+**含义**：dedupe_pic.exe 每处理完一个 camera 目录写一条。
 
 ```sql
 CREATE TABLE IF NOT EXISTS dedupe_stats (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts             TEXT    NOT NULL,       -- ISO8601 完成时间
-    ts_date        TEXT    NOT NULL,       -- '2026-07-18'
+    ts             TEXT    NOT NULL,
+    ts_date        TEXT    NOT NULL,
     host           TEXT    NOT NULL,
-    task_id        TEXT,                   -- 一轮去重的 uuid
-    target_root    TEXT,                   -- 用户点开始时填的 "去重目标"
-    dir_path       TEXT    NOT NULL,       -- 具体这个 camera 目录
-    total          INTEGER NOT NULL,       -- 目录里图片总数 (扫描完的有效数)
-    deleted        INTEGER NOT NULL,       -- 本次删了多少
-    remain         INTEGER NOT NULL,       -- total - deleted
-    freed_bytes    INTEGER,                -- 释放字节数
-    threshold      INTEGER,                -- 相似度阈值
-    protect_count  INTEGER,                -- 受保护多少张
-    scene_count    INTEGER,                -- 场景保护多少张
-    apply          INTEGER,                -- 0=仅报告  1=真删
-    report_csv     TEXT,                   -- 对应的 dedupe_report.csv 绝对路径
+    task_id        TEXT,
+    target_root    TEXT,
+    dir_path       TEXT    NOT NULL,
+    total          INTEGER NOT NULL,
+    deleted        INTEGER NOT NULL,
+    remain         INTEGER NOT NULL,
+    freed_bytes    INTEGER,
+    threshold      INTEGER,
+    protect_count  INTEGER,
+    scene_count    INTEGER,
+    apply          INTEGER,
+    report_csv     TEXT,
     elapsed_sec    REAL,
     exit_code      INTEGER,
     error_msg      TEXT
@@ -90,7 +118,93 @@ CREATE INDEX idx_de_task ON dedupe_stats(task_id);
 CREATE INDEX idx_de_target_root ON dedupe_stats(target_root);
 ```
 
-### 2.3 `schema_version`（迁移用）
+**字段中文注释**：
+
+| 字段 | 类型 | 中文含义 | 示例 |
+|---|---|---|---|
+| `id` | INTEGER PK | 自增主键 | 1, 2, ... |
+| `ts` | TEXT | 完成时间（本地时区，ISO8601） | `2026-07-18 14:23:45` |
+| `ts_date` | TEXT | 完成日期（按天分组用） | `2026-07-18` |
+| `host` | TEXT | 机器名 | `DESKTOP-M7ET7A6` |
+| `task_id` | TEXT | 一轮去重的短 uuid | `b8e2c7a1f9d0` |
+| `target_root` | TEXT | 用户点开始时填的"去重目标" | `Z:\切帧结果` |
+| `dir_path` | TEXT | 具体这个 camera 目录绝对路径 | `Z:\切帧结果\...\camera07` |
+| `total` | INTEGER | 目录里图片总数（有效可读的） | `156` |
+| `deleted` | INTEGER | 本次实际删掉的张数 | `42` |
+| `remain` | INTEGER | 剩余 = total - deleted | `114` |
+| `freed_bytes` | INTEGER | 释放的字节数 | `72817356` |
+| `threshold` | INTEGER | 相似度阈值（Hamming 距离） | `3` |
+| `protect_count` | INTEGER | 受保护未删的张数（有 person/车辆等） | `52` |
+| `scene_count` | INTEGER | 场景保护数（纯色/异常帧） | `0` |
+| `apply` | INTEGER | 是否真删，0=仅报告 1=删了 | `1` |
+| `report_csv` | TEXT | 对应 dedupe_report.csv 的绝对路径 | `Z:\...\dedupe_report.csv` |
+| `elapsed_sec` | REAL | 本目录总耗时（秒） | `78.2` |
+| `exit_code` | INTEGER | 子进程退出码，0=成功 | `0` |
+| `error_msg` | TEXT | 失败时的错误说明 | `keyboard interrupt` |
+
+---
+
+### 2.3 `classify_stats`（二次分类记录）
+
+**含义**：classify_gui / classify_pic 每处理完一个 camera 目录写一条。因为 classify 是"读一个目录 → 按规则复制/移动到不同 bucket 目录"，粒度和 dedupe 一致（一目录一条记录）。
+
+```sql
+CREATE TABLE IF NOT EXISTS classify_stats (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            TEXT    NOT NULL,
+    ts_date       TEXT    NOT NULL,
+    host          TEXT    NOT NULL,
+    task_id       TEXT,
+    in_root       TEXT,
+    out_root      TEXT,
+    dir_path      TEXT    NOT NULL,
+    total         INTEGER NOT NULL,
+    classified    INTEGER NOT NULL,
+    skipped       INTEGER,
+    failed        INTEGER,
+    bucket_json   TEXT,
+    copy_mode     TEXT,
+    rules_dir     TEXT,
+    elapsed_sec   REAL,
+    exit_code     INTEGER,
+    error_msg     TEXT
+);
+CREATE INDEX idx_cl_date ON classify_stats(ts_date);
+CREATE INDEX idx_cl_task ON classify_stats(task_id);
+CREATE INDEX idx_cl_in_root ON classify_stats(in_root);
+```
+
+**字段中文注释**：
+
+| 字段 | 类型 | 中文含义 | 示例 |
+|---|---|---|---|
+| `id` | INTEGER PK | 自增主键 | 1, 2, ... |
+| `ts` | TEXT | 完成时间 | `2026-07-18 15:10:22` |
+| `ts_date` | TEXT | 完成日期 | `2026-07-18` |
+| `host` | TEXT | 机器名 | `DESKTOP-M7ET7A6` |
+| `task_id` | TEXT | 一轮分类的短 uuid | `c1d9e2f3a4b5` |
+| `in_root` | TEXT | 输入根（GUI 里"输入根"框） | `D:\切帧结果` |
+| `out_root` | TEXT | 输出根（GUI 里"输出根"框） | `D:\分类结果` |
+| `dir_path` | TEXT | 具体这个 camera 目录 | `D:\切帧结果\...\camera07` |
+| `total` | INTEGER | 目录里图片总数 | `114` |
+| `classified` | INTEGER | 成功分类到某桶的张数 | `98` |
+| `skipped` | INTEGER | 未命中任何规则、跳过的张数 | `10` |
+| `failed` | INTEGER | 处理失败的张数（读取错/copy 错） | `6` |
+| `bucket_json` | TEXT | 各桶命中数量的 JSON（未来加桶不用 ALTER TABLE） | `{"骑行":20,"步行":15,"前备箱":8,...}` |
+| `copy_mode` | TEXT | 输出方式 | `copy` / `move` / `symlink` |
+| `rules_dir` | TEXT | 用了哪套规则目录 | `D:\pic-clear\rules_v3` |
+| `elapsed_sec` | REAL | 本目录耗时（秒） | `45.1` |
+| `exit_code` | INTEGER | 0=成功 | `0` |
+| `error_msg` | TEXT | 失败原因 | `rules dir not found` |
+
+**为什么 bucket_json 不拆列**：
+- 当前 6 大桶（骑行/步行/前备箱/前机盖/手势/遮挡）后期可能加
+- JSON 一列存字典，查询用 `json_extract(bucket_json, '$.骑行')` 语法（SQLite 3.38+ 支持）
+- 表格 GUI 里显示时解析成小柱状图
+
+---
+
+### 2.4 `schema_version`（迁移用）
 
 ```sql
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -98,48 +212,76 @@ INSERT INTO schema_version(version) VALUES (1);
 ```
 
 未来加列走 `ALTER TABLE ... ADD COLUMN`（SQLite 支持），schema_version bump。
+`open_stats_db()` 里检测版本 → 缺什么列就补什么列。
 
 ---
 
-## §3 写入时机与并发策略
+## §3 单机并发写入策略（重点）
 
-### 3.1 extract_frames.py
+**背景**：一台机器上 GUI 会同时启动多个子进程（extract_gui/dedupe_gui/classify_gui 各自并发跑），所有子进程都往**同一个** `stats_<host>.db` 写。SQLite WAL 模式允许多 readers + 单 writer，两个 writer 撞上就 `SQLITE_BUSY`。
 
-- 每抽完一个视频写一条 → 单条 INSERT + COMMIT
-- 用 `with` 短事务，10~50ms 一次，不阻塞主流程
-- 失败也要写（`exit_code != 0` + `error_msg`），跨天恢复才好追
+**四层防御**：
 
-**任务级归组**：
-- `main()` 启动时生成一个 `task_id = uuid.uuid4().hex[:12]`
-- 传给每次 INSERT，用户想看"这批任务干了多少"直接 `WHERE task_id=?`
+### 3.1 `PRAGMA busy_timeout=5000`（第一层，SQLite 自己重试）
 
-### 3.2 dedupe_pic.py
+打开连接立刻设，SQLite 遇到 BUSY 会自旋重试 5 秒。
+对我们几毫秒级的 INSERT 来说，5 秒 = 天文数字，99% 场景够。
 
-- 每处理完一个 camera 目录写一条（删完 or dry-run 完 or 失败）
-- 位置：`_run_dedupe` 末尾，紧挨着 `_dedup_done.marker` 写完之后
-- 从 `dedupe_report.csv` 头再读一次 total/deleted 兜底（万一变量丢了）
+### 3.2 短连接（第二层，别霸占锁）
 
-### 3.3 并发安全
+**每次调用 record_* 都 open → insert → commit → close**，绝不长连接。
+理由：长连接持有 shared lock 期间，另一个 writer 拿不到 exclusive lock → 立刻 BUSY，busy_timeout 也救不了（因为 shared 一直没释放）。
 
-**本机内**（多线程 GUI 起多个子进程）：
-- SQLite WAL 模式 + 每次 `connect()` 就用就关，避免长连接卡锁
-- 单表 INSERT，冲突几率极低
-- 兜底：`BEGIN IMMEDIATE` + retry 3 次，间隔 100ms
+```python
+def record_extract(**kwargs):
+    with sqlite3.connect(_db_path()) as conn:   # 用完就关
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("INSERT ...", (...))
+        # with 块结束自动 commit + close
+```
 
-**跨机**：不涉及（每机自己文件）
+### 3.3 Python 层 retry（第三层，兜底 5 秒还不够的极端情况）
+
+```python
+for i in range(5):
+    try:
+        _do_insert()
+        return
+    except sqlite3.OperationalError as e:
+        if "locked" not in str(e).lower():
+            raise
+        time.sleep(0.1 * (i + 1))   # 100ms, 200ms, ..., 500ms
+# 仍失败 -> 打 stderr 日志, 静默吞掉, 不能让统计失败搞崩主流程
+```
+
+### 3.4 静默失败（第四层，落库是副产物）
+
+- 记录函数最外层 try/except，任何异常打 stderr 就返回
+- 抽帧/去重/分类主流程**绝不因为落库失败中断**
+
+**为什么这套够用**：
+- 单次 INSERT 是 SQLite 里最快的操作（<1ms）
+- 就算 10 个 writer 同时排队，5 秒内轻松走完
+- 遇到 SMB 磁盘诡异问题（不应该，因为库在本地），有 retry 兜底
+- 真炸也是"少一条统计"，不影响业务
+
+**关键约束**：
+- 不要用 executemany 做超大批量 INSERT（会长时间持锁），如果 dedupe 一次要写多条，用循环单条 INSERT
+- 不要在事务里做 IO（open 文件、subprocess 之类），事务只包 SQL
 
 ---
 
 ## §4 API 模块：`stats_db.py`
 
-**统一封装**，两个 exe 都调这个模块：
+**统一封装**，四个入口（extract_frames / dedupe_pic / classify_pic / stats_viewer_gui）都调这个模块。
 
 ```python
 # stats_db.py 大致 API
 
 def open_stats_db(path: Path | None = None) -> Path:
     """打开或初始化. path 默认 ~/.pic-clear/stats_<host>.db.
-    首次调用建表 + 开 WAL. 返回最终路径."""
+    首次调用建表 + 开 WAL + 设 busy_timeout. 返回最终路径.
+    静默失败: 拿不到路径就打 stderr, 返回 None."""
 
 def record_extract(
     *, video_path: str, output_dir: str, frames: int,
@@ -149,7 +291,8 @@ def record_extract(
     elapsed_sec: float | None = None,
     exit_code: int = 0, error_msg: str | None = None,
     db_path: Path | None = None,
-) -> None: ...
+) -> None:
+    """抽帧成功/失败都调. 内部走 retry + 静默 fail."""
 
 def record_dedupe(
     *, dir_path: str, total: int, deleted: int, remain: int,
@@ -162,57 +305,79 @@ def record_dedupe(
     db_path: Path | None = None,
 ) -> None: ...
 
+def record_classify(
+    *, dir_path: str, total: int, classified: int,
+    in_root: str | None = None, out_root: str | None = None,
+    task_id: str | None = None,
+    skipped: int | None = None, failed: int | None = None,
+    bucket_counts: dict[str, int] | None = None,   # 自动 json.dumps
+    copy_mode: str = "copy",
+    rules_dir: str | None = None,
+    elapsed_sec: float | None = None,
+    exit_code: int = 0, error_msg: str | None = None,
+    db_path: Path | None = None,
+) -> None: ...
+
+# 查询 API (viewer 用)
 def query_extract(...) -> list[dict]: ...
 def query_dedupe(...) -> list[dict]: ...
+def query_classify(...) -> list[dict]: ...
 def sum_by_day(kind: str, ...) -> list[tuple[str, int]]: ...  # (date, count)
 ```
 
 **特点**：
 - 所有 record_* 内部 try/except **静默失败**（打 stderr 但不抛），DB 挂了不影响主流程
 - `db_path=None` 走默认，多机部署零改动
+- record_* **不长连接**，每次自行 open/close
 
 ---
 
 ## §5 GUI 查看工具：`stats_viewer_gui.py`
 
-**打包成独立 exe** `stats_viewer_gui.exe`，跟 dedupe_gui 一样的样式。
+**打包成独立 exe** `stats_viewer_gui.exe`，跟 dedupe_gui 一样的样式（关于 tab、footer 状态栏、日志 tab 等）。
 
 ### 5.1 界面结构
 
 ```
-┌─────────────────────────────────────────────────┐
-│ [Tab] 抽帧统计 | 去重统计 | 每日趋势 | 关于     │
-├─────────────────────────────────────────────────┤
-│ 扫描目录: [~/.pic-clear/         ] [浏览] [刷新] │
+┌──────────────────────────────────────────────────────┐
+│ [Tab] 抽帧 | 去重 | 分类 | 每日趋势 | 日志 | 关于     │
+├──────────────────────────────────────────────────────┤
+│ 扫描目录: [~/.pic-clear/         ] [浏览] [刷新]      │
 │ 已加载: stats_HOST1.db (12345 条) stats_HOST2.db (6789 条) │
-│                                                 │
-│ 日期: [2026-07-01] 到 [2026-07-18]              │
-│ 主机: [全部 ▼]    关键字: [_______]  [过滤]    │
-├─────────────────────────────────────────────────┤
-│ 合计: 抽帧 12345 视频, 234567 张 / 总耗时 6.5h  │
-├─────────────────────────────────────────────────┤
-│  ts        host   source_root   video   frames  │
-│  2026-...  H1    Z:\sjbz_...   1.mp4    179     │
-│  ...                                            │
-├─────────────────────────────────────────────────┤
-│ [导出 CSV] [清理选中记录] [关闭]                │
-└─────────────────────────────────────────────────┘
+│                                                       │
+│ 日期: [2026-07-01] 到 [2026-07-18]                    │
+│ 主机: [全部 ▼]    关键字: [_______]  [过滤]          │
+├──────────────────────────────────────────────────────┤
+│ 合计: 抽帧 12345 视频, 234567 张 / 总耗时 6.5h        │
+├──────────────────────────────────────────────────────┤
+│  ts        host   source_root   video   frames       │
+│  2026-...  H1    Z:\sjbz_...   1.mp4    179          │
+│  ...                                                  │
+├──────────────────────────────────────────────────────┤
+│ [导出 CSV] [清理选中记录] [关闭]                     │
+└──────────────────────────────────────────────────────┘
 ```
 
-### 5.2 4 个 Tab
+### 5.2 五个业务 Tab
 
 1. **抽帧统计**：表格 + 顶部合计（"今天 xxx 张 / 本周 xxx 张 / 全部 xxx 张"）
 2. **去重统计**：同上，字段换成 total/deleted/remain
-3. **每日趋势**：折线图 — 横轴日期，纵轴每天张数
-   - 抽帧曲线 + 去重曲线两条线
+3. **分类统计**：同上，字段 total/classified/skipped/failed + bucket 分布小柱状图
+4. **每日趋势**：折线图 —— 横轴日期，纵轴每天张数
+   - **3 条曲线**：抽帧张数（蓝）/ 去重删除数（红）/ 分类张数（绿）
    - 用 `matplotlib` embed 到 tkinter（PyInstaller 打包能过）
-4. **关于**：跟 dedupe_gui 同款风格，显示 `stats_viewer_gui` 自己版本
+5. **日志**：查看器自己的 log tab（复用 render_log_tab helper）
 
-### 5.3 交互
+### 5.3 关于 Tab
 
-- 「扫描目录」→ 用 `glob(dir + '/stats_*.db')` 找所有库文件 → ATTACH 后聚合查询
+- 复用 v0.4.48 的样式：标题 + 授权信息 + 内嵌模块版本
+- 显示 `stats_viewer_gui` 自己版本 + 各扫到的 db 文件路径
+
+### 5.4 交互
+
+- 「扫描目录」→ 用 `glob(dir + '/stats_*.db')` 找所有库 → ATTACH 后聚合查询
 - 「刷新」→ 重扫 + 重跑当前过滤 SQL
-- 「导出 CSV」→ 把当前表格里的数据存 CSV（不是导整个库）
+- 「导出 CSV」→ 把当前表格里的数据存 CSV
 - 「清理选中记录」→ 慎用，让用户勾了后二次确认再 DELETE
 
 ---
@@ -234,17 +399,16 @@ def sum_by_day(kind: str, ...) -> list[tuple[str, int]]: ...  # (date, count)
 ### 7.1 依赖
 
 - SQLite：Python 标准库 `sqlite3`，不需额外依赖
-- matplotlib：新增 CI 依赖，`stats_viewer_gui` 的 workflow 里加 `pip install matplotlib`
-- **注意**：dedupe_gui / extract_gui 只写库不看图，**不引入 matplotlib**
+- matplotlib：新增 CI 依赖，**只在 `stats_viewer_gui` 的 workflow 里** `pip install matplotlib`
+- **注意**：dedupe_pic / extract_frames / classify_pic 只写库不看图，**不引入 matplotlib**
 
 ### 7.2 workflow
 
 - 新 workflow `.github/workflows/build-stats-viewer-gui-exe.yml`
 - 新增 `stats_db.py` 要 copy 到所有涉及的 build 文件夹：
-  - `build-dedupe-gui-exe.yml`
-  - `build-extract-gui-exe.yml`（GUI 层要读 task_id 传给子进程，可能也要）
-  - `build-extract-frames-exe.yml`（extract_frames.exe 直接写库）
   - `build-dedupe-pic-exe.yml`（dedupe_pic.exe 直接写库）
+  - `build-extract-frames-exe.yml`（extract_frames.exe 直接写库）
+  - `build-classify-gui-exe.yml`（classify_pic 是 import 进 GUI 的，跟 GUI 一起打）
 - pyarmor gen 一起加密
 
 ---
@@ -252,24 +416,26 @@ def sum_by_day(kind: str, ...) -> list[tuple[str, int]]: ...  # (date, count)
 ## §8 实施步骤（分阶段，避免大爆炸）
 
 ### Phase 1：底层写库（v0.4.49）
-1. 新建 `stats_db.py` — API + 建表 + 兼容层
+1. 新建 `stats_db.py` — API + 建表 + 并发防御四层 + 兼容层
 2. `extract_frames.py` 每抽完一个视频调 `record_extract`
 3. `dedupe_pic.py` 每处理完一个目录调 `record_dedupe`
-4. 两个 workflow 加 copy + pyarmor
-5. **验证**：跑一次抽帧 / 一次去重 → 用 `sqlite3` 命令行看库有没有数据
+4. `classify_pic.py` 每处理完一个 camera 目录调 `record_classify`
+5. 三个 workflow 加 copy + pyarmor
+6. **验证**：分别跑一次抽帧 / 去重 / 分类 → 用 `sqlite3` 命令行看库有没有数据
 
 ### Phase 2：GUI 传 task_id 与源根（v0.4.50）
-1. `extract_gui` / `dedupe_gui` 启动子进程时生成 task_id + 通过命令行传 `--task-id XXX --source-root YYY`
+1. `extract_gui` / `dedupe_gui` / `classify_gui` 启动子进程/子任务时生成 task_id + 通过命令行或函数参数传下去
 2. 让 SQL 能按任务归组查询
 
 ### Phase 3：查看器（v0.4.51）
-1. 新建 `stats_viewer_gui.py` — 表格 Tab
+1. 新建 `stats_viewer_gui.py` — 表格 Tab（抽帧/去重/分类三个）
 2. 新 workflow 打包
 3. **验证**：能看到 Phase 1 写进去的数据
 
 ### Phase 4：图表（v0.4.52）
-1. matplotlib embed 每日趋势 Tab
-2. 导出 CSV
+1. matplotlib embed 每日趋势 Tab（3 条曲线）
+2. 分类 Tab 里的 bucket 分布小柱状图
+3. 导出 CSV
 
 ### Phase 5（可选）：老 CSV 一键导入 SQLite
 
@@ -278,12 +444,15 @@ def sum_by_day(kind: str, ...) -> list[tuple[str, int]]: ...  # (date, count)
 ## §9 注意事项 / 已知陷阱
 
 1. **hostname 里的中文/特殊字符**：过滤成 `[A-Za-z0-9_-]`，别让文件名炸掉
-2. **DB 打不开时**：所有 record_* 静默 fail + stderr 打日志，不能因为落库失败搞崩主流程（这是抽帧/去重工具，落库是**副产物**）
+2. **DB 打不开时**：所有 record_* 静默 fail + stderr 打日志，不能因为落库失败搞崩主流程（这是抽帧/去重/分类工具，落库是**副产物**）
 3. **DB 文件误删/迁移**：`open_stats_db` 每次都 `CREATE TABLE IF NOT EXISTS`，删了自动重建，只是丢历史
 4. **PyInstaller onefile 打包 sqlite3**：标准库自带，通常不用 `--hidden-import`，但保险起见加 `--hidden-import sqlite3`
-5. **matplotlib 首启很慢**（~2s）：查看器 GUI 里图表 Tab 首次点开再加载，别启动时预加载
+5. **matplotlib 首启很慢**（~2s）：查看器 GUI 里图表 Tab **首次点开再加载**，别启动时预加载
 6. **时间字段用文本**：不用 UNIX epoch，直接存 `datetime.now().strftime('%Y-%m-%d %H:%M:%S')`，SQLite 里 lexicographic 顺序等于时间顺序，比较友好
-7. **write 失败重试**：`sqlite3.OperationalError: database is locked` retry 3 次，每次 sleep 100ms 递增；仍失败就吞掉，别抛
+7. **write 失败重试**：`sqlite3.OperationalError: database is locked` retry 5 次，每次 sleep 100~500ms 递增；仍失败就吞掉，别抛
+8. **不要长连接**：每次 record 都 open → insert → commit → close，用 `with sqlite3.connect(...)` 一步搞定
+9. **不要事务里做 IO**：事务只包 SQL；文件读、subprocess、网络等一律在事务外
+10. **classify 的 `bucket_json` 字段查询**：SQLite 3.38+ 支持 `json_extract(bucket_json, '$.骑行')`，PyInstaller 打包出的 sqlite3 通常够新；不够就在 Python 层解析
 
 ---
 
@@ -292,6 +461,15 @@ def sum_by_day(kind: str, ...) -> list[tuple[str, int]]: ...  # (date, count)
 - 无自动清理（磁盘占用不大，10w 条 ~ 20MB）
 - GUI 提供「清理选中记录」按钮，用户自己删
 - 未来可加"保留 90 天，超期归档" 但不着急
+
+---
+
+## §11 与 Marker 机制的关系
+
+- **Marker（`_done.marker` / `_dedup_done.marker` / `_classify_done.marker`）** = "干过了没有"的**布尔位**，粒度到目录，用于断点续跑
+- **stats.db** = "干了多少"的**明细记录**，粒度到目录/视频，用于统计汇总
+- 两者互不干扰：Marker 写在 markers_root，stats 写在 `~/.pic-clear/`
+- 断点续跑时（Marker 已在）**不会再写 stats**（因为不会重跑），这是正确的语义
 
 ---
 
