@@ -1049,6 +1049,143 @@ def render_license_info(root, parent, info: dict | None) -> None:
         path_entry.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
 
+def render_core_version_frame(root, parent, *,
+                              label_text: str,
+                              exe_finder,
+                              probe_cmd_suffix: tuple[str, ...] = ("--version",),
+                              missing_hint: str = ""):
+    """在 parent (LabelFrame) 下渲染"内核版本 / 底层依赖"信息.
+
+    参数
+      label_text        : "内核版本"、"编排核心"、"抽帧内核" 之类
+      exe_finder        : 无参函数, 返回 exe 绝对路径 str/Path 或 None
+      probe_cmd_suffix  : 探测子进程时追加的参数, 默认 ("--version",)
+      missing_hint      : 找不到 exe 时给用户看的补救建议
+
+    返回一个 dict 便于外层保留引用触发 "重新检测":
+        {"status_var": StringVar, "path_var": StringVar,
+         "refresh": callable, "frame": frame}
+    """
+    from tkinter import ttk
+    import tkinter as tk
+    import os
+    import subprocess
+    import threading
+
+    for w in parent.winfo_children():
+        w.destroy()
+
+    status_var = tk.StringVar(value="检测中…")
+    path_var = tk.StringVar(value="")
+
+    row = ttk.Frame(parent); row.pack(fill="x", padx=10, pady=(6, 3))
+    ttk.Label(row, text=f"{label_text}：", width=12,
+              foreground="#555").pack(side="left")
+    ttk.Label(row, textvariable=status_var,
+              font=("Microsoft YaHei", 10, "bold")).pack(side="left")
+
+    row = ttk.Frame(parent); row.pack(fill="x", padx=10, pady=(0, 8))
+    ttk.Label(row, text="exe 路径：", width=12,
+              foreground="#888",
+              font=("Microsoft YaHei", 9)).pack(side="left")
+    ttk.Label(row, textvariable=path_var,
+              foreground="#666",
+              font=("Consolas", 9)).pack(side="left")
+
+    def _probe_thread():
+        exe = None
+        try:
+            exe = exe_finder()
+        except Exception as e:
+            root.after(0, lambda: (
+                status_var.set(f"✘ 查找失败: {type(e).__name__}: {e}"),
+                path_var.set(""),
+            ))
+            return
+        if not exe:
+            hint = missing_hint or "请把它放到本 GUI 同目录 / System32 / PATH 后重启"
+            root.after(0, lambda: (
+                status_var.set("✘ 缺失内核文件"),
+                path_var.set(hint),
+            ))
+            return
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = 0x08000000
+        try:
+            result = subprocess.run(
+                [str(exe), *probe_cmd_suffix],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=15,
+                creationflags=creationflags,
+            )
+            out = ((result.stdout or "") + (result.stderr or "")).strip()
+            if result.returncode != 0 and not out:
+                out = f"(exit {result.returncode}, 无输出)"
+            version_line = out.splitlines()[0] if out else "(无输出)"
+        except FileNotFoundError:
+            root.after(0, lambda: (
+                status_var.set("✘ 缺失内核文件"),
+                path_var.set(str(exe)),
+            ))
+            return
+        except subprocess.TimeoutExpired:
+            root.after(0, lambda: (
+                status_var.set("✘ 检测超时 (>15s)"),
+                path_var.set(str(exe)),
+            ))
+            return
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+            root.after(0, lambda: (
+                status_var.set(f"✘ 检测失败: {err}"),
+                path_var.set(str(exe)),
+            ))
+            return
+        root.after(0, lambda: (
+            status_var.set(f"✔ {version_line}"),
+            path_var.set(str(exe)),
+        ))
+
+    def refresh():
+        status_var.set("检测中…")
+        path_var.set("")
+        threading.Thread(target=_probe_thread, daemon=True,
+                         name="probe-core-version").start()
+
+    row = ttk.Frame(parent); row.pack(fill="x", padx=10, pady=(0, 6))
+    ttk.Button(row, text="重新检测",
+               command=refresh, width=10).pack(side="left")
+
+    refresh()
+
+    return {"status_var": status_var, "path_var": path_var,
+            "refresh": refresh, "frame": parent}
+
+
+def render_static_version_frame(parent, *,
+                                label_text: str,
+                                version_text: str,
+                                extra_note: str = ""):
+    """给内嵌模块(不走子进程 exe)用的静态版本区块.
+
+    典型: classify_gui 里 classify_pic 是 import 的, 直接读 _version.VERSION 就行.
+    """
+    from tkinter import ttk
+    for w in parent.winfo_children():
+        w.destroy()
+    row = ttk.Frame(parent); row.pack(fill="x", padx=10, pady=(6, 3))
+    ttk.Label(row, text=f"{label_text}：", width=12,
+              foreground="#555").pack(side="left")
+    ttk.Label(row, text=f"✔ {version_text}",
+              font=("Microsoft YaHei", 10, "bold")).pack(side="left")
+    if extra_note:
+        row = ttk.Frame(parent); row.pack(fill="x", padx=10, pady=(0, 8))
+        ttk.Label(row, text=extra_note,
+                  foreground="#888",
+                  font=("Microsoft YaHei", 9)).pack(side="left")
+
+
 def _copy_to_clipboard(root: "tk.Misc", text: str) -> bool:
     """跨会话可靠复制：clear + append + update，返回是否成功。"""
     try:

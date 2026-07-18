@@ -393,14 +393,15 @@ class DedupeGUI:
         nb.add(protect_page, text="保护类别")
         self._build_protect_tab(protect_page)
 
-        about = ttk.Frame(nb)
-        nb.add(about, text="关于")
-        self._build_about_tab(about)
-
         # 日志 tab（独立出来，避免主页按钮/控件被挤没）
         log_tab = ttk.Frame(nb)
         nb.add(log_tab, text="日志")
         self._build_log_tab(log_tab)
+
+        # v0.4.48 关于 tab 永远放在最后
+        about = ttk.Frame(nb)
+        nb.add(about, text="关于")
+        self._build_about_tab(about)
 
     def _build_main_tab(self, page: ttk.Frame):
         pad = {"padx": 6, "pady": 4}
@@ -698,28 +699,9 @@ class DedupeGUI:
         ttk.Label(self._about_lic_frame, text="加载中…",
                   foreground="#888").pack(padx=10, pady=8, anchor="w")
 
-        # v0.4.47 内核版本 LabelFrame: 显示 dedupe_pic.exe 的实际版本 + 路径
+        # v0.4.48 内核版本 (走共享 helper, 与 extract_gui / classify_gui 风格一致)
         self._about_core_frame = ttk.LabelFrame(page, text="内核版本 (dedupe_pic.exe)")
         self._about_core_frame.pack(fill="x", padx=12, pady=8)
-        self._about_core_status_var = tk.StringVar(value="检测中…")
-        self._about_core_path_var = tk.StringVar(value="")
-        row = ttk.Frame(self._about_core_frame); row.pack(fill="x", padx=10, pady=(6, 3))
-        ttk.Label(row, text="内核版本：", width=12,
-                  foreground="#555").pack(side="left")
-        ttk.Label(row, textvariable=self._about_core_status_var,
-                  font=("Microsoft YaHei", 10, "bold")).pack(side="left")
-        row = ttk.Frame(self._about_core_frame); row.pack(fill="x", padx=10, pady=(0, 8))
-        ttk.Label(row, text="exe 路径：", width=12,
-                  foreground="#888",
-                  font=("Microsoft YaHei", 9)).pack(side="left")
-        path_lbl = ttk.Label(row, textvariable=self._about_core_path_var,
-                             foreground="#666",
-                             font=("Consolas", 9))
-        path_lbl.pack(side="left")
-        row = ttk.Frame(self._about_core_frame); row.pack(fill="x", padx=10, pady=(0, 6))
-        ttk.Button(row, text="重新检测",
-                   command=self._refresh_core_version, width=10).pack(side="left")
-        # 启动时异步跑一次
         self.root.after(400, self._refresh_core_version)
 
     # ---------- 目录选择 ----------
@@ -739,64 +721,13 @@ class DedupeGUI:
             ttk.Label(frame, text=f"（渲染失败：{e}）",
                       foreground="#c0392b").pack(padx=10, pady=8, anchor="w")
 
-    # v0.4.47 内核版本探测 ------------------------------------------
     def _refresh_core_version(self) -> None:
-        """点击 "重新检测" 或 GUI 启动时调, 异步跑 dedupe_pic.exe --version."""
-        self._about_core_status_var.set("检测中…")
-        self._about_core_path_var.set("")
-        # 用后台线程, 不阻塞 UI
-        threading.Thread(target=self._probe_core_version_thread,
-                         daemon=True, name="probe-core-version").start()
-
-    def _probe_core_version_thread(self) -> None:
-        exe = _find_dedupe_exe()
-        if not exe:
-            self.root.after(0, lambda: (
-                self._about_core_status_var.set(
-                    "✘ 缺失内核文件 dedupe_pic.exe"),
-                self._about_core_path_var.set(
-                    "请把 dedupe_pic.exe 放到本 GUI 同目录 / System32 / PATH 后重启"),
-            ))
-            return
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = 0x08000000
-        try:
-            result = subprocess.run(
-                [exe, "--version"],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=15,
-                creationflags=creationflags,
-            )
-            out = ((result.stdout or "") + (result.stderr or "")).strip()
-            if result.returncode != 0 and not out:
-                out = f"(exit {result.returncode}, 无输出)"
-            version_line = out.splitlines()[0] if out else "(无输出)"
-        except FileNotFoundError:
-            self.root.after(0, lambda: (
-                self._about_core_status_var.set(
-                    "✘ 缺失内核文件 dedupe_pic.exe"),
-                self._about_core_path_var.set(str(exe)),
-            ))
-            return
-        except subprocess.TimeoutExpired:
-            self.root.after(0, lambda: (
-                self._about_core_status_var.set("✘ 检测超时 (>15s)"),
-                self._about_core_path_var.set(str(exe)),
-            ))
-            return
-        except Exception as e:
-            err = f"{type(e).__name__}: {e}"
-            self.root.after(0, lambda: (
-                self._about_core_status_var.set(f"✘ 检测失败: {err}"),
-                self._about_core_path_var.set(str(exe)),
-            ))
-            return
-        # 成功
-        self.root.after(0, lambda: (
-            self._about_core_status_var.set(f"✔ {version_line}"),
-            self._about_core_path_var.set(str(exe)),
-        ))
+        _pg.render_core_version_frame(
+            self.root, self._about_core_frame,
+            label_text="内核版本",
+            exe_finder=_find_dedupe_exe,
+            missing_hint="请把 dedupe_pic.exe 放到本 GUI 同目录 / System32 / PATH 后重启",
+        )
 
     def _browse_target(self):
         init = self._target_var.get() or os.path.expanduser("~")

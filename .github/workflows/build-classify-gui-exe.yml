@@ -63,6 +63,7 @@ jobs:
         # 加密后 dist_obf/ 里同名文件覆盖原文件，PyInstaller 打包用加密版本。
         run: |
           REM 拆分 pyarmor gen 调用绕开 trial 版单次调用配额限制
+          pyarmor gen --output dist_obf pipe_gui.py
           pyarmor gen --output dist_obf classify_gui.py
           pyarmor gen --output dist_obf classify_pic.py
           pyarmor gen --output dist_obf detector.py
@@ -71,6 +72,7 @@ jobs:
           pyarmor gen --output dist_obf licensing.py
           pyarmor gen --output dist_obf otp_utils.py
           dir dist_obf
+          copy /Y dist_obf\pipe_gui.py        pipe_gui.py
           copy /Y dist_obf\classify_gui.py     classify_gui.py
           copy /Y dist_obf\classify_pic.py     classify_pic.py
           copy /Y dist_obf\detector.py         detector.py
@@ -121,6 +123,7 @@ jobs:
             --hidden-import detector ^
             --hidden-import pose_detector ^
             --hidden-import embed_detector ^
+            --hidden-import pipe_gui ^
             --hidden-import classify_pic ^
             --hidden-import licensing ^
             --hidden-import otp_utils ^

@@ -475,15 +475,10 @@ class ExtractGUI:
         ttk.Label(self._about_lic_frame, text="加载中…",
                   foreground="#888").pack(padx=10, pady=8, anchor="w")
 
-        # extract_frames.exe 检测
-        exe = _find_extract_exe()
-        if exe:
-            ttk.Label(page, text=f"[√] extract_frames.exe → {exe}",
-                      foreground="#3a7d3a").pack(anchor="w", **pad)
-        else:
-            ttk.Label(page,
-                      text="[×] 未找到 extract_frames.exe（同目录 / System32 / PATH）",
-                      foreground="#c0392b").pack(anchor="w", **pad)
+        # v0.4.48 内核版本 (走共享 helper, 与 dedupe_gui / classify_gui 风格一致)
+        self._about_core_frame = ttk.LabelFrame(page, text="内核版本 (extract_frames.exe)")
+        self._about_core_frame.pack(fill="x", padx=12, pady=8)
+        self.root.after(400, self._refresh_core_version)
 
     # ---------- 目录选择 ----------
 
@@ -501,6 +496,14 @@ class ExtractGUI:
                 w.destroy()
             ttk.Label(frame, text=f"（渲染失败：{e}）",
                       foreground="#c0392b").pack(padx=10, pady=8, anchor="w")
+
+    def _refresh_core_version(self) -> None:
+        _pg.render_core_version_frame(
+            self.root, self._about_core_frame,
+            label_text="内核版本",
+            exe_finder=_find_extract_exe,
+            missing_hint="请把 extract_frames.exe 放到本 GUI 同目录 / System32 / PATH 后重启",
+        )
 
     def _browse_src(self):
         init = self._src_var.get() or os.path.expanduser("~")

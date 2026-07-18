@@ -26,6 +26,7 @@ from tkinter import (
 from tkinter import ttk
 
 import classify_pic
+import pipe_gui as _pg  # noqa: E402
 from classify_pic import (
     ClassifyConfig, DEFAULT_FRONT_KEYWORDS, DEFAULT_IMAGE_EXT, run,
     BUCKET_LIVENESS, BUCKET_KEYPOINT, BUCKET_FRUNK, BUCKET_HOOD,
@@ -500,6 +501,16 @@ class ClassifyApp:
                   "license.lic / otp.secret 与其他 exe 共用"),
             foreground="#888", justify="left", font=("Consolas", 9),
         ).pack(anchor="w", **pad)
+
+        # v0.4.48 内嵌模块版本 (classify_pic 是 import 进来的, 跟 GUI 同版本, 走静态渲染)
+        core_frame = ttk.LabelFrame(page, text="内嵌模块 (classify_pic)")
+        core_frame.pack(fill="x", padx=12, pady=8)
+        _pg.render_static_version_frame(
+            core_frame,
+            label_text="模块版本",
+            version_text=f"classify_pic {APP_VERSION}",
+            extra_note="classify_pic 与本 GUI 同版本一起打包, 无独立 exe",
+        )
 
     # -------------------------------------------------- 配置持久化
     def _dump_config(self) -> dict:
