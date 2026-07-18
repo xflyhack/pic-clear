@@ -286,8 +286,9 @@ class DedupeGUI:
             value=float(self._cfg.get("motion", 0.12)))
         self._apply_var = tk.BooleanVar(
             value=bool(self._cfg.get("apply", True)))
-        self._hard_delete_var = tk.BooleanVar(
-            value=bool(self._cfg.get("hard_delete", True)))
+        # v0.4.45: GUI 不再暴露"永久删除"开关 (没有 trash-dir 时它就是死开关)
+        # 保留变量, 恒定 True, 保证 --hard-delete 一直传给 dedupe_pic.exe
+        self._hard_delete_var = tk.BooleanVar(value=True)
         self._scene_protect_var = tk.BooleanVar(
             value=bool(self._cfg.get("scene_protect", False)))
         self._force_rerun_var = tk.BooleanVar(
@@ -490,10 +491,8 @@ class DedupeGUI:
         # 选项
         row = ttk.Frame(page); row.pack(fill="x", **pad)
         ttk.Label(row, text="选项：", width=14).pack(side="left")
-        ttk.Checkbutton(row, text="真删除（否则只生成报告）",
+        ttk.Checkbutton(row, text="执行删除（不勾只生成 dedupe_report.csv 报告，不删图）",
                         variable=self._apply_var).pack(side="left", padx=4)
-        ttk.Checkbutton(row, text="永久删除（不进回收站）",
-                        variable=self._hard_delete_var).pack(side="left", padx=4)
 
         row = ttk.Frame(page); row.pack(fill="x", **pad)
         ttk.Label(row, text="", width=14).pack(side="left")
