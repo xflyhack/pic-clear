@@ -366,6 +366,17 @@ class DedupeGUI:
                    command=self.hide_to_tray).pack(side="left", padx=6)
         ttk.Button(bar, text="退出", command=self.quit_all).pack(side="right")
 
+        # v0.4.44 永久 footer 状态栏: 跟随 root, 切 tab 也不会消失
+        # 分割线 + 状态文本, 都用 side="bottom" 后 pack 就会在 bar 之上、Notebook 之下
+        footer = ttk.Frame(self.root)
+        footer.pack(side="bottom", fill="x", padx=0, pady=0)
+        ttk.Separator(footer, orient="horizontal").pack(fill="x")
+        inner = ttk.Frame(footer)
+        inner.pack(fill="x", padx=8, pady=4)
+        ttk.Label(inner, text="状态：", foreground="#666").pack(side="left")
+        ttk.Label(inner, textvariable=self._status_var,
+                  foreground="#0066cc").pack(side="left")
+
         # Notebook 放在按钮条上方，吃掉剩余空间
         nb = ttk.Notebook(self.root)
         nb.pack(side="top", fill="both", expand=True, padx=8, pady=6)
@@ -445,12 +456,6 @@ class DedupeGUI:
                     textvariable=self._scan_interval_var).pack(side="left")
         ttk.Label(row, text="  无新任务时每隔多久重新扫一次目标目录；默认 10 秒",
                   foreground="#666").pack(side="left", padx=8)
-
-        # v0.4.42: 状态栏（常驻模式下实时刷新）
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
-        ttk.Label(row, text="状态：", width=14).pack(side="left")
-        ttk.Label(row, textvariable=self._status_var,
-                  foreground="#0066cc").pack(side="left")
 
         # 处理范围
         row = ttk.Frame(page); row.pack(fill="x", **pad)
