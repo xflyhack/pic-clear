@@ -56,11 +56,13 @@ jobs:
           pyarmor gen --output dist_obf dedupe_pic.py
           pyarmor gen --output dist_obf detector.py
           pyarmor gen --output dist_obf licensing.py
+          pyarmor gen --output dist_obf stats_db.py
           dir dist_obf
           # 用加密版本覆盖原文件
           copy /Y dist_obf\dedupe_pic.py dedupe_pic.py
           copy /Y dist_obf\detector.py detector.py
           copy /Y dist_obf\licensing.py licensing.py
+          copy /Y dist_obf\stats_db.py stats_db.py
         shell: cmd
 
       - name: Build single-file exe (with embedded model + pyarmor runtime)
@@ -78,6 +80,8 @@ jobs:
             --hidden-import json ^
             --hidden-import base64 ^
             --hidden-import hashlib ^
+            --hidden-import stats_db ^
+            --hidden-import sqlite3 ^
             --hidden-import socket ^
             --hidden-import subprocess ^
             --hidden-import datetime ^

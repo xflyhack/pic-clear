@@ -35,6 +35,25 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
+# stats_db 可选; 打包时 hidden-import, 缺失时不影响主流程
+try:
+    import stats_db as _stats_db  # type: ignore
+except Exception:  # pragma: no cover
+    _stats_db = None  # type: ignore
+
+# 抽帧任务级上下文 (main 里赋值一次, extract_one 结束时读取).
+# 用全局是因为 extract_one 现有签名穿透到很多调用点, 加参数改动面太大.
+_STATS_CTX: dict = {
+    "task_id": None,
+    "src_root": None,
+    "dst_root": None,
+    "fps": None,
+    "quality": None,
+    "naming_style": None,
+    "seq_digits": None,
+    "version": None,
+}
+
 
 # ---------------------- UTF-8 stdio（同 dedupe_pic 逻辑）---------------------
 
@@ -348,6 +367,50 @@ def extract_one(
       - "failed" 真正的失败（ffmpeg 不存在 / 崩溃 / IO 错误等），不写 marker，下次会重试
       - "locked" 别的机器/进程正在抽这个视频（多机并发），直接跳过，不写 marker
     """
+    _t_start = time.time()
+    stage, n, msg = _extract_one_impl(
+        task, ffmpeg, fps, quality, skip_existing,
+        lock_ttl, name_style, name_template, name_digits,
+    )
+    _elapsed = time.time() - _t_start
+    # 落库 (静默失败, 出问题不影响抽帧主流程)
+    if _stats_db is not None:
+        try:
+            _stats_db.record_extract(
+                video_path=str(task.src_path),
+                output_dir=str(task.out_dir),
+                rel_path=str(task.rel_path),
+                frames=int(n or 0),
+                fps=_STATS_CTX.get("fps"),
+                quality=_STATS_CTX.get("quality"),
+                naming_style=name_style,
+                seq_digits=int(name_digits or 0),
+                elapsed_sec=_elapsed,
+                stage=stage,
+                exit_code=0 if stage in ("ok", "empty", "locked") else 1,
+                msg=msg,
+                src_root=_STATS_CTX.get("src_root"),
+                dst_root=_STATS_CTX.get("dst_root"),
+                task_id=_STATS_CTX.get("task_id"),
+                version=_STATS_CTX.get("version"),
+            )
+        except Exception:
+            pass
+    return stage, n, msg
+
+
+def _extract_one_impl(
+    task: VideoTask,
+    ffmpeg: Path,
+    fps: float,
+    quality: int,
+    skip_existing: bool,
+    lock_ttl: float,
+    name_style: str,
+    name_template: str | None,
+    name_digits: int,
+) -> tuple[str, int, str]:
+    """真正的抽帧主体, 从 extract_one 拆出来纯净版, 便于外层统一计时+落库."""
     out_dir = task.out_dir
     marker_dir = task.marker_dir
     marker_dir.mkdir(parents=True, exist_ok=True)
@@ -694,6 +757,21 @@ def main() -> int:
     print("=" * 60)
     print(f"  视频源目录: {args.src_root}")
     print(f"  输出根目录: {args.dst_root}")
+
+    # 填 stats_db 任务上下文 (一次任务级, 每条视频记录复用)
+    _STATS_CTX["task_id"] = os.environ.get("PICCLEAR_TASK_ID") or None
+    _STATS_CTX["src_root"] = str(args.src_root)
+    _STATS_CTX["dst_root"] = str(args.dst_root)
+    _STATS_CTX["fps"] = float(args.fps)
+    _STATS_CTX["quality"] = int(args.quality)
+    _STATS_CTX["naming_style"] = name_style
+    _STATS_CTX["seq_digits"] = int(name_digits)
+    _STATS_CTX["version"] = _read_version()
+    if _stats_db is not None:
+        try:
+            _stats_db.open_stats_db()
+        except Exception:
+            pass
     print(f"  扩展名过滤: {extensions}")
     print(f"  跳过目录名: {skip_dirs}")
     print(f"  抽帧频率  : {args.fps} fps")

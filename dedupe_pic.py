@@ -26,6 +26,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+# stats_db 可选; 打包时 hidden-import, 缺失时不影响主流程
+try:
+    import stats_db as _stats_db  # type: ignore
+except Exception:  # pragma: no cover
+    _stats_db = None  # type: ignore
+
+# _run_dedupe 里累出来的统计, main() 收尾时读一次落库.
+_LAST_DEDUPE_STATS: dict = {}
+
 try:
     from PIL import Image, ImageFile
 except ImportError:
@@ -1171,6 +1180,30 @@ def main() -> int:
         if lock_path is not None:
             _release_dedup_lock(lock_path)
 
+    # 落库 (静默失败, 出错绝不影响 rc)
+    if _stats_db is not None:
+        try:
+            _v = _read_version() if callable(globals().get("_read_version")) else None
+            _stats_db.record_dedupe(
+                dir_path=_LAST_DEDUPE_STATS.get("dir_path", str(args.root)),
+                total=int(_LAST_DEDUPE_STATS.get("total", 0)),
+                deleted=int(_LAST_DEDUPE_STATS.get("deleted", 0)),
+                freed_bytes=int(_LAST_DEDUPE_STATS.get("freed_bytes", 0)),
+                threshold=_LAST_DEDUPE_STATS.get("threshold"),
+                protect_count=int(_LAST_DEDUPE_STATS.get("protect_count", 0)),
+                scene_count=int(_LAST_DEDUPE_STATS.get("scene_count", 0)),
+                apply=bool(_LAST_DEDUPE_STATS.get("apply", args.apply)),
+                report_csv=_LAST_DEDUPE_STATS.get("report_csv", str(args.report)),
+                elapsed_sec=_LAST_DEDUPE_STATS.get("elapsed_sec"),
+                exit_code=int(_LAST_DEDUPE_STATS.get("exit_code", rc) or rc),
+                msg=_LAST_DEDUPE_STATS.get("msg", ""),
+                source_root=os.environ.get("PICCLEAR_SOURCE_ROOT") or None,
+                task_id=os.environ.get("PICCLEAR_TASK_ID") or None,
+                version=_v,
+            )
+        except Exception:
+            pass
+
     if rc == 0 and done_marker is not None:
         try:
             # 长路径兜底: 若 write_text 因 marker 目录本身 >260 挂掉, 走 \\?\
@@ -1194,8 +1227,27 @@ def main() -> int:
 def _run_dedupe(args: argparse.Namespace) -> int:
     """去重主体逻辑（原 main 尾部）。"""
 
+    _t_start_all = time.time()
+    _LAST_DEDUPE_STATS.clear()
+    _LAST_DEDUPE_STATS.update({
+        "dir_path": str(args.root),
+        "report_csv": str(args.report),
+        "threshold": int(args.threshold),
+        "apply": bool(args.apply),
+        "total": 0,
+        "deleted": 0,
+        "freed_bytes": 0,
+        "protect_count": 0,
+        "scene_count": 0,
+        "exit_code": 0,
+        "msg": "",
+    })
+
     if not _safe_exists(args.root):
         print(f"[ERROR] 根目录不存在: {args.root}", file=sys.stderr)
+        _LAST_DEDUPE_STATS["exit_code"] = 2
+        _LAST_DEDUPE_STATS["msg"] = "root not exist"
+        _LAST_DEDUPE_STATS["elapsed_sec"] = time.time() - _t_start_all
         return 2
 
     if args.ext.strip().lower() == "all":
@@ -1291,6 +1343,8 @@ def _run_dedupe(args: argparse.Namespace) -> int:
     )
     if total == 0:
         print("[结束] 没有可处理的文件。")
+        _LAST_DEDUPE_STATS["elapsed_sec"] = time.time() - _t_start_all
+        _LAST_DEDUPE_STATS["msg"] = "no files"
         return 0
 
     t0 = time.time()
@@ -1306,6 +1360,16 @@ def _run_dedupe(args: argparse.Namespace) -> int:
         f"打开失败 {_n_open} (stat={len(_stat_failed)}, hash/PIL={len(_hash_failed)})，"
         f"耗时 {_fmt_eta(time.time() - t0)}"
     )
+    _LAST_DEDUPE_STATS["total"] = len(items)
+    try:
+        _LAST_DEDUPE_STATS["protect_count"] = sum(
+            1 for it in items if getattr(it, "is_protected", False)
+        )
+        _LAST_DEDUPE_STATS["scene_count"] = sum(
+            1 for it in items if getattr(it, "scene_protected", False)
+        )
+    except Exception:
+        pass
     # 合并"打开失败"两类, 供 write_report / --failed-report 使用 (兼容老字段名)
     failed = _stat_failed + _hash_failed
 
@@ -1318,6 +1382,8 @@ def _run_dedupe(args: argparse.Namespace) -> int:
 
     if not items:
         print("[结束] 没有可处理的图片。")
+        _LAST_DEDUPE_STATS["elapsed_sec"] = time.time() - _t_start_all
+        _LAST_DEDUPE_STATS["msg"] = "no valid images"
         return 0
 
     t1 = time.time()
@@ -1341,6 +1407,8 @@ def _run_dedupe(args: argparse.Namespace) -> int:
         print()
         print("这是 dry-run 模式，未删除任何文件。")
         print("请打开 CSV 报告人工确认后，重新加 --apply 执行删除。")
+        _LAST_DEDUPE_STATS["elapsed_sec"] = time.time() - _t_start_all
+        _LAST_DEDUPE_STATS["msg"] = f"dry-run, pending {total_dup}"
         return 0
 
     print()
@@ -1349,6 +1417,9 @@ def _run_dedupe(args: argparse.Namespace) -> int:
         time.sleep(5)
     except KeyboardInterrupt:
         print("\n[用户取消]")
+        _LAST_DEDUPE_STATS["exit_code"] = 130
+        _LAST_DEDUPE_STATS["msg"] = "user cancel"
+        _LAST_DEDUPE_STATS["elapsed_sec"] = time.time() - _t_start_all
         return 130
 
     deleted, freed, errors = do_delete(
@@ -1363,6 +1434,11 @@ def _run_dedupe(args: argparse.Namespace) -> int:
             print(f"  - {e}")
         if len(errors) > 20:
             print(f"  ...（另外 {len(errors) - 20} 条省略）")
+    _LAST_DEDUPE_STATS["deleted"] = int(deleted or 0)
+    _LAST_DEDUPE_STATS["freed_bytes"] = int(freed or 0)
+    _LAST_DEDUPE_STATS["elapsed_sec"] = time.time() - _t_start_all
+    if errors:
+        _LAST_DEDUPE_STATS["msg"] = f"delete errors={len(errors)}"
     return 0
 
 

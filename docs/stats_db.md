@@ -1,6 +1,6 @@
 # 统计数据库设计文档（stats.db）
 
-**状态**：设计中，未实现（v0.4.49 起接入）
+**状态**：Phase 1 已实现（v0.4.49），Phase 3 查看器 GUI 已实现（v0.4.49 一并合并）
 **目的**：把 extract / dedupe / classify 长任务的产出量落库，方便跨天/跨机汇总、导出、可视化。
 
 ---
@@ -428,9 +428,15 @@ def sum_by_day(kind: str, ...) -> list[tuple[str, int]]: ...  # (date, count)
 2. 让 SQL 能按任务归组查询
 
 ### Phase 3：查看器（v0.4.51）
-1. 新建 `stats_viewer_gui.py` — 表格 Tab（抽帧/去重/分类三个）
-2. 新 workflow 打包
-3. **验证**：能看到 Phase 1 写进去的数据
+1. ✅ `stats_viewer_gui.py` — 5 Tab（抽帧/去重/分类/每日趋势/日志）
+   - 每个数据 Tab 都有: 汇总柱状图 + 明细表格
+   - 每日趋势 Tab 是 3 条折线（抽帧/去重/分类）
+2. ✅ `.github/workflows/build-stats-viewer-gui-exe.yml`
+3. 使用方法：
+   - 本地：`python stats_viewer_gui.py`
+   - Windows exe：从 Release 下载 `stats_viewer_gui.exe`
+   - 默认扫 `~/.pic-clear/stats_*.db`，UI 里也能改扫描目录（多机同步汇总用）
+4. matplotlib 是**软依赖**：装了则显示图表；没装则图表 Tab 显示提示文字，其余功能仍可用
 
 ### Phase 4：图表（v0.4.52）
 1. matplotlib embed 每日趋势 Tab（3 条曲线）

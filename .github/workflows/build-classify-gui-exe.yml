@@ -71,6 +71,7 @@ jobs:
           pyarmor gen --output dist_obf embed_detector.py
           pyarmor gen --output dist_obf licensing.py
           pyarmor gen --output dist_obf otp_utils.py
+          pyarmor gen --output dist_obf stats_db.py
           dir dist_obf
           copy /Y dist_obf\pipe_gui.py        pipe_gui.py
           copy /Y dist_obf\classify_gui.py     classify_gui.py
@@ -80,6 +81,7 @@ jobs:
           copy /Y dist_obf\embed_detector.py   embed_detector.py
           copy /Y dist_obf\licensing.py        licensing.py
           copy /Y dist_obf\otp_utils.py        otp_utils.py
+          copy /Y dist_obf\stats_db.py         stats_db.py
         shell: cmd
 
       - name: Build single-file exe (windowed, no console)
@@ -127,6 +129,8 @@ jobs:
             --hidden-import classify_pic ^
             --hidden-import licensing ^
             --hidden-import otp_utils ^
+            --hidden-import stats_db ^
+            --hidden-import sqlite3 ^
             classify_gui.py
         shell: cmd
 

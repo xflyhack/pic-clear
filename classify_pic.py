@@ -41,6 +41,20 @@ from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
 from typing import Callable, Iterable
 
+# stats_db 可选; 打包时 hidden-import, 缺失不影响主流程
+try:
+    import stats_db as _stats_db  # type: ignore
+except Exception:  # pragma: no cover
+    _stats_db = None  # type: ignore
+
+
+def _classify_version() -> str:
+    try:
+        from _version import VERSION
+        return VERSION
+    except Exception:
+        return "dev"
+
 try:
     from PIL import Image, ImageFile
 except ImportError:
@@ -553,6 +567,20 @@ def process_all(
         camera_dir, camera_out, marker_dir = task
         if cancel and cancel():
             return
+        # 落库用: 处理前 snapshot 累计计数, 结束后取 delta
+        with (io_lock if io_lock is not None else _NullLock()):
+            _snap = {
+                "scanned": stats.scanned,
+                "liveness": stats.liveness,
+                "keypoint": stats.keypoint,
+                "frunk": stats.frunk,
+                "hood": stats.hood,
+                "gesture": stats.gesture,
+                "occlusion": stats.occlusion,
+                "copied_bucket": stats.copied_bucket,
+                "errors": stats.errors,
+            }
+        _t_cam_start = time.time()
         # marker/lock 抢占
         lock_path: Path | None = None
         if marker_dir is not None:
@@ -584,6 +612,36 @@ def process_all(
                     )
                 except Exception as e:
                     _thread_log(f"[警告] 写 {_CLASSIFY_DONE_NAME} 失败: {e}")
+            # 落库 (无论成功失败都记一条, 静默失败)
+            if _stats_db is not None:
+                try:
+                    with (io_lock if io_lock is not None else _NullLock()):
+                        _bc = {
+                            "活体": stats.liveness - _snap["liveness"],
+                            "关节": stats.keypoint - _snap["keypoint"],
+                            "前备箱": stats.frunk - _snap["frunk"],
+                            "前机盖": stats.hood - _snap["hood"],
+                            "手势": stats.gesture - _snap["gesture"],
+                            "遮挡": stats.occlusion - _snap["occlusion"],
+                        }
+                        _scanned = stats.scanned - _snap["scanned"]
+                        _copied = stats.copied_bucket - _snap["copied_bucket"]
+                        _errs = stats.errors - _snap["errors"]
+                    _stats_db.record_classify(
+                        camera_dir=str(camera_dir),
+                        scanned=int(_scanned),
+                        copied_bucket=int(_copied),
+                        bucket_counts=_bc,
+                        errors=int(_errs),
+                        elapsed_sec=time.time() - _t_cam_start,
+                        exit_code=0 if ok else 1,
+                        in_root=str(cfg.in_root),
+                        out_root=str(cfg.out_root),
+                        task_id=os.environ.get("PICCLEAR_TASK_ID") or None,
+                        version=_classify_version(),
+                    )
+                except Exception:
+                    pass
 
     if jobs == 1:
         for t in tasks:
