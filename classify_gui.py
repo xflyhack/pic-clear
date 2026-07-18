@@ -132,6 +132,8 @@ class ClassifyApp:
         nb.pack(fill="both", expand=True, padx=8, pady=8)
         outer = ttk.Frame(nb)
         nb.add(outer, text="  分类  ")
+        config_page = ttk.Frame(nb)
+        nb.add(config_page, text="  配置  ")
         log_page = ttk.Frame(nb)
         nb.add(log_page, text="  日志  ")
         about = ttk.Frame(nb)
@@ -187,9 +189,9 @@ class ClassifyApp:
 
         top.columnconfigure(1, weight=1)
 
-        # 中部左：阈值面板
-        mid = ttk.Frame(outer)
-        mid.pack(fill="x", pady=(6, 4))
+        # 阈值面板（放在"配置" tab）
+        mid = ttk.Frame(config_page)
+        mid.pack(fill="both", expand=True, padx=8, pady=8)
 
         thr = ttk.LabelFrame(mid, text="YOLO 阈值")
         thr.pack(side="left", fill="both", expand=True, padx=(0, 4))
@@ -271,10 +273,10 @@ class ClassifyApp:
         self.stop_btn.pack(side="left", padx=4)
         ttk.Button(btn, text="清空日志", command=self._clear_log).pack(side="left", padx=4)
 
-        # 分类页底部：一段小提示，正式日志在"日志" tab
+        # 分类页底部：一段小提示
         hint = ttk.Label(
             outer,
-            text="完整日志请切到上方\"日志\" tab 查看（支持上下 / 左右滚动条）",
+            text="YOLO / Embedding 阈值请到\"配置\" tab 调整；完整日志请切到\"日志\" tab 查看",
             foreground="#888",
         )
         hint.pack(anchor="w", pady=(4, 0))
