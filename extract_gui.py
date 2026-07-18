@@ -21,6 +21,7 @@ import json
 import os
 import queue
 import subprocess
+from subproc_group import SubprocGroup
 import sys
 import threading
 import time
@@ -210,6 +211,8 @@ class ExtractGUI:
         self._hotkey_registered = False
         self._worker_thread: threading.Thread | None = None
         self._worker_stop_flag = threading.Event()
+        # v0.4.46 子进程组: Windows 用 Job Object 保证 GUI 死后子进程一起死
+        self._subproc_group = SubprocGroup()
         self._log_queue: queue.Queue[str] = queue.Queue()
         self._progress_var = tk.StringVar(value="就绪")
         self._total_videos = 0
@@ -745,15 +748,13 @@ class ExtractGUI:
                 self._log(f"[命令] {' '.join(cmd)}")
 
                 # Windows 下 CREATE_NO_WINDOW 让子进程不弹黑窗
-                creationflags = 0
-                if os.name == "nt":
-                    creationflags = 0x08000000  # CREATE_NO_WINDOW
-
                 try:
-                    proc = subprocess.Popen(
-                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, encoding="utf-8", errors="replace",
-                        creationflags=creationflags)
+                    # v0.4.46 走 SubprocGroup: 自动绑 Job Object,
+                    # GUI 死 (正常/强杀/os._exit) 子进程 (extract_frames.exe/ffmpeg) 一起死
+                    proc = self._subproc_group.popen(
+                        cmd,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, encoding="utf-8", errors="replace")
                 except FileNotFoundError:
                     self._log(f"[错误] 找不到 exe：{exe}")
                     continue
@@ -1011,6 +1012,15 @@ class ExtractGUI:
         except Exception:
             pass
         self._worker_stop_flag.set()
+        # v0.4.46 主动杀所有子进程 (extract_frames.exe/ffmpeg), 避免变孤儿
+        try:
+            self._subproc_group.terminate_all(wait_timeout=2.0)
+        except Exception:
+            pass
+        try:
+            self._subproc_group.close()
+        except Exception:
+            pass
         self.root.destroy()
         try:
             threading.Timer(0.4, lambda: os._exit(0)).start()

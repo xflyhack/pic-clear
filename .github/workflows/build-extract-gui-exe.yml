@@ -46,6 +46,7 @@ jobs:
           copy pipeline.py build_extract_gui\
           copy pipe_gui.py build_extract_gui\
           copy extract_gui.py build_extract_gui\
+          copy subproc_group.py build_extract_gui\
           copy licensing.py build_extract_gui\
           copy otp_utils.py build_extract_gui\
           copy _version.py build_extract_gui\
@@ -78,6 +79,7 @@ jobs:
             --add-data "..\icon.png;." ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import _version ^
+            --hidden-import subproc_group ^
             --hidden-import json ^
             --hidden-import base64 ^
             --hidden-import hashlib ^

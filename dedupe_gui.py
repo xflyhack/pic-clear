@@ -20,6 +20,7 @@ import json
 import os
 import queue
 import subprocess
+from subproc_group import SubprocGroup
 import sys
 import threading
 import re
@@ -333,6 +334,8 @@ class DedupeGUI:
         # v0.4.42 常驻模式：主循环线程 + 统计 + 状态栏
         self._loop_thread: threading.Thread | None = None
         self._loop_stop_event = threading.Event()
+        # v0.4.46 子进程组: Windows 用 Job Object 保证 GUI 死后子进程一起死
+        self._subproc_group = SubprocGroup()
         # 累计统计（GUI 存活期间累计, 关闭后重置）
         self._stat_done_dirs = 0
         self._stat_deleted_images = 0
@@ -954,14 +957,13 @@ class DedupeGUI:
             if protect_arg:
                 cmd.extend(["--protect", protect_arg])
 
-            creationflags = 0
-            if os.name == "nt":
-                creationflags = 0x08000000  # CREATE_NO_WINDOW
             try:
-                proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace",
-                    creationflags=creationflags)
+                # v0.4.46 走 SubprocGroup: 自动绑 Job Object,
+                # GUI 死 (正常/强杀/os._exit) 子进程一起死
+                proc = self._subproc_group.popen(
+                    cmd,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace")
             except FileNotFoundError:
                 self._log(f"[{tag}] [错误] 找不到 exe：{exe}")
                 return d, 127
@@ -1162,6 +1164,16 @@ class DedupeGUI:
             pass
         self._worker_stop_flag.set()
         self._loop_stop_event.set()
+        # v0.4.46 主动杀所有子进程 (dedupe_pic.exe), 避免变孤儿
+        try:
+            self._subproc_group.terminate_all(wait_timeout=2.0)
+        except Exception:
+            pass
+        try:
+            # Windows: close Job handle 触发 KILL_ON_JOB_CLOSE, 兜底再杀一次
+            self._subproc_group.close()
+        except Exception:
+            pass
         self.root.destroy()
         try:
             threading.Timer(0.4, lambda: os._exit(0)).start()
