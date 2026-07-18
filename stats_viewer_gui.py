@@ -539,9 +539,11 @@ def _plot_bar(frame: tk.Widget, title: str,
     fig = Figure(figsize=(9, 3.6), dpi=100)
     ax = fig.add_subplot(111)
     if not data:
+        # 空数据: 保留 title, 只清掉刻度; 别用 axis('off'), 那样 title 也会被吃掉
         ax.text(0.5, 0.5, "暂无数据", ha="center", va="center",
                 transform=ax.transAxes, fontsize=14, color="#888")
-        ax.axis("off")
+        ax.set_xticks([])
+        ax.set_yticks([])
     else:
         keys = list(data.keys())
         n = len(series)
@@ -578,7 +580,8 @@ def _plot_line(frame: tk.Widget, title: str,
     if not x_labels:
         ax.text(0.5, 0.5, "暂无数据", ha="center", va="center",
                 transform=ax.transAxes, fontsize=14, color="#888")
-        ax.axis("off")
+        ax.set_xticks([])
+        ax.set_yticks([])
     else:
         for name, ys in series:
             ax.plot(x_labels, ys, marker="o", label=name)

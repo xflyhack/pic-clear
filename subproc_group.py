@@ -31,7 +31,11 @@ _IS_WINDOWS = sys.platform.startswith("win")
 
 # ============ Windows Job Object 常量 (winnt.h) ============
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-_JobObjectExtendedLimitInformation = 9
+# NOTE: 这个是 InfoClass 枚举值 (给 SetInformationJobObject 用).
+# 之前直接叫 _JobObjectExtendedLimitInformation, 会被下面同名 Structure 类覆盖,
+# 导致传给 API 的 argument 2 变成 class 而不是 int, 报
+#   ArgumentError: argument 2: TypeError: wrong type
+_JobObjectExtendedLimitInformationClass = 9
 _PROCESS_ALL_ACCESS = 0x1F0FFF
 _CREATE_SUSPENDED = 0x00000004
 _CREATE_NO_WINDOW = 0x08000000
@@ -92,7 +96,7 @@ def _win_create_job() -> int | None:
         ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
     ok = kernel32.SetInformationJobObject(
         ctypes.c_void_p(h),
-        _JobObjectExtendedLimitInformation,
+        _JobObjectExtendedLimitInformationClass,
         ctypes.byref(info),
         ctypes.sizeof(info),
     )
