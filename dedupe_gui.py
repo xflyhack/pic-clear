@@ -22,6 +22,7 @@ import queue
 import subprocess
 import sys
 import threading
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -328,6 +329,19 @@ class DedupeGUI:
         # 智能自动滚动：手动往上翻则暂停跟随，滚回底部自动恢复
         self._auto_scroll_var = tk.BooleanVar(value=True)
 
+        # v0.4.42 常驻模式：主循环线程 + 统计 + 状态栏
+        self._loop_thread: threading.Thread | None = None
+        self._loop_stop_event = threading.Event()
+        # 累计统计（GUI 存活期间累计, 关闭后重置）
+        self._stat_done_dirs = 0
+        self._stat_deleted_images = 0
+        self._stat_lock = threading.Lock()
+        # 状态栏文案
+        self._status_var = tk.StringVar(value="未启动")
+        # 扫描间隔（秒），空转时用 Event.wait 睡这么久
+        self._scan_interval_var = tk.IntVar(
+            value=int(self._cfg.get("scan_interval", 10)))
+
         self._build_ui()
         self.root.after(200, self._drain_log_queue)
         self.root.after(300, self._check_environment)
@@ -358,9 +372,11 @@ class DedupeGUI:
 
         bar = ttk.Frame(self.root)
         bar.pack(fill="x", padx=8, pady=(0, 8))
-        self._run_btn = ttk.Button(bar, text="▶ 开始去重", command=self._on_run)
+        self._run_btn = ttk.Button(bar, text="▶ 开始去重（持续运行，不点停止不会退出）",
+                                    command=self._on_run)
         self._run_btn.pack(side="left")
-        self._stop_btn = ttk.Button(bar, text="■ 停止", command=self._on_stop,
+        self._stop_btn = ttk.Button(bar, text="■ 停止（当前目录跑完再退）",
+                                    command=self._on_stop,
                                     state="disabled")
         self._stop_btn.pack(side="left", padx=6)
         ttk.Button(bar, text="最小化到托盘",
@@ -417,6 +433,20 @@ class DedupeGUI:
                     textvariable=self._lock_ttl_var).pack(side="left")
         ttk.Label(row, text="  多机共享盘时锁过期自动抢占，默认 900（15 分钟）",
                   foreground="#666").pack(side="left", padx=8)
+
+        # v0.4.42: 空转扫描间隔（常驻模式）
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="扫描间隔(s)：", width=14).pack(side="left")
+        ttk.Spinbox(row, from_=2, to=3600, increment=5, width=8,
+                    textvariable=self._scan_interval_var).pack(side="left")
+        ttk.Label(row, text="  无新任务时每隔多久重新扫一次目标目录；默认 10 秒",
+                  foreground="#666").pack(side="left", padx=8)
+
+        # v0.4.42: 状态栏（常驻模式下实时刷新）
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="状态：", width=14).pack(side="left")
+        ttk.Label(row, textvariable=self._status_var,
+                  foreground="#0066cc").pack(side="left")
 
         # 处理范围
         row = ttk.Frame(page); row.pack(fill="x", **pad)
@@ -714,59 +744,91 @@ class DedupeGUI:
     # ---------- 运行 ----------
 
     def _on_run(self):
-        if self._worker_thread and self._worker_thread.is_alive():
-            messagebox.showinfo("正在运行", "已经有任务在跑，请先停止或等待完成。")
+        # v0.4.42 常驻模式: 点开始 -> 主循环线程 -> 不停扫描 + 处理 + 空转 sleep
+        if self._loop_thread and self._loop_thread.is_alive():
+            messagebox.showinfo("正在运行", "已经在跑了，请先点停止。")
             return
+
+        # 参数校验
         target = self._target_var.get().strip()
-        # v0.4.36 归一化: tkinter/手输可能是 Z:/... 或 //?/Z:/..., 全部转 Windows 惯用形式
         target = _normalize_windows_path(target)
         if not target or not Path(target).is_dir():
             messagebox.showerror("参数错误", f"目标目录无效：{target}"); return
-
         exe = _find_dedupe_exe()
         if not exe:
             messagebox.showerror(
                 "环境缺失",
                 "未找到 dedupe_pic.exe，请放到本 GUI 同目录或 System32 后重试。")
             return
-
-        target_p = Path(target)  # target 已在上面归一化
-        mode = self._mode_var.get()
-        dirs = _find_dedupe_targets(target_p, mode, logger=self._log)
-        if not dirs:
-            messagebox.showwarning("提示",
-                                   "扫描不到需要去重的目录（含图片文件）。")
-            return
-
-        # markers_root 必填
         mr = self._markers_root_var.get().strip()
         if not mr:
             messagebox.showerror("配置缺失",
                                  "请先设置『Marker 根』目录。多机共享盘时所有机器应指向同一位置。")
             return
-        mr = _normalize_windows_path(mr)   # v0.4.36 同 target
+        mr = _normalize_windows_path(mr)
         markers_root = Path(mr)
         try:
             markers_root.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             messagebox.showerror("创建失败", f"无法创建 Marker 根目录：{e}")
             return
+        sr_raw = self._src_root_var.get().strip()
+        if sr_raw:
+            sr_norm = _normalize_windows_path(sr_raw)
+            if not Path(sr_norm).is_dir():
+                messagebox.showerror(
+                    "参数错误",
+                    f"图片源根不是有效目录：{sr_norm}\n留空=沿用老规则; 填了就必须存在.")
+                return
 
-        # v0.4.37 pairs 计算.
-        # 若填了 图片源根 src_root:
-        #   marker_dir = markers_root / src_root.name / rel(d, src_root)
-        # 完全对齐 extract_gui 的 marker 放置方式.
-        # 没填 src_root 就走老规则 (v0.4.36 行为): rel(d, target_p) 挂到 markers_root 下.
+        _save_config(self._dump_cfg())
+
+        # 重置累计统计
+        with self._stat_lock:
+            self._stat_done_dirs = 0
+            self._stat_deleted_images = 0
+        self._update_status("启动中…")
+        self._log("[启动] 常驻模式：不点停止会一直循环扫描 + 处理")
+
+        # 启动主循环线程
+        self._loop_stop_event.clear()
+        self._worker_stop_flag.clear()
+        self._loop_thread = threading.Thread(
+            target=self._loop_run, args=(exe, Path(target), markers_root),
+            daemon=True, name="dedupe-loop")
+        self._loop_thread.start()
+
+        self._run_btn.config(state="disabled")
+        self._stop_btn.config(state="normal")
+
+    def _on_stop(self):
+        if not messagebox.askyesno("确认", "确定要停止吗？当前正在处理的目录会跑完再退。"):
+            return
+        self._loop_stop_event.set()
+        self._worker_stop_flag.set()
+        self._log("[停止] 已请求停止，等当前目录跑完就退出")
+        self._update_status("停止中，等当前目录跑完…")
+
+    # ---------- v0.4.42 常驻主循环 ----------
+
+    def _build_pairs_once(self, target_p: Path,
+                          markers_root: Path) -> list[tuple[Path, Path]]:
+        """扫一次目标目录, 算 pairs, 过滤已 done 的.
+        每一轮循环都会重新调, 用来接住生产端新产出的目录."""
+        mode = self._mode_var.get()
+        try:
+            dirs = _find_dedupe_targets(target_p, mode, logger=self._log)
+        except Exception as e:
+            self._log(f"[扫描异常] {type(e).__name__}: {e}")
+            return []
+        if not dirs:
+            return []
+
         sr_raw = self._src_root_var.get().strip()
         src_root: Path | None = None
         if sr_raw:
-            sr_norm = _normalize_windows_path(sr_raw)
-            src_root = Path(sr_norm)
-            if not src_root.is_dir():
-                messagebox.showerror(
-                    "参数错误",
-                    f"图片源根不是有效目录：{src_root}\n留空=沿用老规则; 填了就必须存在.")
-                return
+            src_root = Path(_normalize_windows_path(sr_raw))
+
         pairs: list[tuple[Path, Path]] = []
         for d in dirs:
             if src_root is not None:
@@ -774,11 +836,6 @@ class DedupeGUI:
                     rel = d.relative_to(src_root)
                 except Exception:
                     rel = Path(d.name)
-                # v0.4.41: marker_dir = markers_root / rel(target, src_root)
-                # 不再拼 src_root 那段, 例:
-                #   markers_root=Z:\\任务节点, src_root=Z:\\切帧结果
-                #   target=Z:\\切帧结果\\sjbz_.../camera07
-                #   marker_dir=Z:\\任务节点\\sjbz_.../camera07
                 marker_dir = markers_root if str(rel) == "." else markers_root / rel
             else:
                 try:
@@ -787,55 +844,70 @@ class DedupeGUI:
                     rel = Path(d.name)
                 marker_dir = markers_root / rel if str(rel) != "." else markers_root
             pairs.append((d, marker_dir))
-        # v0.4.36+ 诊断: 打前 3 对 + 关键路径, 便于排查 marker 位置错的 bug
-        self._log(f"[诊断] target_p = {target_p}")
-        self._log(f"[诊断] src_root  = {src_root}")
-        self._log(f"[诊断] markers_root = {markers_root}")
-        for i, (d, md) in enumerate(pairs[:3]):
-            marker_file = md / DEDUP_DONE_MARKER
-            exists = _is_regular_file(str(marker_file))
-            self._log(f"[诊断] pair[{i}] target={d}")
-            self._log(f"[诊断]         marker_dir={md}")
-            self._log(f"[诊断]         marker_file={marker_file}  exists={exists}")
-        if len(pairs) > 3:
-            self._log(f"[诊断] ... 共 {len(pairs)} 对, 只显示前 3 对")
 
-        # 过滤已完成 marker（除非强制重跑）
+        # 过滤已完成 marker (除非强制重跑)
         if not self._force_rerun_var.get():
-            skipped = [(d, md) for d, md in pairs if _is_regular_file(str(md / DEDUP_DONE_MARKER))]
-            pairs = [(d, md) for d, md in pairs if not _is_regular_file(str(md / DEDUP_DONE_MARKER))]
-            if skipped:
-                self._log(f"[跳过] {len(skipped)} 个目录已有 {DEDUP_DONE_MARKER}，"
-                          "如需强制重跑请勾选左下选项")
-            if not pairs:
-                messagebox.showinfo(
-                    "无需处理",
-                    f"所有目录在 markers 里都已有 {DEDUP_DONE_MARKER}。\n"
-                    "如果想强制重跑，请勾选『强制重跑』后再点开始。")
-                return
+            skipped_n = sum(1 for _, md in pairs
+                            if _is_regular_file(str(md / DEDUP_DONE_MARKER)))
+            pairs = [(d, md) for d, md in pairs
+                     if not _is_regular_file(str(md / DEDUP_DONE_MARKER))]
+            if skipped_n:
+                self._log(f"[跳过] {skipped_n} 个目录已有 {DEDUP_DONE_MARKER}")
+        return pairs
 
-        # 保存配置
-        _save_config(self._dump_cfg())
+    def _loop_run(self, exe: str, target_p: Path,
+                  markers_root: Path) -> None:
+        """常驻主循环: 有活儿就干, 没活儿睡 scan_interval 秒.
 
-        self._total_dirs = len(pairs)
-        self._done_dirs = 0
-        self._push_progress()
+        - 停止旗触发时立刻退出 (Event.wait 支持提前唤醒)
+        - 任何异常 log + sleep, 不让循环崩掉
+        """
+        round_no = 0
+        while not self._loop_stop_event.is_set():
+            round_no += 1
+            try:
+                self._update_status(f"第 {round_no} 轮：扫描中…")
+                pairs = self._build_pairs_once(target_p, markers_root)
+            except Exception as e:
+                self._log(f"[扫描异常] {type(e).__name__}: {e}")
+                pairs = []
 
-        # 启动后台线程
-        self._worker_stop_flag.clear()
-        self._worker_thread = threading.Thread(
-            target=self._worker_run, args=(exe, pairs), daemon=True)
-        self._worker_thread.start()
-        self._run_btn.config(state="disabled")
-        self._stop_btn.config(state="normal")
-        jobs = int(self._dedupe_jobs_var.get())
-        self._log(f"[启动] 共 {len(pairs)} 个目录待去重，并发={jobs}")
+            if pairs:
+                self._log(f"[启动] 本轮 {len(pairs)} 个目录待去重，"
+                          f"并发={int(self._dedupe_jobs_var.get())}")
+                self._total_dirs = len(pairs)
+                self._done_dirs = 0
+                self._push_progress()
+                try:
+                    self._worker_run(exe, pairs)
+                except Exception as e:
+                    self._log(f"[执行异常] {type(e).__name__}: {e}")
+                if self._loop_stop_event.is_set():
+                    break
+                # 处理完立刻回头再扫, 不睡
+                continue
 
-    def _on_stop(self):
-        if not messagebox.askyesno("确认", "确定要停止当前去重任务吗？"):
-            return
-        self._worker_stop_flag.set()
-        self._log("[停止] 已请求停止，等当前目录跑完就退出")
+            # 没活儿: 空转睡, 每秒刷新一次状态栏倒计时
+            interval = max(2, int(self._scan_interval_var.get()))
+            self._log(f"[空转] 未发现待处理目录，{interval}s 后重试")
+            for i in range(interval, 0, -1):
+                if self._loop_stop_event.is_set():
+                    break
+                self._update_status(f"空转中，{i}s 后重新扫描")
+                if self._loop_stop_event.wait(1.0):
+                    break
+
+        self._log("[结束] 主循环已退出")
+        self._update_status("已停止")
+        self.root.after(0, self._on_worker_finished)
+
+    def _update_status(self, phase: str) -> None:
+        """在状态栏上拼: 阶段 + 累计已处理目录 + 累计已删图片."""
+        with self._stat_lock:
+            d = self._stat_done_dirs
+            img = self._stat_deleted_images
+        self._status_var.set(
+            f"{phase}   |   已处理 {d} 个目录   |   已删除 {img} 张图片")
 
     def _worker_run(self, exe: str, pairs: list[tuple[Path, Path]]):
         """并发跑 dedupe_pic.exe，每个目录一个子进程。
@@ -890,7 +962,18 @@ class DedupeGUI:
                 line = line.rstrip()
                 if line:
                     self._log(f"[{tag}] {line}")
-                if self._worker_stop_flag.is_set():
+                    # v0.4.42 抠 "[删除完成] 成功 N 个" 累加到状态栏
+                    m = _DELETED_LINE_RE.search(line)
+                    if m:
+                        try:
+                            n = int(m.group(1))
+                        except ValueError:
+                            n = 0
+                        if n > 0:
+                            with self._stat_lock:
+                                self._stat_deleted_images += n
+                            self._update_status(f"正在处理：{tag}")
+                if self._worker_stop_flag.is_set() or self._loop_stop_event.is_set():
                     try:
                         proc.terminate()
                     except Exception:
@@ -900,28 +983,29 @@ class DedupeGUI:
             self._log(f"[{tag}] 完成 rc={rc}")
             with done_lock:
                 self._done_dirs += 1
+            with self._stat_lock:
+                self._stat_done_dirs += 1
             self._push_progress()
+            self._update_status(f"完成一个目录：{tag}")
             return d, rc
 
         try:
             with ThreadPoolExecutor(max_workers=jobs,
                                     thread_name_prefix="dedupe") as ex:
                 futures = [ex.submit(_run_one, p) for p in pairs]
-                # 若停止旗触发，取消未开始的
                 for fut in futures:
                     try:
                         fut.result()
                     except Exception as e:
                         self._log(f"[异常] {type(e).__name__}: {e}")
-                    if self._worker_stop_flag.is_set():
+                    if self._worker_stop_flag.is_set() or self._loop_stop_event.is_set():
                         for f in futures:
                             f.cancel()
-            if not self._worker_stop_flag.is_set():
-                self._log(f"[全部完成] 共处理 {len(pairs)} 个目录")
+            if not (self._worker_stop_flag.is_set() or self._loop_stop_event.is_set()):
+                self._log(f"[本轮完成] 共处理 {len(pairs)} 个目录，回头继续扫描")
         except Exception as e:
             self._log(f"[异常] {type(e).__name__}: {e}")
-        finally:
-            self.root.after(0, self._on_worker_finished)
+        # v0.4.42: 常驻模式下由 _loop_run 控制按钮状态, 这里不再触发 _on_worker_finished
 
     def _on_worker_finished(self):
         self._run_btn.config(state="normal")
@@ -972,6 +1056,7 @@ class DedupeGUI:
             "scene_protect": bool(self._scene_protect_var.get()),
             "force_rerun": bool(self._force_rerun_var.get()),
             "dedupe_jobs": int(self._dedupe_jobs_var.get()),
+            "scan_interval": int(self._scan_interval_var.get()),
             "lock_ttl": int(self._lock_ttl_var.get()),
             "src_root": self._src_root_var.get(),
             "markers_root": self._markers_root_var.get(),
@@ -1068,6 +1153,7 @@ class DedupeGUI:
         except Exception:
             pass
         self._worker_stop_flag.set()
+        self._loop_stop_event.set()
         self.root.destroy()
         try:
             threading.Timer(0.4, lambda: os._exit(0)).start()
