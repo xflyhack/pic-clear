@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import subprocess
 from subproc_group import SubprocGroup
 import sys
@@ -131,6 +132,17 @@ def _find_extract_exe() -> str | None:
 
 # ---------- 视频扫描 ----------
 
+# extract_frames 处理完一个视频的日志正则.
+# 匹配以下四种格式:
+#   多线程 (行首方括号): "[3/61] ✓ path  帧=179 耗时=..."   或 ⊘ / ◇ / ✗
+#   单线程独立结束行:     "    ✓ OK，帧数 179"             或 ⊘ / ✗
+# 备注: 同一视频只有一行会命中 (多线程只有 idx 那行, 单线程只有 ✓/⊘/✗ 那行)
+_EXTRACT_DONE_RE = re.compile(
+    r"(?:^\[\d+/\d+\][ \t]+[\u2713\u2298\u25c7\u2717])"    # [N/M] ✓⊘◇✗
+    r"|(?:^[ \t]+[\u2713\u2298\u2717][ \t])"              # 缩进 ✓⊘✗ 独立行
+)
+
+
 def _list_videos(root: Path) -> list[Path]:
     """递归列出根目录下所有支持的视频文件。"""
     out: list[Path] = []
@@ -142,6 +154,20 @@ def _list_videos(root: Path) -> list[Path]:
         except Exception:
             pass
     return sorted(out)
+
+
+def _count_done_markers(markers_root: Path) -> int:
+    """数一下 markers_root 下已存在的 _done.marker 数量.
+
+    extract_frames 里每个视频对应一个 <markers_root>/.../<视频stem>/_done.marker,
+    无论内容是 'done' 还是 'empty' 都表示这个视频跑过了, 都算已完成.
+    """
+    if not markers_root or not markers_root.is_dir():
+        return 0
+    try:
+        return sum(1 for _ in markers_root.rglob("_done.marker"))
+    except Exception:
+        return 0
 
 
 # ---------- 主 GUI ----------
@@ -234,6 +260,9 @@ class ExtractGUI:
 
         # 环境预检
         self.root.after(300, self._check_environment)
+        # 启动后按当前配置 (视频源目录 + markers 根) 自动预扫一次进度,
+        # 让用户不用点"开始"就能看到 "完成 X/Y"
+        self.root.after(500, self._preview_progress_from_config)
 
     # ---------- UI ----------
 
@@ -511,6 +540,7 @@ class ExtractGUI:
         if p:
             self._src_var.set(p)
             self._rescan_subs()
+            self._preview_progress_from_config()
 
     def _browse_out(self):
         init = self._out_var.get() or os.path.expanduser("~")
@@ -523,6 +553,7 @@ class ExtractGUI:
         p = filedialog.askdirectory(initialdir=init, title="选择 Marker 根")
         if p:
             self._markers_root_var.set(p)
+            self._preview_progress_from_config()
 
     def _rescan_subs(self):
         for w in self._sub_frame.winfo_children():
@@ -549,9 +580,15 @@ class ExtractGUI:
         selected_prev = set(self._cfg.get("selected_subs", []) or [])
         for name in subs:
             v = tk.BooleanVar(value=(name in selected_prev) if selected_prev else True)
+            v.trace_add(
+                "write",
+                lambda *_a: self._preview_progress_from_config(),
+            )
             ttk.Checkbutton(self._sub_frame, text=name, variable=v).pack(
                 anchor="w", padx=4)
             self._sub_vars.append((name, v))
+        # 子目录列表变了后刷一次进度预览
+        self._preview_progress_from_config()
 
     def _toggle_all(self, state: bool):
         for _, v in self._sub_vars:
@@ -698,7 +735,16 @@ class ExtractGUI:
         self._total_videos = 0
         for sub_src, _dst, _mr in sub_pairs:
             self._total_videos += len(_list_videos(sub_src))
+        # 从 markers 预扫已完成数, 支持"关软件重开也能看到进度"
         self._done_videos = 0
+        for _s, _d, sub_mr in sub_pairs:
+            self._done_videos += _count_done_markers(sub_mr)
+        if self._done_videos:
+            self._log(
+                f"[恢复] 预扫 markers: 已完成 {self._done_videos}/"
+                f"{self._total_videos}"
+            )
+        self._push_progress()
         if self._total_videos == 0:
             if not messagebox.askyesno(
                     "提示",
@@ -766,8 +812,14 @@ class ExtractGUI:
                     line = line.rstrip()
                     if line:
                         self._log(line)
-                        # 检测 "抽完一个视频" 的 marker，更新进度
-                        if "抽完" in line or "done.marker" in line or line.endswith("_done.marker"):
+                        # 检测 "一个视频处理完了" 更新进度.
+                        # extract_frames 实际的完成日志格式:
+                        #   多线程: "[3/61] ✓ path/to/x.mp4  帧=179 耗时=39.0s ..."
+                        #   多线程 (empty/locked/failed): 同上但标签是 ⊘ / ◇ / ✗
+                        #   单线程: 独立一行 "    ✓ OK，帧数 179"
+                        #           或 "    ⊘ 跳过（无帧）..." / "    ✗ 失败: ..."
+                        # 只要看到 stage 标签就算一个视频处理过, 计数 +1.
+                        if _EXTRACT_DONE_RE.search(line):
                             self._done_videos += 1
                             self._push_progress()
                     if self._worker_stop_flag.is_set():
@@ -800,6 +852,50 @@ class ExtractGUI:
         pct = int(self._done_videos * 100 / self._total_videos)
         self._progress_var.set(
             f"{self._done_videos}/{self._total_videos}  ({pct}%)")
+
+    def _preview_progress_from_config(self) -> None:
+        """启动时/切目录时按当前配置预扫一次, 恢复 "完成 X/Y" 显示.
+
+        不启动子进程, 只做本地文件扫描. 如果 markers 里没数据, 也会把
+        Y=总视频数 显示出来, 让用户知道待抽帧总量.
+        """
+        try:
+            src = self._src_var.get().strip()
+            mr = self._markers_root_var.get().strip()
+            if not src or not mr:
+                return
+            src_p = Path(src)
+            mr_p = Path(mr)
+            if not src_p.is_dir():
+                return
+            # 生成 sub_pairs 的方式跟 _on_run 完全一致
+            if self._sub_vars:
+                selected = [name for name, v in self._sub_vars if v.get()]
+            else:
+                selected = []
+            if selected:
+                pairs = [(src_p / name, mr_p / src_p.name / name)
+                         for name in selected]
+            else:
+                pairs = [(src_p, mr_p / src_p.name)]
+            total = 0
+            done = 0
+            for sub_src, sub_mr in pairs:
+                total += len(_list_videos(sub_src))
+                done += _count_done_markers(sub_mr)
+            self._total_videos = total
+            self._done_videos = min(done, total) if total else 0
+            if total > 0:
+                pct = int(self._done_videos * 100 / total)
+                self._progress_var.set(
+                    f"{self._done_videos}/{total}  ({pct}%)"
+                )
+            else:
+                self._progress_var.set("就绪")
+        except Exception as e:
+            # 预扫失败不影响主流程, 静默
+            print(f"[preview_progress] {type(e).__name__}: {e}",
+                  file=sys.stderr)
 
     # ---------- 日志 ----------
 
