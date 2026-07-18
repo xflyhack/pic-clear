@@ -89,6 +89,12 @@ def _find_dedupe_exe() -> str | None:
         return None
 
 
+# dedupe_pic 打印的 "[删除完成] 成功 N 个" 用来累加"已删张数"状态栏.
+# v0.4.42 忘了定义就直接引用, 导致 subprocess 每有非空输出行都
+# NameError: name '_DELETED_LINE_RE' is not defined —— 这次补上.
+_DELETED_LINE_RE = re.compile(r"\[删除完成\][^\d]*成功\s+(\d+)\s*个")
+
+
 # ---------- 图片目录扫描 ----------
 
 def _normalize_windows_path(path_str) -> str:
