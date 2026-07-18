@@ -265,8 +265,8 @@ class DedupeGUI:
         else:
             self.root.geometry(_pg._compute_default_geometry(
                 self.root, self._ui_scale,
-                base_w=780, base_h=640, min_w=700, min_h=520))
-        self.root.minsize(int(700 * self._ui_scale), int(520 * self._ui_scale))
+                base_w=820, base_h=760, min_w=760, min_h=620))
+        self.root.minsize(int(760 * self._ui_scale), int(620 * self._ui_scale))
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         try:
@@ -350,8 +350,25 @@ class DedupeGUI:
 
     def _build_ui(self):
         _pg.apply_tab_style(self.root)
+
+        # v0.4.43: 底部按钮条必须先 pack(side="bottom") 占位，
+        # 否则窗口太矮时会被上方 expand=True 的 Notebook 挤到窗口外看不见
+        bar = ttk.Frame(self.root)
+        bar.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
+        self._run_btn = ttk.Button(bar, text="▶ 开始去重（持续运行，不点停止不会退出）",
+                                    command=self._on_run)
+        self._run_btn.pack(side="left")
+        self._stop_btn = ttk.Button(bar, text="■ 停止（当前目录跑完再退）",
+                                    command=self._on_stop,
+                                    state="disabled")
+        self._stop_btn.pack(side="left", padx=6)
+        ttk.Button(bar, text="最小化到托盘",
+                   command=self.hide_to_tray).pack(side="left", padx=6)
+        ttk.Button(bar, text="退出", command=self.quit_all).pack(side="right")
+
+        # Notebook 放在按钮条上方，吃掉剩余空间
         nb = ttk.Notebook(self.root)
-        nb.pack(fill="both", expand=True, padx=8, pady=6)
+        nb.pack(side="top", fill="both", expand=True, padx=8, pady=6)
 
         page = ttk.Frame(nb)
         nb.add(page, text="去重")
@@ -369,19 +386,6 @@ class DedupeGUI:
         log_tab = ttk.Frame(nb)
         nb.add(log_tab, text="日志")
         self._build_log_tab(log_tab)
-
-        bar = ttk.Frame(self.root)
-        bar.pack(fill="x", padx=8, pady=(0, 8))
-        self._run_btn = ttk.Button(bar, text="▶ 开始去重（持续运行，不点停止不会退出）",
-                                    command=self._on_run)
-        self._run_btn.pack(side="left")
-        self._stop_btn = ttk.Button(bar, text="■ 停止（当前目录跑完再退）",
-                                    command=self._on_stop,
-                                    state="disabled")
-        self._stop_btn.pack(side="left", padx=6)
-        ttk.Button(bar, text="最小化到托盘",
-                   command=self.hide_to_tray).pack(side="left", padx=6)
-        ttk.Button(bar, text="退出", command=self.quit_all).pack(side="right")
 
     def _build_main_tab(self, page: ttk.Frame):
         pad = {"padx": 6, "pady": 4}

@@ -169,8 +169,8 @@ class ExtractGUI:
         else:
             self.root.geometry(_pg._compute_default_geometry(
                 self.root, self._ui_scale,
-                base_w=760, base_h=620, min_w=680, min_h=560))
-        self.root.minsize(int(680 * self._ui_scale), int(560 * self._ui_scale))
+                base_w=800, base_h=740, min_w=720, min_h=620))
+        self.root.minsize(int(720 * self._ui_scale), int(620 * self._ui_scale))
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         try:
