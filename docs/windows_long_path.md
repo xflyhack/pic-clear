@@ -275,3 +275,90 @@ if rc == 0 and done_marker is not None:
 | **v0.4.35** | `_safe_stat/unlink/exists/is_file/move` + marker 写失败打日志 | ✅ **通了** |
 
 **关键教训**：改一个 helper 影响面看似小，实际打包成 exe 分发要 20 分钟 CI + 5 分钟堡垒机验证。**能提前用 `diag_pic.exe` 摊事实的场景，永远不要靠 tag 迭代猜方向**。
+
+---
+
+## §9 白话版：为什么要给路径加 `\\?\`（新人必读）
+
+### UNC 是什么？
+
+**UNC = 共享盘的原始地址**，长这样：
+
+```
+\\filestor01.cloud-prod.seres.cn\kj-e68-datamark-100\切帧结果\...
+```
+
+开头两个反斜杠 + 服务器名 + 共享名。文件管理器地址栏能直接输入打开。
+
+### Z: 是什么？
+
+Z 盘就是给上面那串 UNC **起个短名字**。你在系统里点了"映射网络驱动器"以后，Windows 记住：
+
+> 以后 `Z:\` = `\\filestor01.cloud-prod.seres.cn\kj-e68-datamark-100\`
+
+两者指的**是同一个东西**，就像手机联系人里"老王" = "138xxxx1234"。
+
+### 为什么加 `\\?\` 就能过长路径？
+
+Windows 有两套读文件的 API：
+
+| API | 路径长度上限 | 用法 |
+|---|---|---|
+| 老的 (短 API) | 260 字符 | 直接写 `Z:\a\b.jpg` |
+| 新的 (长 API) | 32000 字符 | 前面加 `\\?\`，写 `\\?\Z:\a\b.jpg` |
+
+`\\?\` 相当于告诉 Windows："**这个路径走新 API**，别用 260 限制卡我"。
+
+### 为什么曾经想展开成 UNC，反而挂了（v0.4.31 弯路）
+
+想过把 `Z:\` 反查回 UNC，写成长路径版：
+
+```
+\\?\UNC\filestor01.cloud-prod.seres.cn\kj-e68-datamark-100\切帧结果\...
+```
+
+结果堡垒机的 `WNetGetConnectionW` 返回 `1783 ERROR_INVALID_UNICODE`，
+拿到的服务器/共享名有问题，拼出来的路径 Windows 认不出。**156 张图全打不开**。
+
+**结论**：保留 `Z:\` 直接加 `\\?\Z:\...` 就够，别多此一举反查 UNC。
+
+### 本地 D 盘要不要也加 `\\?\`？
+
+**要，但只在路径长的时候加。** 规则：
+
+- `D:\短路径\a.jpg` (< 240 字符) → 不加，直接用
+- `D:\很深...\a.jpg` (≥ 240 字符) → 必须加 `\\?\`
+- `Z:\` 映射盘 → 只要用了就建议全加（保险）
+
+### 为什么不无脑给所有路径都加？
+
+1. `\\?\` 前缀会**跳过路径规范化**：
+   - `/` 不会自动转 `\`
+   - `.` `..` 不会解析
+   - `C:\foo\..\bar` 不会变 `C:\bar` —— 传什么就是什么
+2. 有些老 API / 第三方库不认 `\\?\`
+3. 相对路径根本不能加（`\\?\` 只支持绝对路径）
+
+### 标准做法（代码里就这么做的）
+
+```python
+def _to_long_path(p: str) -> str:
+    if not sys.platform.startswith("win"): return p
+    if p.startswith("\\\\?\\"): return p       # 已加过就不动
+    p = os.path.normpath(p)                    # 先规范化 / -> \
+    if not os.path.isabs(p): return p          # 相对路径不加
+    if len(p) < 240: return p                  # 短路径不加, 留 20 字符余量
+    if p.startswith("\\\\"):                   # 已经是 UNC 就走 UNC 长路径
+        return "\\\\?\\UNC\\" + p[2:]
+    return "\\\\?\\" + p                       # 普通盘符
+```
+
+**一句话**：本地 D 盘和堡垒机 Z 盘走**同一套代码**，
+短路径原样、长路径自动加前缀，两边都能跑。
+
+### 为什么 bat 能删、Python 不能删（读者常问）
+
+bat 里的 `del` / `rmdir` 是原生 Windows 命令，内部就是长路径实现，走系统级 IO。
+
+Python 的 `pathlib.Path.stat()` / `open()` 走的是 Python 自己包一层的 C API，
+**长路径必须显式加 `\\?\` 前缀才吃得下**。这不是 Z 盘特殊，是 "长路径 + Python IO" 这对组合特殊。
