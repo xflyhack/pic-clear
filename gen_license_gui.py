@@ -177,6 +177,14 @@ class GenLicenseGUI:
 
         self._build_ui()
 
+        # v0.4.74: 启动即打印环境画像到日志 (对齐其他 GUI)
+        try:
+            from env_probe import probe_and_log
+            self.root.after(100, lambda: probe_and_log(lambda s: self._log(s)))
+        except Exception as _e:
+            try: self._log(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}", "err")
+            except Exception: pass
+
     @staticmethod
     def _default_expire_date() -> str:
         today = date.today()

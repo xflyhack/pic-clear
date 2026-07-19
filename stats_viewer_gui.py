@@ -93,6 +93,14 @@ class StatsViewerApp:
         self._build_footer()
 
         self._log(f"就绪. 版本 {_read_version()}")
+
+        # v0.4.74: 启动即打印环境画像到日志
+        try:
+            from env_probe import probe_and_log
+            self.root.after(100, lambda: probe_and_log(self._log))
+        except Exception as _e:
+            try: self._log(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}")
+            except Exception: pass
         if not _MPL_OK:
             self._log(f"[提示] 未装 matplotlib, 图表 Tab 不可用. "
                       f"pip install matplotlib 后重启. err={_MPL_ERR}")

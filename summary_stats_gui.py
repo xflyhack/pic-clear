@@ -284,6 +284,14 @@ class SummaryStatsGUI:
         self._build_tree()
         self._build_result()
 
+        # v0.4.74: 启动即打印环境画像到 stderr (本 GUI 无日志面板)
+        try:
+            from env_probe import probe_and_log
+            self.root.after(100, lambda: probe_and_log(None))
+        except Exception as _e:
+            import sys as _sys
+            _sys.stderr.write(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}\n")
+
     # ---------- 顶部：磁盘 + 统计根 + 粒度 ----------
     def _build_top(self) -> None:
         top = ttk.Frame(self.root, padding=8)

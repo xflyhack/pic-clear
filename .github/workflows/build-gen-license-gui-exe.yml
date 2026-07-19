@@ -48,6 +48,7 @@ jobs:
           mkdir build_gen_license_gui
           copy gen_license_gui.py build_gen_license_gui\
           copy _version.py build_gen_license_gui\
+          copy env_probe.py build_gen_license_gui\\
           mkdir build_gen_license_gui\secrets
           copy secrets\private.pem build_gen_license_gui\secrets\
         shell: cmd
@@ -61,6 +62,7 @@ jobs:
             --add-data "..\icon.png;." ^
             --add-data "secrets\private.pem;secrets" ^
             --hidden-import _version ^
+            --hidden-import env_probe ^
             --hidden-import cryptography ^
             --hidden-import cryptography.hazmat.primitives.asymmetric.padding ^
             --hidden-import cryptography.hazmat.primitives.hashes ^

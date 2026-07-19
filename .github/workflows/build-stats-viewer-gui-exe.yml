@@ -62,6 +62,7 @@ jobs:
             --icon "..\icon.ico" ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import _version ^
+            --hidden-import env_probe ^
             --hidden-import stats_db ^
             --hidden-import sqlite3 ^
             --hidden-import json ^

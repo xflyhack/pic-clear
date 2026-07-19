@@ -44,6 +44,7 @@ jobs:
           copy summary_stats_gui.py build_summary_gui\
           copy licensing.py build_summary_gui\
           copy _version.py build_summary_gui\
+          copy env_probe.py build_summary_gui\\
         shell: cmd
 
       - name: Obfuscate with PyArmor
@@ -67,6 +68,7 @@ jobs:
             --add-data "..\icon.png;." ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import _version ^
+            --hidden-import env_probe ^
             --hidden-import json ^
             --hidden-import base64 ^
             --hidden-import hashlib ^

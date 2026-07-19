@@ -1620,6 +1620,14 @@ class PipeGUI:
         # _loaded_config 已在 __init__ 顶部加载（用于 window_geometry），此处直接复用
 
         self._build_ui()
+
+        # v0.4.74: 启动即打印环境画像到 stderr (pipe_gui 无 UI 日志, 用 stderr)
+        try:
+            from env_probe import probe_and_log
+            self.root.after(100, lambda: probe_and_log(None))
+        except Exception as _e:
+            import sys as _sys
+            _sys.stderr.write(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}\n")
         self._refresh_env()
 
         # 有历史配置就用历史配置；否则走原自动逻辑（挑盘 + 猜 sjbz_*）
