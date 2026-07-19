@@ -1217,12 +1217,26 @@ def main() -> int:
         if stage in ("ok", "failed"):
             _dur = probe_video_duration(ffprobe, task.src_path)
         _dur_str = f"视频总时长={_dur:.1f}s" if _dur else "视频总时长=未知"
+        # v0.4.84: 跳过/失败原因单独抽一行, 便于用户一眼看清'为什么这个视频没抽':
+        #     跳过原因: 其他机器/进程正在抽，锁存在且未过期
+        #     失败原因: ffmpeg 返回 xxx
+        # 判定: 短消息 (OK / '.OK' 之类) 走老格式尾附; 长消息 (跳过/失败) 拆一行.
+        _reason_line = ""
+        _tail_msg = msg
+        _stripped_msg = (msg or "").strip()
+        if _stripped_msg.startswith("跳过"):
+            _reason_line = f"\n    跳过原因: {_stripped_msg[len('跳过'):].lstrip('（(').rstrip('）)')}"
+            _tail_msg = "跳过"
+        elif stage == "failed" and _stripped_msg and _stripped_msg != "OK":
+            _reason_line = f"\n    失败原因: {_stripped_msg}"
+            _tail_msg = "失败"
         with print_lock:
             print(
                 f"[第 {idx} 个/共 {len(tasks)} 个] {tag}\n"
                 f"    源视频: {_full_src}   {_dur_str}\n"
                 f"    结果  : 已抽帧数={n} 本次耗时={dt:.1f}s  "
-                f"(已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)})  {msg}",
+                f"(已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)})  {_tail_msg}"
+                f"{_reason_line}",
                 flush=True,
             )
 
