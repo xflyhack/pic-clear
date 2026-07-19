@@ -44,6 +44,8 @@ from winpath_util import (
     normalize_windows_path as _normalize_windows_path,
     long_path_prefix as _long_path_prefix,
     resolve_mapped_drive_to_unc_verbose as _resolve_mapped_drive_to_unc,
+    to_long_path as _to_long_path,
+    _safe_is_file_impl,
 )
 
 
@@ -51,6 +53,172 @@ def _to_unc_full(p: str, unc_root: str) -> str:
     r"""Z:\aaa\bbb -> \\?\UNC\server\share\aaa\bbb, 供第 4 种打开方式使用."""
     rest = p[2:].lstrip("\\")
     return "\\\\?\\UNC\\" + unc_root.lstrip("\\") + "\\" + rest
+
+
+# ---------------- Marker 诊断 (v0.4.65+) ----------------
+
+def run_marker_diagnostics(markers_root: str, sample_limit: int = 5) -> str:
+    r"""扫 markers_root 下所有 _done.marker, 对每个跑一遍完整判定, 输出统计报告.
+
+    检查内容:
+      - rglob 短路径 vs \?\ 长路径 数出的 marker 数量差 (定位 GUI 预扫抖动)
+      - 每条 marker 的 4 种查询结果: 短 isfile / 长 isfile / 短 stat / 长 stat
+      - 路径长度分布 (最短 / 最长 / 平均 / >=260 数量)
+      - 前 N 条异常样本 (safe_is_file=False 但客观应存在, 或 4 种查询结果不一致)
+    """
+    from pathlib import Path
+    lines: list[str] = []
+    def w(s: str = "") -> None:
+        lines.append(s)
+
+    root_raw = markers_root
+    root = _normalize_windows_path(markers_root)
+
+    w("=" * 60)
+    w("pic-clear Marker 诊断报告")
+    w(f"生成时间 : {datetime.now().isoformat(timespec='seconds')}")
+    w(f"diag_pic 版本 : {APP_VERSION}")
+    w(f"平台 : {platform.platform()}")
+    w("=" * 60)
+    w("")
+    if root_raw != root:
+        w(f"[原始 markers 根] {root_raw}")
+        w(f"[规范 markers 根] {root}")
+    else:
+        w(f"[markers 根] {root}")
+    w(f"[根路径长度] {len(root)}")
+    w("")
+
+    # 根是否存在
+    root_p = Path(root)
+    w(f"[根 is_dir 短] {root_p.is_dir()}")
+    long_root = _to_long_path(root)
+    if long_root != root:
+        w(f"[长路径根] {long_root}")
+        w(f"[长根 is_dir] {Path(long_root).is_dir()}")
+    else:
+        w(r"[长路径根] (根路径不足阈值, 不套 \?\)")
+    w("")
+
+    # rglob 数量对比: 短 vs 长
+    w("--- rglob(_done.marker) 数量对比 ---")
+    try:
+        short_list = list(root_p.rglob("_done.marker"))
+        w(f"短路径 rglob : {len(short_list)} 条")
+    except Exception as e:
+        w(f"短路径 rglob : ERR {type(e).__name__}: {e}")
+        short_list = []
+    if long_root != root:
+        try:
+            long_list = list(Path(long_root).rglob("_done.marker"))
+            w(f"长路径 rglob : {len(long_list)} 条")
+        except Exception as e:
+            w(f"长路径 rglob : ERR {type(e).__name__}: {e}")
+            long_list = []
+        diff = len(long_list) - len(short_list)
+        w(f"差值         : {diff:+d}  ({'长路径多' if diff>0 else '短路径多' if diff<0 else '一致'})")
+    else:
+        long_list = short_list
+    w("")
+
+    if not long_list:
+        w("[没扫到 _done.marker, 报告结束]")
+        return "\n".join(lines)
+
+    # 用长路径列表做完整逐个诊断 (更全)
+    all_markers = long_list
+
+    # 路径长度分布
+    lens = [len(str(m)) for m in all_markers]
+    w("--- 路径长度分布 ---")
+    w(f"总数     : {len(lens)}")
+    w(f"最短     : {min(lens)}")
+    w(f"最长     : {max(lens)}")
+    w(f"平均     : {sum(lens) // len(lens)}")
+    w(f">=260    : {sum(1 for L in lens if L >= 260)} (Windows MAX_PATH 边界)")
+    w(f">=200    : {sum(1 for L in lens if L >= 200)}")
+    w("")
+
+    # 逐个跑 _safe_is_file_impl, 统计各分支命中
+    stats = {
+        "hit_short": 0,        # 短路径 isfile=True 直接命中
+        "hit_long_isfile": 0,  # 长路径 isfile=True 命中
+        "hit_long_stat": 0,    # 长路径 stat 兜底命中 (v0.4.65 新加的救命分支)
+        "miss": 0,             # 全挂
+    }
+    miss_samples: list[dict] = []  # 全挂的样本
+    quirk_samples: list[dict] = [] # 短挂长救回来的样本 (SMB quirk 证据)
+
+    for m in all_markers:
+        hit, diag = _safe_is_file_impl(str(m))
+        if hit:
+            if diag.get("short_isfile") == "True":
+                stats["hit_short"] += 1
+            elif diag.get("long_isfile") == "True":
+                stats["hit_long_isfile"] += 1
+                if len(quirk_samples) < sample_limit:
+                    quirk_samples.append({"path": str(m), "diag": diag})
+            elif diag.get("long_stat", "").startswith("OK"):
+                stats["hit_long_stat"] += 1
+                if len(quirk_samples) < sample_limit:
+                    quirk_samples.append({"path": str(m), "diag": diag})
+        else:
+            stats["miss"] += 1
+            if len(miss_samples) < sample_limit:
+                miss_samples.append({"path": str(m), "diag": diag})
+
+    w("--- safe_is_file 各分支命中统计 ---")
+    w(f"[hit_short]        {stats['hit_short']:5d}  (短路径 isfile=True, 正常)")
+    w(f"[hit_long_isfile]  {stats['hit_long_isfile']:5d}  (长路径 isfile 救回, 短路径撒谎 = SMB quirk)")
+    w(f"[hit_long_stat]    {stats['hit_long_stat']:5d}  (长路径 stat 兜底救回, isfile 也撒谎 = v0.4.65 兜底)")
+    w(f"[miss]             {stats['miss']:5d}  (全挂, 视频会被重跑)")
+    total = sum(stats.values())
+    if total:
+        for k in stats:
+            w(f"    {k:<18s} {stats[k]/total*100:5.1f}%")
+    w("")
+
+    # SMB quirk 样本
+    if quirk_samples:
+        w(f"--- SMB quirk 样本 (最多 {sample_limit} 条, 短路径撒谎但长路径救回) ---")
+        for i, s in enumerate(quirk_samples, 1):
+            w(f"[{i}] {s['path']}  len={len(s['path'])}")
+            d = s["diag"]
+            w(f"    short_isfile= {d.get('short_isfile')}")
+            w(f"    long_isfile = {d.get('long_isfile')}")
+            w(f"    long_stat   = {d.get('long_stat')}")
+        w("")
+
+    # miss 样本 (最可怕的, 重跑的元凶)
+    if miss_samples:
+        w(f"--- MISS 样本 (最多 {sample_limit} 条, 这些 marker 客观在但判定全 False, 视频会重跑) ---")
+        for i, s in enumerate(miss_samples, 1):
+            w(f"[{i}] {s['path']}  len={len(s['path'])}")
+            d = s["diag"]
+            w(f"    short_isfile= {d.get('short_isfile')}")
+            w(f"    long_p      = {d.get('long_p')}")
+            w(f"    long_isfile = {d.get('long_isfile')}")
+            w(f"    long_stat   = {d.get('long_stat')}")
+            # 补: 手动再试一把 os.path.exists / os.stat / open('rb') 各种方式
+            path_try = d.get("long_p") or s["path"]
+            try:
+                w(f"    再试 os.path.exists({path_try[:40]}...) = {os.path.exists(path_try)}")
+            except Exception as e:
+                w(f"    再试 os.path.exists ERR {type(e).__name__}: {e}")
+            try:
+                with open(path_try, "rb") as f:
+                    head = f.read(16)
+                w(f"    再试 open(rb) OK head={head!r}")
+            except Exception as e:
+                w(f"    再试 open(rb) ERR {type(e).__name__}: {e}")
+        w("")
+    else:
+        w("[没有 MISS 样本, safe_is_file 判定 100% 命中, marker skip 应该稳]")
+
+    w("=" * 60)
+    w("诊断结束. 请把上面全部内容复制并贴给作者.")
+    w("=" * 60)
+    return "\n".join(lines)
 
 
 # ---------------- 诊断主体 ----------------
@@ -206,9 +374,25 @@ class DiagApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title(APP_TITLE)
-        root.geometry("980x680")
+        root.geometry("980x720")
 
-        top = ttk.Frame(root, padding=8)
+        nb = ttk.Notebook(root)
+        nb.pack(fill=tk.BOTH, expand=True)
+
+        # Tab 1: 图片打开诊断 (原功能)
+        img_tab = ttk.Frame(nb)
+        nb.add(img_tab, text="图片打开诊断")
+        self._build_image_tab(img_tab)
+
+        # Tab 2: Marker 诊断 (v0.4.65 新增)
+        mk_tab = ttk.Frame(nb)
+        nb.add(mk_tab, text="Marker 诊断")
+        self._build_marker_tab(mk_tab)
+
+    # ---------- Tab 1: 图片诊断 ----------
+
+    def _build_image_tab(self, parent):
+        top = ttk.Frame(parent, padding=8)
         top.pack(fill=tk.X)
 
         ttk.Label(top, text="图片路径:").pack(side=tk.LEFT)
@@ -217,14 +401,14 @@ class DiagApp:
         self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
         ttk.Button(top, text="浏览...", command=self.on_browse).pack(side=tk.LEFT, padx=2)
 
-        btns = ttk.Frame(root, padding=(8, 0))
+        btns = ttk.Frame(parent, padding=(8, 0))
         btns.pack(fill=tk.X)
         ttk.Button(btns, text="开始诊断", command=self.on_run).pack(side=tk.LEFT)
         ttk.Button(btns, text="清空日志", command=self.on_clear).pack(side=tk.LEFT, padx=6)
         ttk.Button(btns, text="复制全部日志", command=self.on_copy).pack(side=tk.LEFT)
         ttk.Label(btns, text=f"  {APP_TITLE}", foreground="#888").pack(side=tk.RIGHT)
 
-        body = ttk.Frame(root, padding=8)
+        body = ttk.Frame(parent, padding=8)
         body.pack(fill=tk.BOTH, expand=True)
         self.txt = tk.Text(body, wrap=tk.NONE, font=("Consolas", 10))
         yscroll = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self.txt.yview)
@@ -236,9 +420,8 @@ class DiagApp:
         body.grid_rowconfigure(0, weight=1)
         body.grid_columnconfigure(0, weight=1)
 
-        # 允许 Ctrl+A / Ctrl+C
-        self.txt.bind("<Control-a>", self._select_all)
-        self.txt.bind("<Control-A>", self._select_all)
+        self.txt.bind("<Control-a>", self._select_all_img)
+        self.txt.bind("<Control-A>", self._select_all_img)
 
         self._append(f"欢迎使用 {APP_TITLE}\n")
         self._append("使用步骤:\n")
@@ -247,7 +430,7 @@ class DiagApp:
         self._append("  3) 结果自动填到本框, 用 [复制全部日志] 或 Ctrl+A / Ctrl+C 复制\n")
         self._append("  4) 把结果贴给作者定位\n\n")
 
-    def _select_all(self, _event=None):
+    def _select_all_img(self, _event=None):
         self.txt.tag_add("sel", "1.0", "end")
         return "break"
 
@@ -280,7 +463,7 @@ class DiagApp:
             messagebox.showerror("复制失败", str(e))
 
     def on_run(self):
-        p = self.path_var.get().strip().strip('"').strip("'")
+        p = self.path_var.get().strip().strip(chr(34)).strip("'")
         if not p:
             messagebox.showwarning("请选图片", "请先点 [浏览...] 选一张真实存在的图片")
             return
@@ -291,6 +474,107 @@ class DiagApp:
         except Exception:
             report = "诊断脚本自身抛异常:\n" + traceback.format_exc()
         self._append(report + "\n")
+
+    # ---------- Tab 2: Marker 诊断 ----------
+
+    def _build_marker_tab(self, parent):
+        top = ttk.Frame(parent, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="Marker 根目录:").pack(side=tk.LEFT)
+        self.mk_root_var = tk.StringVar()
+        ttk.Entry(top, textvariable=self.mk_root_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        ttk.Button(top, text="浏览...", command=self.on_mk_browse).pack(
+            side=tk.LEFT, padx=2)
+
+        opt = ttk.Frame(parent, padding=(8, 0))
+        opt.pack(fill=tk.X)
+        ttk.Label(opt, text="样本上限:").pack(side=tk.LEFT)
+        self.mk_sample_var = tk.IntVar(value=5)
+        ttk.Spinbox(opt, from_=1, to=50, textvariable=self.mk_sample_var,
+                    width=6).pack(side=tk.LEFT, padx=6)
+        ttk.Label(opt, text="(每类样本最多打印几条; 全量扫描不受此限)",
+                  foreground="#888").pack(side=tk.LEFT)
+
+        btns = ttk.Frame(parent, padding=(8, 4))
+        btns.pack(fill=tk.X)
+        ttk.Button(btns, text="开始扫描 marker",
+                   command=self.on_mk_run).pack(side=tk.LEFT)
+        ttk.Button(btns, text="清空日志",
+                   command=self.on_mk_clear).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="复制全部日志",
+                   command=self.on_mk_copy).pack(side=tk.LEFT)
+
+        body = ttk.Frame(parent, padding=8)
+        body.pack(fill=tk.BOTH, expand=True)
+        self.mk_txt = tk.Text(body, wrap=tk.NONE, font=("Consolas", 10))
+        yscroll = ttk.Scrollbar(body, orient=tk.VERTICAL,
+                                command=self.mk_txt.yview)
+        xscroll = ttk.Scrollbar(body, orient=tk.HORIZONTAL,
+                                command=self.mk_txt.xview)
+        self.mk_txt.configure(yscrollcommand=yscroll.set,
+                              xscrollcommand=xscroll.set)
+        self.mk_txt.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+
+        self.mk_txt.bind("<Control-a>", self._select_all_mk)
+        self.mk_txt.bind("<Control-A>", self._select_all_mk)
+
+        self._mk_append("Marker 诊断工具 (v0.4.65+)\n\n")
+        self._mk_append("用法:\n")
+        self._mk_append("  1) 填 marker 根目录 (跟 extract_gui '--markers-root' 一致,\n")
+        self._mk_append("     例如 \\\\filestor01...\\节点\\sjbz_20260717\\01)\n")
+        self._mk_append("  2) 点 [开始扫描 marker]\n")
+        self._mk_append("  3) 报告会列出:\n")
+        self._mk_append("       - 短路径 rglob vs 长路径 rglob 数量差\n")
+        self._mk_append("         (差 >0 说明短路径 scandir silently 漏了)\n")
+        self._mk_append("       - safe_is_file 各分支命中比例\n")
+        self._mk_append("         (hit_long_stat 高 = SMB isfile 撒谎, v0.4.65 兜底救回)\n")
+        self._mk_append("       - MISS 样本 (marker 客观在但判定全 False, 会导致重跑)\n\n")
+
+    def _select_all_mk(self, _event=None):
+        self.mk_txt.tag_add("sel", "1.0", "end")
+        return "break"
+
+    def _mk_append(self, s: str) -> None:
+        self.mk_txt.insert(tk.END, s)
+        self.mk_txt.see(tk.END)
+
+    def on_mk_browse(self):
+        p = filedialog.askdirectory(title="选 Marker 根目录")
+        if p:
+            self.mk_root_var.set(p)
+
+    def on_mk_clear(self):
+        self.mk_txt.delete("1.0", tk.END)
+
+    def on_mk_copy(self):
+        try:
+            content = self.mk_txt.get("1.0", tk.END)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self.root.update()
+            messagebox.showinfo("已复制", "Marker 诊断日志已复制到剪贴板")
+        except Exception as e:
+            messagebox.showerror("复制失败", str(e))
+
+    def on_mk_run(self):
+        root = self.mk_root_var.get().strip().strip(chr(34)).strip("'")
+        if not root:
+            messagebox.showwarning("请选目录",
+                                    "请先填或浏览一个 marker 根目录")
+            return
+        sample = max(1, int(self.mk_sample_var.get()))
+        self._mk_append(f"\n>>> 开始扫描 marker: {root}\n\n")
+        self.root.update()
+        try:
+            report = run_marker_diagnostics(root, sample_limit=sample)
+        except Exception:
+            report = "扫描脚本自身抛异常:\n" + traceback.format_exc()
+        self._mk_append(report + "\n")
 
 
 def main():
