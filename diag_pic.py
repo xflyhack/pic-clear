@@ -744,6 +744,247 @@ def run_log_batch_diagnostics(log_path: str) -> str:
     return "\n".join(lines)
 
 
+
+def collect_env_report() -> str:
+    r"""磁盘 + SMB + 长路径注册表 环境体检. v0.4.71 新增.
+
+    上游频繁改挂载方式 (Z: 映射 / \\filestor 直连 UNC / 网络位置 / NFS),
+    下游先摸清运行时环境, 再判断 pic-clear 该走哪条路径.
+    """
+    import subprocess
+    lines: list[str] = []
+    def w(s: str = "") -> None:
+        lines.append(s)
+
+    w("=" * 60)
+    w("pic-clear 环境体检报告  (v0.4.71+)")
+    w(f"生成时间 : {datetime.now().isoformat(timespec='seconds')}")
+    w(f"diag_pic 版本 : {APP_VERSION}")
+    w(f"平台     : {platform.platform()}")
+    w(f"Python   : {sys.version.split()[0]}")
+    w("=" * 60)
+    w("")
+
+    if os.name != "nt":
+        w("[SKIP] 非 Windows 平台, 环境体检仅在 Windows 有意义.")
+        return "\n".join(lines)
+
+    def _run(cmd, timeout=6, shell=True):
+        r"""执行命令拿 stdout+stderr, 超时/异常都吞掉, 返回字符串."""
+        try:
+            r = subprocess.run(
+                cmd, shell=shell, timeout=timeout,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+            )
+            out = r.stdout.decode("gbk", errors="replace") if r.stdout else ""
+            return out.rstrip(), r.returncode
+        except subprocess.TimeoutExpired:
+            return f"[TIMEOUT after {timeout}s]", -1
+        except Exception as e:
+            return f"[EXCEPTION {type(e).__name__}: {e}]", -1
+
+    # --------- Section 1: 盘符 & 卷 ----------
+    w("--- 1. 逻辑盘符 (wmic logicaldisk) ---")
+    out, rc = _run('wmic logicaldisk get DeviceID,DriveType,ProviderName,FileSystem,VolumeName,Size,FreeSpace /format:list')
+    if rc != 0 or "[TIMEOUT" in out or "[EXCEPTION" in out:
+        # 老 Windows 无 wmic 或超时, fallback PowerShell
+        out, rc = _run('powershell -NoProfile -Command "Get-WmiObject Win32_LogicalDisk | Select-Object DeviceID,DriveType,ProviderName,FileSystem,VolumeName,Size,FreeSpace | Format-List"', timeout=10)
+    if out:
+        # DriveType 释义:
+        #   0=Unknown 1=NoRoot 2=Removable 3=LocalDisk 4=NetworkDrive 5=CDROM 6=RAMDisk
+        w(out)
+        w("")
+        w("    (DriveType: 3=本地 4=网络映射盘 5=光驱)")
+    else:
+        w("(无输出, rc=%d)" % rc)
+    w("")
+
+    # --------- Section 2: net use (映射盘/UNC 挂载) ----------
+    w("--- 2. net use 输出 (哪些 UNC 被映射) ---")
+    out, rc = _run("net use")
+    w(out if out else f"(无输出, rc={rc})")
+    w("")
+
+    # --------- Section 3: SMB 连接协商结果 ----------
+    w("--- 3. SMB 连接细节 (Get-SmbConnection) ---")
+    ps_cmd = (
+        'powershell -NoProfile -Command '
+        '"Get-SmbConnection | Select-Object ServerName,ShareName,'
+        'UserName,Credential,Dialect,NumOpens,Redirected | Format-List"'
+    )
+    out, rc = _run(ps_cmd, timeout=10)
+    if out.strip():
+        w(out)
+        w("")
+        w("    (Dialect: 2.1=Win7/Server2008R2  3.0=Win8/2012  3.02=Win8.1/2012R2  3.1.1=Win10+)")
+        w("    (Samba 4 通常协商到 3.1.1; SMB1 说明服务端非常老)")
+    else:
+        w(f"(无输出, rc={rc}, 可能未启用 SMB Client 或无活跃连接)")
+    w("")
+
+    # --------- Section 4: 已挂载 UNC (net view / mklink 特殊) ----------
+    w("--- 4. WNetGetConnection 逐盘符探测 ---")
+    try:
+        import string
+        from winpath_util import resolve_mapped_drive_to_unc_verbose
+        rows = []
+        for ch in string.ascii_uppercase:
+            drv = ch + ":"
+            if not os.path.exists(drv + "\\"):
+                continue
+            rc2, val = resolve_mapped_drive_to_unc_verbose(drv)
+            if rc2 == 0 and val:
+                rows.append(f"  {drv}  ->  {val}")
+            elif rc2 not in (0, 2250):
+                # 2250 = ERROR_NOT_CONNECTED, 本地盘正常; 其他值才打
+                rows.append(f"  {drv}  (WNet rc={rc2})")
+        if rows:
+            w("\n".join(rows))
+        else:
+            w("(没有映射到 UNC 的盘符, 说明当前不走盘符挂载, 用 UNC 直连)")
+    except Exception as e:
+        w(f"(探测挂载失败: {type(e).__name__}: {e})")
+    w("")
+
+    # --------- Section 5: SMB Client 缓存注册表 ----------
+    w("--- 5. SMB Client 目录/文件缓存 (注册表, 只读) ---")
+    reg_key = r'HKLM\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters'
+    interesting = [
+        ("FileNotFoundCacheLifetime",
+         "文件不存在缓存(秒) 默认 5. 越大越可能读到旧的'不存在', 是 marker miss 罪魁"),
+        ("DirectoryCacheLifetime",
+         "目录列表缓存(秒) 默认 10. Samba 服务端无 Change Notify 时只能靠这个"),
+        ("FileInfoCacheLifetime",
+         "文件属性缓存(秒) 默认 10"),
+        ("DormantFileLimit",
+         "空闲文件上限, 影响长连接稳定性"),
+        ("DisableBandwidthThrottling",
+         "0=启用节流, 1=禁用; 高延迟共享盘要设 1"),
+        ("DisableLargeMtu",
+         "0=启用 large MTU (1MB), 1=禁用 (只用 64KB); 挂 SMB2+ 要 0"),
+    ]
+    for name, desc in interesting:
+        cmd = f'reg query "{reg_key}" /v {name}'
+        out, rc = _run(cmd, timeout=4)
+        if rc == 0 and "REG_" in out:
+            # 提取 REG_DWORD 0x?? 那一行
+            for line in out.splitlines():
+                s = line.strip()
+                if name in s and "REG_" in s:
+                    w(f"  {name:35s}  {s.split(name,1)[1].strip()}")
+                    w(f"    {desc}")
+                    break
+            else:
+                w(f"  {name:35s}  (未设置, 用默认值)")
+                w(f"    {desc}")
+        else:
+            w(f"  {name:35s}  (未设置, 用默认值)")
+            w(f"    {desc}")
+    w("")
+
+    # --------- Section 6: 长路径支持开关 ----------
+    w("--- 6. Windows 长路径支持 (LongPathsEnabled) ---")
+    cmd = r'reg query "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled'
+    out, rc = _run(cmd, timeout=4)
+    if rc == 0 and "LongPathsEnabled" in out:
+        for line in out.splitlines():
+            if "LongPathsEnabled" in line:
+                w(f"  {line.strip()}")
+                if "0x1" in line:
+                    w("    -> 已启用, 部分 Win32 API 可直接吃 >260 路径 (无需 \\\\?\\)")
+                else:
+                    w("    -> 未启用, >260 路径必须靠 \\\\?\\ 前缀绕开")
+                break
+    else:
+        w("  (键不存在, 大多数 Windows Server 默认这样, 必须靠 \\\\?\\)")
+    w("")
+
+    # --------- Section 7: 关键路径可达性快速探测 ----------
+    w("--- 7. 常用 pic-clear 根路径快速探测 ---")
+    # 用户可能在意的几个根路径 (从环境变量 / 猜测)
+    guesses = [
+        r"\\filestor01.cloud-prod.seres.cn\kj-e68-datamark-100",
+        r"\\filestor01.cloud-prod.seres.cn\kj-e68-datamark-100\节点",
+        r"\\filestor01.cloud-prod.seres.cn\kj-e68-datamark-100\切帧结果new",
+        r"Z:\\",
+        r"D:\\qzgj",
+    ]
+    for p in guesses:
+        exists_short = "?"
+        try:
+            exists_short = "True" if os.path.exists(p) else "False"
+        except Exception as e:
+            exists_short = f"ERR:{type(e).__name__}"
+        w(f"  {p}")
+        w(f"    exists(短)={exists_short}")
+        if exists_short == "True":
+            # 长路径版
+            try:
+                from winpath_util import to_long_path
+                lp = to_long_path(p)
+                if lp != p:
+                    try:
+                        lex = "True" if os.path.exists(lp) else "False"
+                    except Exception as e:
+                        lex = f"ERR:{type(e).__name__}"
+                    w(f"    exists(长)={lex}  ({lp})")
+            except Exception:
+                pass
+            # isdir + listdir 前 3
+            try:
+                names = os.listdir(p)
+                head = names[:3]
+                w(f"    listdir OK  共 {len(names)} 项, 前 3: {head}")
+            except Exception as e:
+                w(f"    listdir ERR {type(e).__name__}: {e}")
+    w("")
+
+    # --------- Section 8: Explorer 挂载 (网络位置 Web Folder) ----------
+    w("--- 8. 网络位置 / Web Folder 挂载 ---")
+    # 用户截图显示的是"网络位置"(不是映射盘, 走 explorer.exe 层的 shortcut)
+    # 这些通常存在 %APPDATA%\Microsoft\Windows\Network Shortcuts\
+    ns = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Network Shortcuts")
+    if os.path.isdir(ns):
+        try:
+            items = os.listdir(ns)
+            w(f"  Network Shortcuts 目录: {ns}")
+            w(f"  共 {len(items)} 项:")
+            for it in items[:10]:
+                w(f"    - {it}")
+        except Exception as e:
+            w(f"  (读取失败: {type(e).__name__}: {e})")
+    else:
+        w(f"  (无 Network Shortcuts 目录: {ns})")
+    w("")
+    w("  说明: 'Network Shortcuts' 里的 '网络位置' 只是 Explorer UI 层的快捷方式,")
+    w("        不是真正的挂载. 打开时 Windows 直接用 UNC 路径访问, 走 SMB Redirector.")
+    w("        对 Python IO 来说, 跟直接用 \\\\filestor... 完全一样.")
+    w("")
+
+    # --------- Section 9: 环境结论 ----------
+    w("=" * 60)
+    w("[环境画像小结]")
+    w("=" * 60)
+    w("如果第 2 节 net use 里没有你项目路径, 说明**没走映射盘**, Python 拿到的")
+    w("永远是 \\\\filestor01...\\ UNC 原始路径 -> _to_long_path 会展开成 \\\\?\\UNC\\")
+    w("")
+    w("如果第 3 节 Get-SmbConnection 服务端识别成 Samba (或未列出), 说明:")
+    w("  a) SMB 客户端拿不到 Change Notify")
+    w("  b) 只能靠 DirectoryCacheLifetime (默认 10 秒) 时间过期后重新查")
+    w("  c) 抽帧脚本刚写完 marker, 隔壁 clip 的判定 listdir 大概率读到 10 秒前的**空目录缓存**")
+    w("     -> [MARKER_MISS] parent 有 0 项 = SMB 缓存, 不是 marker 真丢")
+    w("")
+    w("如果第 5 节 DirectoryCacheLifetime 未设置或很大 (>60), 是缓存罪魁之一, 但堡垒机不给改.")
+    w("")
+    w("如果第 6 节 LongPathsEnabled=0 (常见), 说明必须靠 \\\\?\\ 前缀绕开 MAX_PATH.")
+    w("")
+    w("如果第 7 节 UNC 短路径 exists=False 但长路径 exists=True, 说明路径 >=260 字符,")
+    w("Python CRT 不吃, 必须走 \\\\?\\ 长路径 API 系列 (extract_frames 已经这样干).")
+    w("=" * 60)
+    return "\n".join(lines)
+
+
 class DiagApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -767,6 +1008,15 @@ class DiagApp:
         lb_tab = ttk.Frame(nb)
         nb.add(lb_tab, text="日志批量诊断")
         self._build_logbatch_tab(lb_tab)
+
+        # Tab 4: 环境体检 (v0.4.71 新增) 放最前面用户能第一眼看到
+        env_tab = ttk.Frame(nb)
+        nb.add(env_tab, text="环境体检")
+        self._build_env_tab(env_tab)
+        # 挪到首位显示 (用户开 diag_pic 先看环境)
+        nb.select(env_tab)
+        # 启动自动跑一次
+        self.root.after(200, self._auto_run_env)
 
     # ---------- Tab 1: 图片诊断 ----------
 
@@ -1071,6 +1321,89 @@ class DiagApp:
         except Exception:
             report = "批量诊断脚本自身抛异常:\n" + traceback.format_exc()
         self._lb_append(report + "\n")
+
+    # ---------- Tab 4: 环境体检 (v0.4.71) ----------
+
+    def _build_env_tab(self, parent):
+        top = ttk.Frame(parent, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="磁盘 / SMB / 长路径注册表 一键体检",
+                  font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+
+        btns = ttk.Frame(parent, padding=(8, 4))
+        btns.pack(fill=tk.X)
+        ttk.Button(btns, text="重新体检",
+                   command=self.on_env_run).pack(side=tk.LEFT)
+        ttk.Button(btns, text="清空日志",
+                   command=self.on_env_clear).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="复制全部日志",
+                   command=self.on_env_copy).pack(side=tk.LEFT)
+        ttk.Label(btns,
+                  text="  (启动时会自动跑一次, 约 3-8 秒)",
+                  foreground="#888").pack(side=tk.LEFT, padx=8)
+
+        body = ttk.Frame(parent, padding=8)
+        body.pack(fill=tk.BOTH, expand=True)
+        self.env_txt = tk.Text(body, wrap=tk.NONE, font=("Consolas", 10))
+        yscroll = ttk.Scrollbar(body, orient=tk.VERTICAL,
+                                command=self.env_txt.yview)
+        xscroll = ttk.Scrollbar(body, orient=tk.HORIZONTAL,
+                                command=self.env_txt.xview)
+        self.env_txt.configure(yscrollcommand=yscroll.set,
+                               xscrollcommand=xscroll.set)
+        self.env_txt.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+        self.env_txt.bind("<Control-a>", self._select_all_env)
+        self.env_txt.bind("<Control-A>", self._select_all_env)
+
+        self._env_append("环境体检 (v0.4.71+)\n\n")
+        self._env_append("排查 pic-clear marker 判定异常前, 先看环境画像:\n")
+        self._env_append("  - 磁盘类型 (本地 / 映射 / 网络位置 / UNC 直连)\n")
+        self._env_append("  - SMB 协商 dialect (SMB2/SMB3.1.1) + 是否 Samba 服务端\n")
+        self._env_append("  - SMB 缓存注册表 (FileNotFound/Directory/FileInfo Lifetime)\n")
+        self._env_append("  - Windows LongPathsEnabled 开关\n")
+        self._env_append("  - 常用根路径可达性\n\n")
+        self._env_append("(启动时自动跑一次; 手动可点 [重新体检])\n")
+
+    def _select_all_env(self, _event=None):
+        self.env_txt.tag_add("sel", "1.0", "end")
+        return "break"
+
+    def _env_append(self, s: str) -> None:
+        self.env_txt.insert(tk.END, s)
+        self.env_txt.see(tk.END)
+
+    def on_env_clear(self):
+        self.env_txt.delete("1.0", tk.END)
+
+    def on_env_copy(self):
+        try:
+            content = self.env_txt.get("1.0", tk.END)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self.root.update()
+            messagebox.showinfo("已复制", "环境体检报告已复制到剪贴板")
+        except Exception as e:
+            messagebox.showerror("复制失败", str(e))
+
+    def on_env_run(self):
+        self._env_append("\n>>> 开始体检 ... (可能需要 3-8 秒)\n\n")
+        self.root.update()
+        try:
+            report = collect_env_report()
+        except Exception:
+            report = "体检脚本自身抛异常:\n" + traceback.format_exc()
+        self._env_append(report + "\n")
+
+    def _auto_run_env(self):
+        # 启动自动跑, 用户开 diag_pic 就能直接看到环境画像
+        try:
+            self.on_env_run()
+        except Exception as e:
+            self._env_append(f"\n[自动体检失败] {type(e).__name__}: {e}\n")
 
 
 def main():
