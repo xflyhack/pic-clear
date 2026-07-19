@@ -37,68 +37,14 @@ APP_VERSION = _V
 APP_TITLE = f"pic-clear 图片打开诊断工具  {APP_VERSION}"
 
 
-# ---------------- WNetGetConnectionW (Windows only) ----------------
-
-def _resolve_mapped_drive_to_unc(drive_letter: str) -> tuple[int, str | None]:
-    """返回 (rc, unc). 非 Windows 返回 (-1, None)."""
-    if os.name != "nt":
-        return (-1, None)
-    key = drive_letter.upper().rstrip("\\/")
-    if not (len(key) == 2 and key[1] == ":"):
-        return (-2, None)
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        mpr = ctypes.WinDLL("mpr", use_last_error=True)
-        WNetGetConnectionW = mpr.WNetGetConnectionW
-        WNetGetConnectionW.argtypes = [
-            wintypes.LPCWSTR,
-            wintypes.LPWSTR,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        WNetGetConnectionW.restype = wintypes.DWORD
-
-        buf_len = wintypes.DWORD(1024)
-        buf = ctypes.create_unicode_buffer(buf_len.value)
-        rc = WNetGetConnectionW(key, buf, ctypes.byref(buf_len))
-        return (int(rc), buf.value if rc == 0 else None)
-    except Exception as e:
-        return (-99, f"ctypes exception: {e!r}")
-
-
-def _normalize_windows_path(image_path) -> str:
-    r"""把 tkinter/filedialog 混用的 //?/ 前缀 + 正斜杠路径统一成 Windows 惯用形式.
-
-    背景 (v0.4.34): tkinter filedialog 在长路径下会把返回值里的 \ 全部转成 /,
-    并且已经悄悄加了 \\?\ 前缀. 这样一路传到 _to_long_path 时:
-      - startswith("\\?\\") 判断失效 (实际是 //?/)
-      - 又叠一层 \\?\ 变双重前缀 -> FileNotFoundError
-    这里做的事:
-      1) 正斜杠全部换成反斜杠
-      2) 已带 \\?\ 前缀就保留 (不重复加)
-      3) 非 Windows 原样返回
-    """
-    s = str(image_path)
-    if os.name != "nt":
-        return s
-    if "/" in s:
-        s = s.replace("/", "\\")
-    while s.startswith("\\\\?\\\\\\?\\"):
-        s = s[4:]
-    return s
-
-
-def _long_path_prefix(p: str) -> str:
-    r"""对映射盘符 / 本地盘直接套 \\?\, 对 UNC 套 \\?\UNC\."""
-    if os.name != "nt":
-        return p
-    p = _normalize_windows_path(p)
-    if p.startswith("\\\\?\\") or p.startswith("\\?\\"):
-        return p
-    if p.startswith("\\\\"):
-        return "\\\\?\\UNC\\" + p.lstrip("\\")
-    return "\\\\?\\" + p
+# ---------------- 长路径 helper (v0.4.61: 抽到 winpath_util) ----------------
+# _resolve_mapped_drive_to_unc 在 diag_pic 里语义是 verbose 版, 返回 (rc, unc);
+# 其他工具用的是缓存版 (只返回 unc). 这里对应 winpath_util 的 verbose API.
+from winpath_util import (
+    normalize_windows_path as _normalize_windows_path,
+    long_path_prefix as _long_path_prefix,
+    resolve_mapped_drive_to_unc_verbose as _resolve_mapped_drive_to_unc,
+)
 
 
 def _to_unc_full(p: str, unc_root: str) -> str:

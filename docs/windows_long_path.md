@@ -5,6 +5,12 @@
 >
 > 涵盖 v0.4.30 → v0.4.35 的完整踩坑过程与最终硬规则。**这里踩过的每一个坑都真实
 > 出现过在堡垒机 Windows Server 2022 SMB 挂载 Z: 上，代价是 5 个 tag、诊断反复**。
+>
+> **v0.4.61 更新**：把 `_normalize_windows_path` / `_to_long_path` / `_pil_open` /
+> `_safe_*` 家族抽到公共模块 `winpath_util.py`，`dedupe_pic.py` / `detector.py` /
+> `diag_pic.py` / `extract_frames.py` 四份代码统一。以后新工具 `from winpath_util
+> import ...` 起下划线别名即可，别再复制粘贴。同时把 `extract_frames.py` (漏网之鱼)
+> 全套接入，修 v0.4.60 前堡垒机上 `out_dir.mkdir` 报 `WinError 206` 的问题。
 
 ---
 
@@ -273,6 +279,7 @@ if rc == 0 and done_marker is not None:
 | v0.4.33 | 新增 `diag_pic.exe` + 失败日志分类 | 诊断利器就位, 日志能看到"stat 挂了" |
 | v0.4.34 | `_normalize_windows_path` 修 `//?/` 混斜杠 | diag_pic 能开图, dedupe 还挂 stat |
 | **v0.4.35** | `_safe_stat/unlink/exists/is_file/move` + marker 写失败打日志 | ✅ **通了** |
+| **v0.4.61** | 抽公共模块 `winpath_util.py` + `extract_frames.py` 接入 `safe_mkdir/glob/read_text/write_text/os_open` | ✅ **抽帧长路径通了** |
 
 **关键教训**：改一个 helper 影响面看似小，实际打包成 exe 分发要 20 分钟 CI + 5 分钟堡垒机验证。**能提前用 `diag_pic.exe` 摊事实的场景，永远不要靠 tag 迭代猜方向**。
 
