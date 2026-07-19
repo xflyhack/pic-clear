@@ -285,6 +285,7 @@ def _safe_is_file_impl(p) -> tuple[bool, dict]:
       - 'long_p'      : 长路径字符串 (若走了 to_long_path)
       - 'long_isfile' : 同 short_isfile 三种取值 (若走了长路径)
       - 'long_stat'   : 'OK size=<n>' / 'ERR:<type>:<msg>' (若长路径 isfile False)
+      - 'parent_listdir': 'HIT ...' / 'MISS ...' / 'ERR:...' (v0.4.69 兜底, 若 stat 挂)
     """
     diag: dict[str, str] = {}
     p_str = str(p)
@@ -315,6 +316,22 @@ def _safe_is_file_impl(p) -> tuple[bool, dict]:
         return True, diag
     except OSError as e:
         diag["long_stat"] = f"ERR:{type(e).__name__}:{e}"
+    # v0.4.69: isfile/stat 全挂时, 用父目录 listdir 兜底.
+    # 现象: Windows Python IO 层对 \\?\UNC\ 深路径 (>260 字符) 单文件 stat 会
+    # 返回 WinError 2 "找不到", 但 scandir/listdir 却能正常列出该文件.
+    # diag_pic v0.4.68 已实证 (268 字符 marker 全根 rglob 短路径漏, 长路径
+    # 列出 1 条, 但对单条 marker 直接 isfile 又都说 False). 按 listdir 判定为准.
+    try:
+        parent = os.path.dirname(long_p)
+        fname  = os.path.basename(long_p)
+        names  = os.listdir(parent)
+        if fname in names:
+            diag["parent_listdir"] = f"HIT (parent 有 {len(names)} 项, 含目标)"
+            return True, diag
+        diag["parent_listdir"] = f"MISS (parent 有 {len(names)} 项, 不含目标)"
+        return False, diag
+    except OSError as e:
+        diag["parent_listdir"] = f"ERR:{type(e).__name__}:{e}"
         return False, diag
 
 

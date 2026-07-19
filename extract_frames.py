@@ -472,7 +472,8 @@ def _extract_one_impl(
                 f"    short_isfile= {_mk_diag.get('short_isfile')}\n"
                 f"    long_p      = {_mk_diag.get('long_p')}\n"
                 f"    long_isfile = {_mk_diag.get('long_isfile')}\n"
-                f"    long_stat   = {_mk_diag.get('long_stat')}"
+                f"    long_stat   = {_mk_diag.get('long_stat')}\n"
+                f"    parent_listdir = {_mk_diag.get('parent_listdir')}"
             )
     if skip_existing and _mk_hit:
         # marker 存在时按当前命名规则数帧；也兜底扫一下旧的 frame_*.jpg
