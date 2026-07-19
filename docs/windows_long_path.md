@@ -283,6 +283,10 @@ if rc == 0 and done_marker is not None:
 | **v0.4.62** | ffmpeg image2 muxer + `\\?\` 输出 pattern 的新坑 → 走本地 temp 中转 + 完整 stderr 日志 | ✅ **抽帧真正通了** |
 | v0.4.63 | *(不是长路径坑, 顺带记一下)* ffmpeg 7.x mjpeg encoder 拒 full-range YUV → 加 `-strict unofficial` + `-pix_fmt yuvj420p`; 主日志摘要改成 `_pick_key_error_line` | ✅ DMS/OMS 视频通了 |
 | **v0.4.65** | `safe_is_file` 加 `_impl` 版返回诊断; extract_frames marker miss 打 `[MARKER_MISS]` 完整段; GUI `_count_done_markers` 走 `\\?\` 长路径 rglob | ✅ **诊断 SMB `\\?\UNC\` marker 撒谎; GUI 进度数稳定** |
+| v0.4.66 | `diag_pic.exe` 加 Marker 诊断 tab (全根 rglob 对比 + safe_is_file 四分支命中率) | 🔍 诊断工具 |
+| v0.4.67 | 修 CI: `build-extract-gui-exe.yml` 补 `winpath_util` copy + hidden-import | 🐛 打包漏 |
+| v0.4.68 | `diag_pic.exe` Marker Tab 加**单条 marker 深度诊断** (8 种查询) | 🔍 抓到 268 字符 marker 单文件 stat 撒谎 |
+| **v0.4.69** | `safe_is_file` 加**父目录 listdir 兜底**; `[MARKER_MISS]` 日志加 `parent_listdir` 一行 | ✅ **深路径 marker skip 彻底稳** |
 | **v0.4.64** | `safe_mkdir` 加建后验证 + 新增 `safe_isdir` + `[MKDIR_QUIRK]` 日志; `extract_frames` 搬迁前再 mkdir 一次 safety net | ✅ **修 SMB `\\?\UNC\` makedirs 撒谎导致 [MOVE_FAIL] 138/138 全挂** |
 
 **关键教训**：改一个 helper 影响面看似小，实际打包成 exe 分发要 20 分钟 CI + 5 分钟堡垒机验证。**能提前用 `diag_pic.exe` 摊事实的场景，永远不要靠 tag 迭代猜方向**。
@@ -554,3 +558,105 @@ raise 到 `_do_extract` 里. 如果 `_do_extract` 还是打了 `[MOVE_FAIL]`,
 findstr /c:"[MARKER_MISS]" C:\path\to\extract_gui_*.log > marker_miss.txt
 ```
 把 `marker_miss.txt` 前 20 条贴回来, 一眼定位.
+
+---
+
+## §13 弯路 8：`\\?\UNC\` 深路径**单文件 stat 撒谎**，但 listdir 稳（v0.4.69 真最终根因）
+
+> **本章是 §12 的续集**，把 v0.4.65 阶段留下的"下一步"补完了。**新工具遇到同类问题
+> 直接抄本章，别再走 v0.4.65 → v0.4.68 那条挤牙膏路径了**。
+
+### 现象（v0.4.65 stat 兜底改完后仍在）
+
+`[MARKER_MISS]` 日志变成这样：
+
+```
+[MARKER_MISS] marker 应存在但 safe_is_file=False, 视频将被重跑
+    marker      = \\filestor01...\...\_done.marker
+    len         = 268                        ← 注意 > 260
+    short_isfile= False
+    long_p      = \\?\UNC\filestor01...\...\_done.marker
+    long_isfile = False
+    long_stat   = ERR:FileNotFoundError:[WinError 2] 系统找不到指定的文件。
+```
+
+用户资源管理器**亲眼看到 marker 存在**，但 Python 三条查询全说不在。
+
+### 用 `diag_pic.exe` 单条深度诊断抓到的关键实证 (v0.4.68)
+
+对 `\\filestor01...\camera09` 这条 marker 完整路径（268 字符）跑单条深度诊断：
+
+- `os.path.isfile` 短 / 长路径 → **False**
+- `os.stat` 短 / 长路径 → **`WinError 2`**
+- `open('rb')` 短 / 长路径 → **`WinError 2`**
+- **`os.listdir(父目录)` 短路径**（249 字符, 未超阈值）→ **能列出所有子目录**
+- **`Path(long_p).rglob("_done.marker")`** → **能列出这条 marker**（诊断工具 v0.4.66 就靠这条数出 226 → 227）
+
+**结论**: Windows Python IO 层对 `\\?\UNC\` 深路径的**单文件直接查询 (`isfile`/`stat`/`open`)
+不稳定，但同一路径的父目录 `listdir` / `scandir` 是稳的**。这不是 SMB 客户端撒谎（父
+目录枚举明明能看到该文件的名字），而是 CPython 对 `\\?\UNC\` 单文件 CRT 层调用的 bug。
+
+### v0.4.69 修法
+
+`_safe_is_file_impl` 判定顺序改为四层瀑布：
+
+```
+1. short_isfile   → 短路径够用直接返
+2. long_isfile    → 长路径 \\?\UNC\ 再试
+3. long_stat      → 长路径 os.stat 兜底 (v0.4.65 加的)
+4. parent_listdir → 父目录 listdir 兜底 (v0.4.69 新加, 最终杀手锏)
+```
+
+`os.listdir(父目录)` 返回的名字列表里含目标文件名 → 判 True。
+
+**为什么 listdir 能救**: 父目录 `\\?\UNC\filestor01...\camera09` 长度 249 < 260，
+Windows CRT 层对**目录枚举**支持得比对**单文件 stat**好；而且 `listdir` 底层走的是
+`FindFirstFileW` / `FindNextFileW` 这一对 API，跟 `GetFileAttributesW` (`isfile`
+背后) / `NtQueryInformationFile` (`stat` 背后) 是不同的内核路径。**同一份
+`\\?\UNC\` 前缀，不同 API 稳定性能差 10 倍**，这是本次实证学到的。
+
+**为什么不改用 `Path.exists` / `Path.is_file`**: 试过，一样挂。它们内部都是 `os.stat`
+包一层，一起翻车。
+
+### 硬规则（新工具遇到同类问题必抄）
+
+写"某某 IO 是否成功"的 `safe_*` helper 时，**bail-out 顺序永远是**：
+
+1. **短路径原生 API** (`os.path.isfile` / `os.path.isdir` / `os.stat`)
+2. **长路径 `\\?\` 前缀重试同一 API**
+3. **同族兜底 API**（`isfile` 挂就试 `stat`；`stat` 挂就试 `open('rb', close_after=True)`）
+4. **父目录 listdir 兜底** ← 最终杀手锏，`\\?\UNC\` 深路径 SMB 场景救命
+
+**每一步的诊断结果都要能被上层拿到**（v0.4.65 的 `_impl` 返回 diag dict 就是干这个），
+才能一贴日志秒定位到底是哪一层撒谎。
+
+### 上兜底要一次上齐（新增硬规则，2026-07-19）
+
+**血泪教训**: v0.4.65 只加 `os.stat` 兜底 → v0.4.68 靠 diag_pic 抓到 `stat` 也挂 →
+v0.4.69 才加 listdir 兜底。**同一类问题拆了 4 版才修完**，每版都要 CI 20 分钟 + 堡垒机
+验证，用户体验极差。
+
+以后再遇到"某个 IO 判定在长路径上撒谎"的场景，**第一版就必须把 isfile / stat / listdir
+三条兜底一次性加齐**，别挤牙膏。三条 API 的成本加起来也就 10 行代码，远比 3 轮 tag
+迭代便宜。
+
+### 诊断话术（给运维）
+
+堡垒机上跑完一次抽帧后：
+
+```cmd
+findstr /c:"[MARKER_MISS]" C:\path\to\extract_gui_*.log > marker_miss.txt
+```
+
+看 `parent_listdir` 那一行：
+
+- **`HIT (parent 有 N 项, 含目标)`** → v0.4.69 兜底救回来了，判定 True，不会重跑
+- **`MISS (parent 有 N 项, 不含目标)`** → 父目录能扫，但**真没这个 marker**，是历史欠账
+- **`ERR:FileNotFoundError`** → 连父目录都不存在，视频从来没跑过
+- **`ERR:PermissionError`** → SMB 权限问题，跟长路径无关
+
+### 顺手看 diag_pic 的 §6 章节
+
+**任何 marker / 长路径可疑现象，先跑一次 `diag_pic.exe` 单条深度诊断**，10 秒能定位到
+底是哪一层 API 挂了。比出 exe 迭代猜快 O(10min)。这条从 v0.4.33 就写在文档里，但
+v0.4.65-v0.4.68 我自己还是走了迭代猜的弯路，**贴出来自省**。
