@@ -1051,6 +1051,12 @@ def main() -> int:
         flush=True,
     )
 
+    # v0.4.78: 日志图例, 让肉眼一次看懂各种状态符号
+    print(
+        "[图例] ✓=抽帧成功  ⊘=空视频(跳过)  ◇=被其它机器锁住(跳过)  ✗=抽帧失败",
+        flush=True,
+    )
+
     if not tasks:
         print("[结束] 没有可处理的视频。")
         return 0
@@ -1115,9 +1121,9 @@ def main() -> int:
         tag = {"ok": "✓", "empty": "⊘", "locked": "◇", "failed": "✗"}.get(stage, "?")
         with print_lock:
             print(
-                f"[{idx}/{len(tasks)}] {tag} {task.rel_path}  "
-                f"帧={n} 耗时={dt:.1f}s  "
-                f"(已用 {_fmt_time(elapsed)}, 剩余 ~{_fmt_time(remain)})  {msg}",
+                f"[第 {idx} 个/共 {len(tasks)} 个] {tag} {task.rel_path}  "
+                f"已抽帧数={n} 本次耗时={dt:.1f}s  "
+                f"(已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)})  {msg}",
                 flush=True,
             )
 
@@ -1131,8 +1137,8 @@ def main() -> int:
             rate = (i - 1) / elapsed if elapsed > 0 else 0
             remain = (len(tasks) - i + 1) / rate if rate > 0 else float("nan")
             print(
-                f"\n[{i}/{len(tasks)}] {task.rel_path}   "
-                f"(已用 {_fmt_time(elapsed)}, 剩余 ~{_fmt_time(remain)})",
+                f"\n[第 {i} 个/共 {len(tasks)} 个] {task.rel_path}   "
+                f"(已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)})",
                 flush=True,
             )
             print(f"    → {task.out_dir}", flush=True)
