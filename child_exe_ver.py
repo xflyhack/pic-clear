@@ -104,7 +104,16 @@ def probe_child_exe(exe_path: Optional[str],
         info.error = f"exit {result.returncode}, no_output"
         info.matches_gui = False
         return info
-    info.version = out.splitlines()[0] if out else "(无输出)"
+    # v0.4.82: 有些子 exe 在 --version 之前会先打 [授权]/[FATAL] 到 stdout,
+    # 老逻辑 splitlines()[0] 会抓到那些行, 误当版本号显示.
+    # 改成扫全部行, 优先挑"含 vX.Y.Z 的行"当版本, 挑不到才退回第 1 行.
+    _lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    _picked = ""
+    for ln in _lines:
+        if _VER_RE.search(ln):
+            _picked = ln
+            break
+    info.version = _picked or (_lines[0] if _lines else "(无输出)")
 
     # 版本一致性判定: 从 GUI/子 exe 各抽一个 vX.Y.Z 出来对比
     gui_ver = _extract_ver(gui_version)

@@ -987,6 +987,15 @@ def main() -> int:
             return 2
         return 0
 
+    # v0.4.82: --version / -V 也走"早期短路", 不要先跑授权检查污染 stdout.
+    # 之前 --version 输出是两行:
+    #     [授权] 授权有效 (发放给: user)
+    #     extract_frames v0.4.80
+    # GUI 关于页取 stdout 第一行当版本, 结果显示成 [授权] 那行, 看不到真版本.
+    if any(a in ("--version", "-V") for a in sys.argv[1:]):
+        print(f"extract_frames {_read_version()}")
+        return 0
+
     _check_license_or_die()
 
     args = parse_args()

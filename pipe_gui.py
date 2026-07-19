@@ -1122,7 +1122,16 @@ def render_core_version_frame(root, parent, *,
             out = ((result.stdout or "") + (result.stderr or "")).strip()
             if result.returncode != 0 and not out:
                 out = f"(exit {result.returncode}, 无输出)"
-            version_line = out.splitlines()[0] if out else "(无输出)"
+            # v0.4.82: 有些子 exe 在 --version 之前会先打 [授权]/[FATAL] 等行,
+            # 老逻辑 splitlines()[0] 会抓到那些行误当版本. 改成扫全部行, 优先
+            # 挑"含 vX.Y.Z 的行", 挑不到才退回第 1 行.
+            import re as _re_ver
+            _ver_re = _re_ver.compile(r"v?\d+\.\d+\.\d+")
+            _lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            version_line = next(
+                (ln for ln in _lines if _ver_re.search(ln)),
+                (_lines[0] if _lines else "(无输出)"),
+            )
         except FileNotFoundError:
             root.after(0, lambda: (
                 status_var.set("✘ 缺失内核文件"),

@@ -912,6 +912,12 @@ def main() -> int:
             return 2
         return 0
 
+    # v0.4.82: --version 走"早期短路", 不能先跑 _check_license_or_die,
+    # 否则 [授权] xxx 会跑到 stdout 第一行, GUI 关于页把它误当成版本号显示.
+    if any(a in ("--version", "-V") for a in sys.argv[1:]):
+        print(f"dedupe_pic {_read_version()}")
+        return 0
+
     _check_license_or_die()
 
     args = parse_args()
