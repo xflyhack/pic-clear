@@ -122,6 +122,11 @@ class ClassifyApp:
         self.scan_interval_var = IntVar(value=10)
         self._loop_thread: "threading.Thread | None" = None
         self._loop_stop_event = threading.Event()
+        # v0.4.57 全局 footer 状态栏 (切 tab 也能看)
+        self._stat_done_cameras = 0
+        self._stat_classified_images = 0
+        self._stat_lock = threading.Lock()
+        self._status_var = StringVar(value="未启动")
         # 每桶阈值
         self.bucket_thres_vars: dict[str, DoubleVar] = {
             b: DoubleVar(value=0.75) for b in BUCKET_ORDER
@@ -139,8 +144,18 @@ class ClassifyApp:
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         pad = {"padx": 8, "pady": 4}
+        # v0.4.57 永久 footer 状态栏: 跟随 root, 切 tab 也不会消失
+        footer = ttk.Frame(self.root)
+        footer.pack(side="bottom", fill="x", padx=0, pady=0)
+        ttk.Separator(footer, orient="horizontal").pack(fill="x")
+        _inner = ttk.Frame(footer)
+        _inner.pack(fill="x", padx=8, pady=4)
+        ttk.Label(_inner, text="状态：", foreground="#666").pack(side="left")
+        ttk.Label(_inner, textvariable=self._status_var,
+                  foreground="#0066cc").pack(side="left")
+
         nb = ttk.Notebook(self.root)
-        nb.pack(fill="both", expand=True, padx=8, pady=8)
+        nb.pack(side="top", fill="both", expand=True, padx=8, pady=8)
         outer = ttk.Frame(nb)
         nb.add(outer, text="  分类  ")
         config_page = ttk.Frame(nb)
@@ -380,6 +395,11 @@ class ClassifyApp:
         self._persist_config()   # 每次点开始都存一次，防意外崩溃丢配置
         self.start_btn.configure(state=DISABLED)
         self.stop_btn.configure(state=NORMAL)
+        # v0.4.57 重置累计计数 + 状态栏
+        with self._stat_lock:
+            self._stat_done_cameras = 0
+            self._stat_classified_images = 0
+        self._update_status("启动中…")
         self._log("[启动] 常驻模式：不点停止会一直循环扫描 + 处理")
         self._log(f"[启动] 输入={cfg.in_root}  输出={cfg.out_root}")
 
@@ -395,6 +415,7 @@ class ClassifyApp:
                 while not self._loop_stop_event.is_set():
                     round_no += 1
                     self._enqueue_log(f"[扫描] 第 {round_no} 轮开始")
+                    self._update_status(f"第 {round_no} 轮：扫描中…")
                     try:
                         stats = run(
                             cfg,
@@ -406,19 +427,29 @@ class ClassifyApp:
                         self._enqueue_log(f"[异常] {type(e).__name__}: {e}")
                         scanned = 0
 
+                    if scanned > 0:
+                        with self._stat_lock:
+                            self._stat_classified_images += scanned
+
                     if self._loop_stop_event.is_set():
                         break
 
                     if scanned > 0:
                         # 本轮真的干活了, 立刻回头继续扫
                         self._enqueue_log(f"[本轮完成] 处理 {scanned} 张，回头继续扫描")
+                        self._update_status(f"本轮完成，处理 {scanned} 张，继续扫描")
                         continue
 
                     # 空转
                     interval = max(2, int(self.scan_interval_var.get() or 10))
                     self._enqueue_log(f"[空转] 未发现待处理目录，{interval}s 后重试")
-                    if self._loop_stop_event.wait(interval):
-                        break
+                    # 倒计时状态栏
+                    for _i in range(interval, 0, -1):
+                        if self._loop_stop_event.is_set():
+                            break
+                        self._update_status(f"空转中，{_i}s 后重新扫描")
+                        if self._loop_stop_event.wait(1.0):
+                            break
             finally:
                 self._enqueue_log("[结束] 主循环已退出")
                 self._enqueue_log("__DONE__")
@@ -438,6 +469,19 @@ class ClassifyApp:
         self._loop_stop_event.set()
         self.cancel_flag.set()
         self._log("[停止] 已请求停止，等当前批次跑完就退出")
+        self._update_status("停止中，等当前批次跑完…")
+
+    def _update_status(self, phase: str) -> None:
+        """状态栏: 阶段 + 累计已处理 camera 目录 + 累计已分类图片."""
+        with self._stat_lock:
+            d = self._stat_done_cameras
+            n = self._stat_classified_images
+        try:
+            self._status_var.set(
+                f"{phase}   |   已处理 {d} 个目录   |   已分类 {n} 张图片"
+            )
+        except Exception:
+            pass
 
     def _build_config(self) -> ClassifyConfig:
         in_root = self.in_var.get().strip()
@@ -500,7 +544,13 @@ class ClassifyApp:
                 if msg == "__DONE__":
                     self.start_btn.configure(state=NORMAL)
                     self.stop_btn.configure(state=DISABLED)
+                    self._update_status("已停止")
                     continue
+                # 计数一个 camera 目录完成: classify_pic 里每个 camera 开跑时打 "[camera] " 前缀
+                if isinstance(msg, str) and msg.startswith("[camera] "):
+                    with self._stat_lock:
+                        self._stat_done_cameras += 1
+                    self._update_status(f"正在处理：{msg[9:].split(' ')[0][-40:]}")
                 self._log(msg)
         except queue.Empty:
             pass
