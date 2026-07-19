@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import io
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -464,17 +465,43 @@ def _extract_one_impl(
     if skip_existing:
         _mk_hit, _mk_diag = _safe_is_file_impl(marker)
         if not _mk_hit and _mk_diag.get("long_isfile") == "False":
-            # marker 应该在但两条查询都说不在 -> 高价值排查线索
-            _log_err(
-                "[MARKER_MISS] marker 应存在但 safe_is_file=False, 视频将被重跑\n"
-                f"    marker      = {marker}\n"
-                f"    len         = {len(str(marker))}\n"
-                f"    short_isfile= {_mk_diag.get('short_isfile')}\n"
-                f"    long_p      = {_mk_diag.get('long_p')}\n"
-                f"    long_isfile = {_mk_diag.get('long_isfile')}\n"
-                f"    long_stat   = {_mk_diag.get('long_stat')}\n"
-                f"    parent_listdir = {_mk_diag.get('parent_listdir')}"
-            )
+            # marker 应该在但两条查询都说不在.
+            #
+            # v0.4.77: 区分"首次跑"和"真丢 marker"两种情况, 别再对首次跑刷 [ERROR].
+            #   - 首次跑        : parent 空 + out_dir 里没历史 jpg -> 静默继续
+            #   - 真丢 marker   : 有历史产物 (parent 非空 或 out_dir 里有 jpg)
+            #                     但 marker 判 False -> [ERROR] 值得排查
+            _pl = str(_mk_diag.get("parent_listdir") or "")
+            _parent_has_stuff = False
+            _m = re.search(r"parent 有 (\d+) 项", _pl)
+            if _m:
+                try:
+                    _parent_has_stuff = int(_m.group(1)) > 0
+                except Exception:
+                    _parent_has_stuff = False
+            # 顺带扫一眼 out_dir 里有没有历史 jpg (SMB 假 miss 场景, listdir 空但底层有货)
+            _has_history_jpg = False
+            try:
+                _hist = _safe_glob(out_dir, glob_pattern)
+                if not _hist and glob_pattern != "frame_*.jpg":
+                    _hist = _safe_glob(out_dir, "frame_*.jpg")
+                _has_history_jpg = bool(_hist)
+            except Exception:
+                _has_history_jpg = False
+            if _parent_has_stuff or _has_history_jpg:
+                # 真异常: 目录里有旧产物但 marker 判丢, 值得写 [ERROR] 排查
+                _log_err(
+                    "[MARKER_MISS] marker 应存在但 safe_is_file=False, 视频将被重跑\n"
+                    f"    marker      = {marker}\n"
+                    f"    len         = {len(str(marker))}\n"
+                    f"    short_isfile= {_mk_diag.get('short_isfile')}\n"
+                    f"    long_p      = {_mk_diag.get('long_p')}\n"
+                    f"    long_isfile = {_mk_diag.get('long_isfile')}\n"
+                    f"    long_stat   = {_mk_diag.get('long_stat')}\n"
+                    f"    parent_listdir = {_mk_diag.get('parent_listdir')}\n"
+                    f"    has_history_jpg = {_has_history_jpg}"
+                )
+            # 首次跑 (parent 0 项 + 无历史 jpg): 静默, 让下面正常抽帧, 不再刷屏 [ERROR]
     if skip_existing and _mk_hit:
         # marker 存在时按当前命名规则数帧；也兜底扫一下旧的 frame_*.jpg
         existing = _safe_glob(out_dir, glob_pattern)
