@@ -280,6 +280,7 @@ if rc == 0 and done_marker is not None:
 | v0.4.34 | `_normalize_windows_path` 修 `//?/` 混斜杠 | diag_pic 能开图, dedupe 还挂 stat |
 | **v0.4.35** | `_safe_stat/unlink/exists/is_file/move` + marker 写失败打日志 | ✅ **通了** |
 | **v0.4.61** | 抽公共模块 `winpath_util.py` + `extract_frames.py` 接入 `safe_mkdir/glob/read_text/write_text/os_open` | ✅ **抽帧长路径通了** |
+| **v0.4.62** | ffmpeg image2 muxer + `\\?\` 输出 pattern 的新坑 → 走本地 temp 中转 + 完整 stderr 日志 | ✅ **抽帧真正通了** |
 
 **关键教训**：改一个 helper 影响面看似小，实际打包成 exe 分发要 20 分钟 CI + 5 分钟堡垒机验证。**能提前用 `diag_pic.exe` 摊事实的场景，永远不要靠 tag 迭代猜方向**。
 
@@ -362,6 +363,54 @@ def _to_long_path(p: str) -> str:
 
 **一句话**：本地 D 盘和堡垒机 Z 盘走**同一套代码**，
 短路径原样、长路径自动加前缀，两边都能跑。
+
+---
+
+## §10 弯路 5：ffmpeg image2 muxer 不吃 `\\?\` 输出 pattern（v0.4.62 真最终根因）
+
+**现象 (v0.4.61 挂)**：mkdir 长路径 WinError 206 修好后, 抽帧到 ffmpeg 阶段
+又炸, stderr 一堆:
+
+```
+[vost#0:0/mjpeg @ ...] Error submitting a packet to the muxer: No such file or directory
+[out#0/image2 @ ...] Error muxing a packet
+[out#0/image2 @ ...] Task finished with error code: -2 (No such file or directory)
+ffmpeg rc = 4294967294  (uint32 表示的 -2, 即 ENOENT)
+```
+
+**根因**: v0.4.61 我给 ffmpeg 的 output pattern 也过了 `_to_long_path`, 得到
+`\\?\Z:\...\camera12_%04d.jpg` (334 字符). ffmpeg 的 **image2 muxer** 内部走
+`av_get_frame_filename2()` 展开 `%04d` 序号时对 `\\?\` 前缀处理有 quirk:
+- 输入侧 `-i` 走 `avio_open2()` URL 层, 兼容 `\\?\` (所以输入是 OK 的)
+- 输出侧 image2 muxer 每帧展开 filename 后再 `avio_open2()`, 路径归一化把
+  `\\?\` 前缀里的 `?` / `\` 视为普通字符, 展开出的路径根本不是我们预期的
+
+**修法 (v0.4.62)**: **ffmpeg 只写本地 temp 目录, 短路径**. 跑完再用 `_safe_move`
+把生成的 `.jpg` 逐个搬到真正的 `out_dir` (SMB 长路径, `_safe_move` 自带 `\\?\` 兜底).
+
+关键代码 (`extract_frames.py::_do_extract`):
+```python
+src_arg = _to_long_path(src_str)          # 输入侧仍走 \\?\
+tmp_out = Path(tempfile.mkdtemp(prefix="pic-clear-ext-"))
+tmp_out_pattern = str(tmp_out / ffmpeg_name)   # 本地短路径, 不加 \\?\
+cmd = [str(ffmpeg), ..., "-i", src_arg, ..., tmp_out_pattern]
+# ffmpeg 完成后:
+for src_frame in tmp_out.glob(glob_pattern):
+    _safe_move(src_frame, out_dir / src_frame.name)
+```
+
+**代价**: 多一次 IO (temp -> SMB), 但换来彻底绕开 image2 muxer 的坑,
+而且 temp 本地写通常比 SMB 直写还快, 净收益基本正.
+
+**顺带增强 (v0.4.62)**: 所有 ffmpeg 失败分支改用 `[FFMPEG_FAIL]` 多行日志,
+完整贴 stderr (不截断) + 上下文 (rel / src / src_arg / long_prefix / tmp_pat
+/ 各自长度), 排查长路径类问题不用再 mental math 字符长度.
+
+**硬规则 (新工具要用 ffmpeg 或类似写文件的外部 CLI 时)**:
+- 输入侧参数 (`-i`) 可以走 `_to_long_path` 加 `\\?\`
+- **输出侧参数一律不加 `\\?\`**, 改用"本地 temp 目录 + 搬迁" 或 "已开
+  LongPathsEnabled + manifest longPathAware=true 的自定义 build 二进制"
+- 失败时日志**完整贴 stderr**, 不要 `err[:200]` 截断
 
 ### 为什么 bat 能删、Python 不能删（读者常问）
 
