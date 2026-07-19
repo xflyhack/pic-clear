@@ -1007,7 +1007,8 @@ def main() -> int:
     # v0.4.72: 打一行环境画像到 stdout, 让日志开头就有环境证据
     try:
         from env_probe import probe_and_log
-        probe_and_log(lambda s: print(s, flush=True))
+        _pp = [str(p) for p in (args.src_root, args.dst_root, args.markers_root) if p]
+        probe_and_log(lambda s: print(s, flush=True), probe_paths=_pp)
     except Exception as _e:
         print(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}", flush=True)
     print("=" * 60)

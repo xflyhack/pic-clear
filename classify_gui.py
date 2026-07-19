@@ -138,10 +138,20 @@ class ClassifyApp:
 
         self._build_ui()
 
-        # v0.4.72: 启动即打印一行环境画像到日志
+        # v0.4.73: 启动即打印**多行**环境画像 (含常用路径可达性)
         try:
             from env_probe import probe_and_log
-            self.root.after(100, lambda: probe_and_log(self._log))
+            def _run_env_probe():
+                pp = []
+                for v in (self.in_var, self.out_var):
+                    try:
+                        s = v.get().strip()
+                        if s:
+                            pp.append(s)
+                    except Exception:
+                        pass
+                probe_and_log(self._log, probe_paths=pp)
+            self.root.after(100, _run_env_probe)
         except Exception as _e:
             self._log(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}")
         self._apply_config(_load_config())

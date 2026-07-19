@@ -181,7 +181,7 @@ A: 所有 `_reg_read_*` / `_run` 都吞异常返回默认值，探测失败**不
 | Tag | 改动 |
 |---|---|
 | v0.4.71 | diag_pic 加"环境体检"tab，用户手动跑一次看环境画像 |
-| **v0.4.72** | **抽出 env_probe 模块，3 个 GUI + extract_frames 启动即探测**；`_safe_is_file_impl` 加 Samba retry 第 6 层 |
+| v0.4.72 | 抽出 env_probe 模块，3 个 GUI + extract_frames 启动即探测**；`_safe_is_file_impl` 加 Samba retry 第 6 层 |
 
 ---
 
@@ -190,3 +190,98 @@ A: 所有 `_reg_read_*` / `_run` 都吞异常返回默认值，探测失败**不
 - `docs/windows_long_path.md` §13 —— 长路径踩坑史（本模块的前身）
 - `AGENTS.md` "Windows 文件 IO 必读" 章节 —— 硬规则清单
 - `winpath_util.py` `_safe_is_file_impl` —— 判定瀑布实现
+
+
+---
+
+## v0.4.73 大扩展：画像细节
+
+v0.4.72 的画像只有一行，用户反馈"信息不够，遇到上游改挂载又要人肉排查"。v0.4.73
+把画像扩展成**多行体检报告**，一次性覆盖:
+
+**主机段**
+- hostname / OS 版本 / 用户名 / Python 版本 / 进程 PID
+
+**逻辑盘符段**
+- 每个盘符的类型 (Local/Network/CDROM/RAMDisk/Removable)
+- 文件系统 (NTFS/FAT32/exFAT/网络盘无)
+- 卷标 / 剩余空间 / 总空间
+- 若是网络盘, 打印对应的 UNC provider
+
+**网络挂载段**
+- 每条网络挂载 (映射盘 / Network Shortcut) 各占一行
+- 显示 drive / UNC / 服务端类型启发 (Samba/Windows/Unknown)
+- 若拿得到 SMB dialect (3.1.1 等) 一起打
+
+**SMB 缓存注册表段**
+- 5 个关键值 (DirectoryCache / FileNotFoundCache / FileInfoCache /
+  DormantFileLimit / DisableBandwidthThrottling / DisableLargeMtu)
+- 每条标注当前值 + 默认值 + 语义解读
+
+**常用路径可达性段** (新, 需 caller 传 probe_paths)
+- extract_gui 传 `[src_root, out_root, markers_root]`
+- dedupe_gui 传 `[target, src_root, markers_root]`
+- classify_gui 传 `[in, out]`
+- extract_frames CLI 传 `[args.src_root, args.dst_root, args.markers_root]`
+- 每条打 exists(短) + exists(长) 对比
+
+**决策提示段**
+- `\?\` 需不需要
+- Samba retry 会不会启用 + sleep 多少秒
+
+**诊断错误段** (可能为空)
+- 探测阶段吞掉的异常, 帮排查权限问题
+
+### 输出样例 (Windows + UNC 直连 + Samba)
+
+```
+====================================================================
+[ENV] pic-clear 运行环境画像 (v0.4.73+)
+====================================================================
+[ENV] host=WIN-SYSADMIN  user=sysadmin  pid=12345
+[ENV] os=Windows-10-10.0.20348-SP0
+[ENV] python=3.11.9
+[ENV] mount_kind=unc_direct   server_is_samba=yes   long_paths_enabled=no
+[ENV] 逻辑盘符 (3 个):
+[ENV]   C:  Local  NTFS  ""  73.5G / 99.1G
+[ENV]   D:  Local  NTFS  "新加卷"  3.86T / 3.90T
+[ENV]   F:  CDROM  ""  0.0G / 0.0G
+[ENV] 网络挂载 (1 个):
+[ENV]     network_shortcut  kj-e68-datamark-100 (filestor01.cloud-prod.seres.cn (Samba Server))  hint=Samba Server (Explorer 明示)
+[ENV] SMB 客户端缓存 (LanmanWorkstation\Parameters, 只读):
+[ENV]   DirectoryCacheLifetime      = 10s  (默认 10; Samba 假 miss 的元凶)
+[ENV]   FileNotFoundCacheLifetime   = 5s  (默认 5)
+[ENV]   FileInfoCacheLifetime       = 10s  (默认 10)
+[ENV] pic-clear 常用路径可达性 (3 条):
+[ENV]   \\filestor01.cloud-prod.seres.cn\kj-e68-datamark-100\sjbz_20260717   exists(短)=True
+[ENV]   \\filestor01.cloud-prod.seres.cn\kj-e68-datamark-100\切帧结果new       exists(短)=True
+[ENV]   \\filestor01.cloud-prod.seres.cn\kj-e68-datamark-100\节点              exists(短)=True
+[ENV] 决策提示:
+[ENV]   ✓ 需要 \\?\ 长路径前缀 (LongPathsEnabled=0, 系统级未开)
+[ENV]   ✓ Samba 环境: marker 假 miss 时会 sleep 11s 重试
+[ENV] 探测耗时 234ms
+====================================================================
+```
+
+### 使用 (新 GUI 接入清单更新)
+
+```python
+# GUI 里传本 GUI 关心的路径:
+def _run_env_probe():
+    pp = []
+    for v in (self._src_var, self._out_var, self._markers_root_var):
+        s = v.get().strip()
+        if s:
+            pp.append(s)
+    probe_and_log(self._log, probe_paths=pp)
+self.root.after(100, _run_env_probe)
+```
+
+### 新增字段
+
+见 dataclass 定义 (`Env`, `DriveInfo`, `NetMount`), 常用:
+- `env.drives: list[DriveInfo]` — 逐盘符
+- `env.net_mounts: list[NetMount]` — 每条网络挂载
+- `env.smb_dormant_file_limit / disable_bandwidth_throttling / disable_large_mtu`
+- `env.hostname / username / python_version / pid`
+- `env.diag_errors: list[str]` — 探测阶段吞掉的异常
