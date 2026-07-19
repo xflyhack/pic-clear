@@ -550,9 +550,17 @@ def _do_extract(
         "-hide_banner",
         "-loglevel", "error",
         "-y",
+        # v0.4.63: DMS/OMS 相机常输出 full-range YUV, ffmpeg 7.x 的 mjpeg encoder
+        # 默认严格模式会拒绝, 报 "Non full-range YUV is non-standard" +
+        # "Error while opening encoder" -> rc=-22 (EINVAL). 组合修法:
+        #   -strict unofficial : 防守, 放宽 mjpeg 对 pix_fmt 的严格校验
+        #   -pix_fmt yuvj420p  : 规范, 显式告诉 encoder 走 JPEG 标准的 full-range
+        #                         4:2:0 (tv-range 输入也会自动 tv->pc 合法转换)
+        "-strict", "unofficial",
         "-i", src_arg,
         "-vf", f"fps={fps}",
         "-q:v", str(q_map),
+        "-pix_fmt", "yuvj420p",
         "-an",   # 丢弃音频
         tmp_out_pattern,
     ]
@@ -601,7 +609,7 @@ def _do_extract(
             _log_err(
                 f"[FFMPEG_FAIL] ffmpeg 返回 rc={proc.returncode} (signed {rc_signed})\n"
                 f"{_diag_prefix()}\n"
-                f"    stderr   (完整, {len(stderr_text)} 字节):\n"
+                f"    stderr   (共 {len(stderr_text)} 字节):\n"
                 f"{stderr_text.rstrip()}\n"
                 f"    stdout   ({len(stdout_text)} 字节):\n"
                 f"{stdout_text.rstrip()}\n"
@@ -616,20 +624,18 @@ def _do_extract(
                         f"写 empty marker 失败(rc!=0 分支): {marker} -> "
                         f"{type(e).__name__}: {e}"
                     )
-                short_err = stderr_text.strip()
-                if len(short_err) > 400:
-                    short_err = "..." + short_err[-400:]
+                # v0.4.63: 主日志不再截 stderr 摘要 (随机切在 handle 地址中间无意义,
+                # 反而遮住上面 [FFMPEG_FAIL] 段里干净的完整版). 只留 rc + 关键错误一行.
+                key_line = _pick_key_error_line(stderr_text)
                 return "empty", 0, (
-                    f"视频无可解码帧（ffmpeg rc={proc.returncode}，signed {rc_signed}）"
-                    f"，已记 empty 标记，说明：{short_err[:200]}"
+                    f"视频无可解码帧（rc={proc.returncode} signed {rc_signed}），"
+                    f"已记 empty 标记；关键错误：{key_line}"
                 )
-            # 真失败: 摘要给 stdout 主日志, 完整 stderr 已经在 [FFMPEG_FAIL] 里
-            short_err = stderr_text.strip()
-            if len(short_err) > 400:
-                short_err = "..." + short_err[-400:]
+            # 真失败: 主日志只留 rc + 关键错误行, 完整 stderr 见上面 [FFMPEG_FAIL] 段
+            key_line = _pick_key_error_line(stderr_text)
             return "failed", 0, (
-                f"ffmpeg 返回 {proc.returncode} (signed {rc_signed}); "
-                f"完整 stderr 见 [FFMPEG_FAIL] 段; 摘要: {short_err[:200]}"
+                f"ffmpeg rc={proc.returncode} (signed {rc_signed})；"
+                f"关键错误：{key_line}；完整 stderr 见 [FFMPEG_FAIL] 段"
             )
 
         # ---- rc == 0: temp 里数一下产出, 再搬到最终 out_dir ----
@@ -703,6 +709,44 @@ def _is_no_frame_error(stderr_text: str) -> bool:
         return False
     low = stderr_text.lower()
     return any(p in low for p in _NO_FRAME_PATTERNS)
+
+
+# v0.4.63: 从 ffmpeg stderr 里挑一条"人眼最容易看懂的关键错误行"作为主日志摘要.
+# 老版本粗暴 stderr[-400:] 切在 handle 地址中间, 完全没意义.
+_KEY_ERR_TOKENS = (
+    "error while opening encoder",
+    "could not open encoder",
+    "invalid data found",
+    "no such file or directory",
+    "permission denied",
+    "invalid argument",
+    "error opening input",
+    "error muxing",
+    "error submitting",
+    "ff_frame_thread_encoder_init failed",
+    "moov atom not found",
+    "conversion failed",
+    "no decoder for stream",
+    "unsupported codec",
+)
+
+
+def _pick_key_error_line(stderr_text: str, max_len: int = 240) -> str:
+    """从 stderr 里挑一条包含错误关键词的行, 优先靠后 (更接近失败原因).
+
+    没匹配到关键词就退回 stderr 非空最后一行. 主日志用, 让人一眼看到根因,
+    而不是被 handle 地址 / 分隔线糊满屏幕.
+    """
+    if not stderr_text:
+        return "<空 stderr>"
+    lines = [ln.strip() for ln in stderr_text.splitlines() if ln.strip()]
+    if not lines:
+        return "<空 stderr>"
+    for ln in reversed(lines):
+        low = ln.lower()
+        if any(tok in low for tok in _KEY_ERR_TOKENS):
+            return ln[:max_len]
+    return lines[-1][:max_len]
 
 
 # ------------------------------ CLI + main ---------------------------------

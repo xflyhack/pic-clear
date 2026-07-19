@@ -281,6 +281,7 @@ if rc == 0 and done_marker is not None:
 | **v0.4.35** | `_safe_stat/unlink/exists/is_file/move` + marker 写失败打日志 | ✅ **通了** |
 | **v0.4.61** | 抽公共模块 `winpath_util.py` + `extract_frames.py` 接入 `safe_mkdir/glob/read_text/write_text/os_open` | ✅ **抽帧长路径通了** |
 | **v0.4.62** | ffmpeg image2 muxer + `\\?\` 输出 pattern 的新坑 → 走本地 temp 中转 + 完整 stderr 日志 | ✅ **抽帧真正通了** |
+| v0.4.63 | *(不是长路径坑, 顺带记一下)* ffmpeg 7.x mjpeg encoder 拒 full-range YUV → 加 `-strict unofficial` + `-pix_fmt yuvj420p`; 主日志摘要改成 `_pick_key_error_line` | ✅ DMS/OMS 视频通了 |
 
 **关键教训**：改一个 helper 影响面看似小，实际打包成 exe 分发要 20 分钟 CI + 5 分钟堡垒机验证。**能提前用 `diag_pic.exe` 摊事实的场景，永远不要靠 tag 迭代猜方向**。
 
