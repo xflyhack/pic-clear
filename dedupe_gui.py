@@ -380,6 +380,21 @@ class DedupeGUI:
         except Exception as _e:
             self._log(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}")
 
+        # v0.4.76: 启动即打印**子 exe 版本**, 避免 "GUI 是新版但 dedupe_pic.exe
+        # 还是老版" 这种坑.
+        try:
+            from child_exe_ver import probe_and_log as _core_probe
+            def _run_core_probe():
+                _core_probe(
+                    self._log,
+                    exe_finder=_find_dedupe_exe,
+                    exe_name="dedupe_pic.exe",
+                    gui_version=APP_VERSION,
+                )
+            self.root.after(200, _run_core_probe)
+        except Exception as _e:
+            self._log(f"[CORE] 探测失败: {type(_e).__name__}: {_e}")
+
     # ---------- UI ----------
 
     def _build_ui(self):

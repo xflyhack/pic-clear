@@ -298,6 +298,21 @@ class ExtractGUI:
         except Exception as _e:
             self._log(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}")
 
+        # v0.4.76: 启动即打印**子 exe 版本**, 避免 "GUI 是新版但 extract_frames.exe
+        # 还是老版, marker/长路径修复没跟上" 这种坑 (v0.4.75 用户遭遇过).
+        try:
+            from child_exe_ver import probe_and_log as _core_probe
+            def _run_core_probe():
+                _core_probe(
+                    self._log,
+                    exe_finder=_find_extract_exe,
+                    exe_name="extract_frames.exe",
+                    gui_version=APP_VERSION,
+                )
+            self.root.after(200, _run_core_probe)
+        except Exception as _e:
+            self._log(f"[CORE] 探测失败: {type(_e).__name__}: {_e}")
+
         # 环境预检
         self.root.after(300, self._check_environment)
         # 启动后按当前配置 (视频源目录 + markers 根) 自动预扫一次进度,

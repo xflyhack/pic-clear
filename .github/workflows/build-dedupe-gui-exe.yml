@@ -52,6 +52,7 @@ jobs:
           copy _version.py build_dedupe_gui\
           copy winpath_util.py build_dedupe_gui\
           copy env_probe.py build_dedupe_gui\
+          copy child_exe_ver.py build_dedupe_gui\
         shell: cmd
 
       - name: Obfuscate with PyArmor
@@ -82,6 +83,7 @@ jobs:
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import _version ^
             --hidden-import env_probe ^
+            --hidden-import child_exe_ver ^
             --hidden-import winpath_util ^
             --hidden-import subproc_group ^
             --hidden-import json ^
