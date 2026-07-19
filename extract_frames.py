@@ -472,13 +472,34 @@ def _extract_one_impl(
             #   - 真丢 marker   : 有历史产物 (parent 非空 或 out_dir 里有 jpg)
             #                     但 marker 判 False -> [ERROR] 值得排查
             _pl = str(_mk_diag.get("parent_listdir") or "")
+            # v0.4.81: 光看"parent 有 N 项"不够精细. lock 文件 (_extract.lock)
+            # 也算 1 项, 但那是我们自己临时锁, 不算"历史产物", 也不能作为
+            # 判定'真丢 marker'的依据. 改成实打实 listdir 一次, 只数**不是**
+            # lock/临时文件的项.
             _parent_has_stuff = False
-            _m = re.search(r"parent 有 (\d+) 项", _pl)
-            if _m:
-                try:
-                    _parent_has_stuff = int(_m.group(1)) > 0
-                except Exception:
-                    _parent_has_stuff = False
+            _parent_meaningful_names: list[str] = []
+            try:
+                _lp = str(_mk_diag.get("long_p") or "")
+                if _lp:
+                    _pdir = os.path.dirname(_lp)
+                    _names = os.listdir(_pdir)
+                    # 过滤掉 lock / 临时 / 隐藏文件
+                    _ignore = {_LOCK_NAME, ".DS_Store", "Thumbs.db"}
+                    _parent_meaningful_names = [
+                        n for n in _names
+                        if n not in _ignore
+                        and not n.endswith(".tmp")
+                        and not n.startswith("~")
+                    ]
+                    _parent_has_stuff = len(_parent_meaningful_names) > 0
+            except Exception:
+                # listdir 也挂就退回老的"看字符串"逻辑
+                _m = re.search(r"parent 有 (\d+) 项", _pl)
+                if _m:
+                    try:
+                        _parent_has_stuff = int(_m.group(1)) > 0
+                    except Exception:
+                        _parent_has_stuff = False
             # 顺带扫一眼 out_dir 里有没有历史 jpg (SMB 假 miss 场景, listdir 空但底层有货)
             _has_history_jpg = False
             try:
@@ -499,6 +520,8 @@ def _extract_one_impl(
                     f"    long_isfile = {_mk_diag.get('long_isfile')}\n"
                     f"    long_stat   = {_mk_diag.get('long_stat')}\n"
                     f"    parent_listdir = {_mk_diag.get('parent_listdir')}\n"
+                    f"    parent_meaningful_names = {_parent_meaningful_names[:5]}"
+                    f"{' (仅前 5 项)' if len(_parent_meaningful_names) > 5 else ''}\n"
                     f"    has_history_jpg = {_has_history_jpg}"
                 )
             # 首次跑 (parent 0 项 + 无历史 jpg): 静默, 让下面正常抽帧, 不再刷屏 [ERROR]
