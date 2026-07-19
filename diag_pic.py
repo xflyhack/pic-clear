@@ -221,6 +221,152 @@ def run_marker_diagnostics(markers_root: str, sample_limit: int = 5) -> str:
     return "\n".join(lines)
 
 
+# ---------------- 单条 Marker 深度诊断 (v0.4.68+) ----------------
+
+def run_single_marker_diagnostics(marker_path: str) -> str:
+    r"""对一条 _done.marker 完整路径跑 8 种查询, 定位 IO 层是否撒谎.
+
+    针对场景: extract_frames 打出 [MARKER_MISS] 但用户资源管理器亲眼看到 marker 存在.
+    8 种查询:
+      1) os.path.isfile 短路径
+      2) os.path.isfile 长路径 (\\?\UNC\)
+      3) os.stat 短路径
+      4) os.stat 长路径
+      5) open('rb') 短路径 head 16 字节
+      6) open('rb') 长路径 head 16 字节
+      7) 父目录 os.listdir 短路径, 打印是否含 _done.marker
+      8) 父目录 os.listdir 长路径, 打印是否含 _done.marker
+    """
+    lines: list[str] = []
+    def w(s: str = "") -> None:
+        lines.append(s)
+
+    raw = marker_path
+    p = _normalize_windows_path(marker_path)
+
+    w("=" * 60)
+    w("pic-clear 单条 Marker 深度诊断")
+    w(f"生成时间 : {datetime.now().isoformat(timespec='seconds')}")
+    w(f"diag_pic 版本 : {APP_VERSION}")
+    w(f"平台 : {platform.platform()}")
+    w("=" * 60)
+    w("")
+    if raw != p:
+        w(f"[原始路径] {raw}")
+        w(f"[规范路径] {p}")
+    else:
+        w(f"[输入路径] {p}")
+    w(f"[路径长度] {len(p)}")
+
+    long_p = _to_long_path(p)
+    if long_p == p:
+        w("[长路径] (路径不足阈值 180, 未套 \\?\\)")
+    else:
+        w(f"[长路径] {long_p}")
+        w(f"[长路径长度] {len(long_p)}")
+    w("")
+
+    # 拆父目录
+    parent_short = os.path.dirname(p)
+    parent_long  = os.path.dirname(long_p) if long_p != p else None
+    fname        = os.path.basename(p)
+    w(f"[父目录 短] {parent_short}   len={len(parent_short)}")
+    if parent_long:
+        w(f"[父目录 长] {parent_long}   len={len(parent_long)}")
+    w(f"[文件名   ] {fname!r}   len={len(fname)}  bytes={fname.encode('utf-8')!r}")
+    w("")
+
+    def try_step(label: str, fn):
+        w(f"--- {label} ---")
+        try:
+            result = fn()
+            if result is not None:
+                w(f"OK  {result}")
+            else:
+                w("OK")
+        except Exception as e:
+            w(f"ERR {type(e).__name__}: {e}")
+        w("")
+
+    # 1-2) isfile
+    try_step("[1] os.path.isfile 短路径",
+             lambda: os.path.isfile(p))
+    if long_p != p:
+        try_step("[2] os.path.isfile 长路径 (\\?\\)",
+                 lambda: os.path.isfile(long_p))
+    else:
+        w("--- [2] os.path.isfile 长路径 ---")
+        w("SKIP (无长路径)")
+        w("")
+
+    # 3-4) stat
+    try_step("[3] os.stat 短路径",
+             lambda: f"size={os.stat(p).st_size} mtime={int(os.stat(p).st_mtime)}")
+    if long_p != p:
+        try_step("[4] os.stat 长路径",
+                 lambda: f"size={os.stat(long_p).st_size} mtime={int(os.stat(long_p).st_mtime)}")
+    else:
+        w("--- [4] os.stat 长路径 ---")
+        w("SKIP (无长路径)")
+        w("")
+
+    # 5-6) open('rb')
+    def _open_rb(path):
+        with open(path, "rb") as f:
+            head = f.read(16)
+        return f"{len(head)} bytes: " + " ".join(f"{b:02x}" for b in head)
+    try_step("[5] open('rb') 短路径",
+             lambda: _open_rb(p))
+    if long_p != p:
+        try_step("[6] open('rb') 长路径",
+                 lambda: _open_rb(long_p))
+    else:
+        w("--- [6] open('rb') 长路径 ---")
+        w("SKIP (无长路径)")
+        w("")
+
+    # 7-8) 父目录 listdir + 是否含目标文件名
+    def _list_and_check(dirpath, target):
+        try:
+            names = os.listdir(dirpath)
+        except Exception as e:
+            return f"listdir ERR {type(e).__name__}: {e}"
+        hit = target in names
+        line = f"listdir OK  共 {len(names)} 项   含 {target!r}: {hit}"
+        if not hit and names:
+            # 名字有差异? 打 hex 帮排查隐形字符
+            similar = [n for n in names if n.startswith(target[:10]) or target in n]
+            if similar:
+                line += f"\n    近似名: {similar}"
+                for n in similar[:3]:
+                    line += f"\n      {n!r} bytes={n.encode('utf-8')!r}"
+        elif not hit:
+            line += f"\n    (目录空)"
+        return line
+
+    try_step("[7] 父目录 listdir 短路径 (关键: 能否列出 _done.marker)",
+             lambda: _list_and_check(parent_short, fname))
+    if parent_long:
+        try_step("[8] 父目录 listdir 长路径",
+                 lambda: _list_and_check(parent_long, fname))
+    else:
+        w("--- [8] 父目录 listdir 长路径 ---")
+        w("SKIP (无长路径)")
+        w("")
+
+    # 9) 汇总解读
+    w("=" * 60)
+    w("解读:")
+    w("  - [7]/[8] listdir 里含 _done.marker=True, 但 [1]-[4] isfile/stat 全 False:")
+    w("      -> Python/SMB IO 层对**单个 stat** 撒谎, 需要走 listdir 兜底判定")
+    w("  - [7]/[8] listdir 也不含 _done.marker:")
+    w("      -> marker 真的不在这个目录, 是历史欠账 / 名字写错 / 父目录写错")
+    w("  - [7]/[8] listdir 近似名给出 bytes: 名字有隐形字符/BOM/大小写差")
+    w("  - [1]-[6] 有任何一条 OK: safe_is_file 里对应分支应能命中, 判定路径应改用这条")
+    w("=" * 60)
+    return "\n".join(lines)
+
+
 # ---------------- 诊断主体 ----------------
 
 def run_diagnostics(img_path: str) -> str:
@@ -505,6 +651,16 @@ class DiagApp:
         ttk.Button(btns, text="复制全部日志",
                    command=self.on_mk_copy).pack(side=tk.LEFT)
 
+        # v0.4.68: 单条 marker 深度诊断 (贴一条 _done.marker 完整路径)
+        row_one = ttk.Frame(parent, padding=(8, 4))
+        row_one.pack(fill=tk.X)
+        ttk.Label(row_one, text="单条 marker 完整路径:").pack(side=tk.LEFT)
+        self.mk_one_var = tk.StringVar()
+        ttk.Entry(row_one, textvariable=self.mk_one_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        ttk.Button(row_one, text="深度诊断这一条",
+                   command=self.on_mk_one_run).pack(side=tk.LEFT)
+
         body = ttk.Frame(parent, padding=8)
         body.pack(fill=tk.BOTH, expand=True)
         self.mk_txt = tk.Text(body, wrap=tk.NONE, font=("Consolas", 10))
@@ -574,6 +730,21 @@ class DiagApp:
             report = run_marker_diagnostics(root, sample_limit=sample)
         except Exception:
             report = "扫描脚本自身抛异常:\n" + traceback.format_exc()
+        self._mk_append(report + "\n")
+
+    def on_mk_one_run(self):
+        p = self.mk_one_var.get().strip().strip(chr(34)).strip("'")
+        if not p:
+            messagebox.showwarning("请贴路径",
+                "请把 [MARKER_MISS] 日志里的完整 marker 路径贴进这个输入框, "
+                "以 _done.marker 结尾")
+            return
+        self._mk_append(f"\n>>> 单条深度诊断: {p}\n\n")
+        self.root.update()
+        try:
+            report = run_single_marker_diagnostics(p)
+        except Exception:
+            report = "深度诊断脚本自身抛异常:\n" + traceback.format_exc()
         self._mk_append(report + "\n")
 
 
