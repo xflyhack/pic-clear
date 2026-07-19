@@ -287,6 +287,25 @@ def safe_is_file(p) -> bool:
         return False
 
 
+def safe_isdir(p) -> bool:
+    r"""Path.is_dir 的长路径安全版. v0.4.64 新增, safe_mkdir 用它做建后验证.
+
+    跟 safe_is_file 一个套路: 短路径先试, 挂了或 False 再走 \\?\ fallback.
+    """
+    try:
+        if os.path.isdir(str(p)):
+            return True
+    except OSError:
+        pass
+    long_p = to_long_path(str(p))
+    if long_p == str(p):
+        return False
+    try:
+        return os.path.isdir(long_p)
+    except OSError:
+        return False
+
+
 def safe_move(src, dst) -> None:
     r"""v0.4.38: 跟 safe_unlink 同源修法."""
     try:
@@ -301,29 +320,75 @@ def safe_move(src, dst) -> None:
     shutil.move(long_src, long_dst)
 
 
-def safe_mkdir(p, parents: bool = True, exist_ok: bool = True) -> None:
-    r"""os.makedirs 的长路径安全版. extract_frames v0.4.61 新增.
+def _mkdir_diag(msg: str) -> None:
+    r"""v0.4.64: safe_mkdir 遇到 SMB + \\?\UNC\ 组合坑时打诊断到 stderr."""
+    try:
+        sys.stderr.write("[MKDIR_QUIRK] " + msg + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
 
-    症状: 堡垒机 Z:\节点\... 深目录 mkdir 报
-    "FileNotFoundError: [WinError 206] 文件名或扩展名太长."
+
+def safe_mkdir(p, parents: bool = True, exist_ok: bool = True) -> None:
+    r"""os.makedirs 的长路径安全版, 带建后验证 (v0.4.64 加固).
+
+    历史 (v0.4.61 -> v0.4.63 遗留 bug):
+      堡垒机 Z:\节点\... 或 \\filestor01\...\ 深目录 (>=260 字符) 上,
+      短路径 os.makedirs 报 WinError 206, fallback 到 \\?\UNC\...\os.makedirs
+      在 SMB 上有 quirk: 中间某层会抛 FileExistsError, 老代码
+      "except FileExistsError: if exist_ok: return" 静默吞掉, 返回"成功",
+      但实际叶节点目录没建出来. 下游 shutil.move 全挂 FileNotFoundError.
+
+    v0.4.64 修法:
+      1) 遇到 FileExistsError **不再无条件吞**, 只当叶节点已存在才 return;
+         中间层的 FileExistsError 属于 SMB quirk, 打 [MKDIR_QUIRK] 日志继续.
+      2) 建完做一次 safe_isdir 显式验证, 验证不通过明确 raise, 不撒谎.
+      3) 长路径 fallback 也挂时 raise 的是 long_p 版实际错误 (不再 raise
+         e_short), 便于人眼追问题.
     """
     p_str = str(p)
+    # ---- 短路径 ----
     try:
         os.makedirs(p_str, exist_ok=exist_ok) if parents else os.mkdir(p_str)
-        return
+        # 短路径 makedirs 认为成功 -> 验证一次
+        if safe_isdir(p_str):
+            return
+        # 短路径撒谎: 报了成功但 isdir 返回 False (罕见, 但见过 SMB 缓存)
+        _mkdir_diag(
+            f"短路径 makedirs 返回成功但 isdir=False: {p_str}"
+        )
+        # 继续走长路径 fallback 再试一次
     except OSError as e_short:
         long_p = to_long_path(p_str)
         if long_p == p_str:
+            # 没有长路径可换, 相信短路径的错
             raise
+        # 走长路径 fallback
         try:
             os.makedirs(long_p, exist_ok=exist_ok) if parents else os.mkdir(long_p)
-            return
-        except FileExistsError:
-            if exist_ok:
+        except FileExistsError as e_fe:
+            # v0.4.64 关键修法: 只有叶节点已存在时才认为 OK; 中间层的
+            # FileExistsError (SMB + \\?\UNC\ quirk) 打日志继续验证.
+            if exist_ok and safe_isdir(long_p):
                 return
-            raise
-        except OSError:
-            raise e_short
+            _mkdir_diag(
+                f"长路径 makedirs 抛 FileExistsError 但叶节点 isdir=False: "
+                f"{long_p} -> {type(e_fe).__name__}: {e_fe}"
+            )
+            # 落到最后的验证兜底
+        except OSError as e_long:
+            # 长路径 fallback 也挂: raise 长路径版实际错误, 不再 raise e_short
+            # (老版本 raise e_short 会遮住真实原因)
+            raise e_long
+    # ---- 兜底验证: 无论走的哪条路径, 最后都要保证叶节点存在 ----
+    if safe_isdir(p_str):
+        return
+    long_p = to_long_path(p_str)
+    if long_p != p_str and safe_isdir(long_p):
+        return
+    raise OSError(
+        f"safe_mkdir 声称成功但目录未真实创建: p={p_str} long_p={long_p}"
+    )
 
 
 def safe_read_text(p, encoding: str = "utf-8", errors: str = "strict") -> str:
