@@ -42,6 +42,8 @@ jobs:
           copy stats_viewer_gui.py build_stats_viewer\
           copy stats_db.py         build_stats_viewer\
           copy _version.py         build_stats_viewer\
+          copy env_probe.py        build_stats_viewer\
+          copy winpath_util.py     build_stats_viewer\
         shell: cmd
 
       - name: Obfuscate with PyArmor
@@ -63,6 +65,7 @@ jobs:
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import _version ^
             --hidden-import env_probe ^
+            --hidden-import winpath_util ^
             --hidden-import stats_db ^
             --hidden-import sqlite3 ^
             --hidden-import json ^

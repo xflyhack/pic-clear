@@ -48,6 +48,7 @@ jobs:
           copy licensing.py build_pipe_gui\
           copy otp_utils.py build_pipe_gui\
           copy _version.py build_pipe_gui\
+          copy winpath_util.py build_pipe_gui\\
           copy env_probe.py build_pipe_gui\\
         shell: cmd
 
@@ -77,6 +78,7 @@ jobs:
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import _version ^
             --hidden-import env_probe ^
+            --hidden-import winpath_util ^
             --hidden-import json ^
             --hidden-import base64 ^
             --hidden-import hashlib ^

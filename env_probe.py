@@ -308,13 +308,16 @@ def _enum_drives() -> list[DriveInfo]:
             # Free / Total (仅本地/网络盘, 光驱可能空盘)
             if di.drive_type in (3, 4):
                 try:
-                    free_bytes = ctypes.c_ulonglong(0)
+                    free_avail = ctypes.c_ulonglong(0)
                     total_bytes = ctypes.c_ulonglong(0)
+                    total_free = ctypes.c_ulonglong(0)
                     if k32.GetDiskFreeSpaceExW(root,
-                                               ctypes.byref(free_bytes),
-                                               ctypes.byref(free_bytes),  # dummy
-                                               ctypes.byref(total_bytes)):
-                        di.free_bytes = free_bytes.value
+                                               ctypes.byref(free_avail),
+                                               ctypes.byref(total_bytes),
+                                               ctypes.byref(total_free)):
+                        # 语义: free_bytes = 当前用户还能写多少 (avail_to_caller)
+                        #       total_bytes = 磁盘/卷的总容量
+                        di.free_bytes = free_avail.value
                         di.total_bytes = total_bytes.value
                 except Exception:
                     pass
