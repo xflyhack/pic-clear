@@ -131,6 +131,7 @@ jobs:
             --hidden-import otp_utils ^
             --hidden-import stats_db ^
             --hidden-import sqlite3 ^
+            --hidden-import uuid ^
             classify_gui.py
         shell: cmd
 

@@ -107,6 +107,7 @@ jobs:
             --hidden-import PIL.Image ^
             --hidden-import PIL.ImageDraw ^
             --hidden-import keyboard ^
+            --hidden-import uuid ^
             extract_gui.py
           cd ..
         shell: cmd

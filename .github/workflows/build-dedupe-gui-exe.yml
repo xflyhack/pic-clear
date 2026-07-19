@@ -110,6 +110,7 @@ jobs:
             --hidden-import PIL.Image ^
             --hidden-import PIL.ImageDraw ^
             --hidden-import keyboard ^
+            --hidden-import uuid ^
             dedupe_gui.py
           cd ..
         shell: cmd
