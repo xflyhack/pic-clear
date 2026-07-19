@@ -653,6 +653,25 @@ def _do_extract(
                 "ffmpeg 成功退出但未产出任何帧（视频可能极短），已记 empty 标记"
             )
 
+        # v0.4.64 safety net (方案 B): 搬迁前对 out_dir 再 mkdir 一次.
+        # 背景: v0.4.61-v0.4.63 遇到 SMB + \\?\UNC\ + makedirs 组合坑,
+        # safe_mkdir 早在 _extract_one_impl 里就"报了成功"但深层其实没建,
+        # 导致 138/138 帧全挂 FileNotFoundError. v0.4.64 已在 winpath_util
+        # 端修好 (safe_mkdir 加建后验证), 这里再多一次 mkdir 只是 belt +
+        # suspenders, 兜底老 exe 或以后类似 SMB quirk. mkdir 已存在近零开销.
+        try:
+            _safe_mkdir(out_dir, parents=True, exist_ok=True)
+        except OSError as e:
+            _log_err(
+                f"[MOVE_FAIL] 搬迁前 out_dir 再确认失败, 放弃搬迁\n"
+                f"{_diag_prefix()}\n"
+                f"    mkdir 错: {type(e).__name__}: {e}"
+            )
+            return "failed", 0, (
+                f"搬迁前 out_dir 无法建立 ({type(e).__name__}: {e}); "
+                f"详见 [MOVE_FAIL] 段"
+            )
+
         # 搬到真正的 out_dir. _safe_move 自带 \\?\ 兜底, 跨盘也 OK
         moved = 0
         move_errs: list[str] = []
