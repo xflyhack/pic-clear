@@ -308,9 +308,11 @@ class ProgressReporter:
         rate = done / elapsed if elapsed > 0 else 0.0
         remain = (self.total - done) / rate if rate > 0 else float("nan")
         pct = 100.0 * done / self.total if self.total else 0.0
+        # v0.4.79: 日志改直白中文, 跟 extract_frames v0.4.78 风格保持一致
         msg = (
-            f"{self.prefix} {done}/{self.total} ({pct:.1f}%)  "
-            f"速率 {rate:.1f}/s  已用 {_fmt_eta(elapsed)}  剩余 ~{_fmt_eta(remain)}"
+            f"{self.prefix} 已处理 {done} 张 / 共 {self.total} 张 ({pct:.1f}%)  "
+            f"处理速率 {rate:.1f} 张/秒  "
+            f"已运行 {_fmt_eta(elapsed)}  预计剩余 ~{_fmt_eta(remain)}"
         )
         if extra:
             msg += f"  {extra}"
@@ -320,8 +322,8 @@ class ProgressReporter:
         elapsed = time.time() - self.start
         rate = self.done / elapsed if elapsed > 0 else 0.0
         print(
-            f"{self.prefix} 完成 {self.done}/{self.total}  "
-            f"平均 {rate:.1f}/s  总耗时 {_fmt_eta(elapsed)}"
+            f"{self.prefix} 完成: 已处理 {self.done} 张 / 共 {self.total} 张  "
+            f"平均速率 {rate:.1f} 张/秒  总耗时 {_fmt_eta(elapsed)}"
             + (f"  {extra}" if extra else ""),
             flush=True,
         )
@@ -389,7 +391,7 @@ def build_index(
         parent = str(p.parent)
         if parent != current_dir:
             current_dir = parent
-            print(f"  [dir] {current_dir}", flush=True)
+            print(f"  [当前目录] {current_dir}", flush=True)
         count += 1
         try:
             st = _safe_stat(p)
@@ -427,7 +429,7 @@ def build_index(
                 )
             except Exception as e:
                 protected, hits, vehicles, size = False, [], [], None
-                print(f"  [warn] 检测失败 {p}: {e}", flush=True)
+                print(f"  [警告] 检测失败 {p}: {e}", flush=True)
             # 保护口径（默认规则）：
             #   有 person             -> 硬保护 (is_protected=True)
             #   只有车类，没有 person -> 不硬保护，交给"相邻帧车运动"判定
@@ -462,7 +464,7 @@ def build_index(
                     flags = _analyze_scene(p)
                 except Exception as e:
                     flags = None
-                    print(f"  [warn] 场景分析失败 {p}: {e}", flush=True)
+                    print(f"  [警告] 场景分析失败 {p}: {e}", flush=True)
                 if flags is not None and flags.is_anomaly:
                     item.scene_protected = True
                     item.scene_reason = flags.reason
@@ -1187,8 +1189,9 @@ def _run_dedupe(args: argparse.Namespace) -> int:
         groups, args.strategy, args.trash_dir, args.hard_delete
     )
     print(
-        f"[删除完成] 成功 {deleted} 个，释放 {freed / 1024 / 1024:.1f} MB，"
-        f"失败 {len(errors)} 个"
+        f"[删除完成] 成功删除 {deleted} 张图片, "
+        f"释放磁盘空间 {freed / 1024 / 1024:.1f} MB, "
+        f"失败 {len(errors)} 张"
     )
     if errors:
         for e in errors[:20]:
