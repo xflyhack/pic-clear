@@ -489,16 +489,26 @@ class ClassifyApp:
 
     # -------------------------------------------------- 关于 tab
     def _build_about_tab(self, page: ttk.Frame) -> None:
-        pad = {"padx": 12, "pady": 6}
-        ttk.Label(page, text=APP_TITLE,
-                  font=("Microsoft YaHei", 16, "bold")).pack(pady=(24, 4))
-        ttk.Label(page, text=f"版本  {APP_VERSION}",
-                  foreground="#0a7").pack(pady=2)
-        ttk.Label(page, text=APP_COMPANY,
+        # v0.4.55 关于页面布局改造: 与 dedupe_gui 风格对齐
+        #   外层 wrap 收窄内容, 标题块 -> LabelFrame(应用说明) -> LabelFrame(配置文件)
+        #   -> LabelFrame(内嵌模块版本)
+        wrap = ttk.Frame(page)
+        wrap.pack(fill="both", expand=True, padx=12, pady=8)
+
+        # 标题块
+        ttk.Label(wrap, text=APP_TITLE,
+                  font=("Microsoft YaHei", 16, "bold")).pack(pady=(20, 4))
+        ttk.Label(wrap, text=f"版本  {APP_VERSION}",
+                  foreground="#555").pack(pady=2)
+        ttk.Label(wrap, text=APP_COMPANY,
                   foreground="#c0392b",
-                  font=("Microsoft YaHei", 10, "bold")).pack(pady=(4, 12))
+                  font=("Microsoft YaHei", 10, "bold")).pack(pady=(4, 16))
+
+        # 应用说明
+        desc_frame = ttk.LabelFrame(wrap, text="应用说明")
+        desc_frame.pack(fill="x", padx=4, pady=6)
         ttk.Label(
-            page,
+            desc_frame,
             text=("对已去重图片二次分类：\n"
                   "  · 舱外活体检测（骑行/滑板/三轮）\n"
                   "  · 人体关键点（步行/站立）\n"
@@ -509,17 +519,21 @@ class ClassifyApp:
                   "支持多机并发：camera 目录级 _classify.lock + _classify_done.marker\n"
                   "多机共享盘时所有机器请指向同一 Marker 根目录"),
             foreground="#555", justify="left",
-        ).pack(anchor="w", **pad)
+        ).pack(anchor="w", padx=10, pady=8)
+
+        # 配置文件位置
+        cfg_frame = ttk.LabelFrame(wrap, text="配置文件")
+        cfg_frame.pack(fill="x", padx=4, pady=6)
         ttk.Label(
-            page,
+            cfg_frame,
             text=("配置文件：%USERPROFILE%\\.pic-clear\\classify_gui.json\n"
                   "license.lic / otp.secret 与其他 exe 共用"),
             foreground="#888", justify="left", font=("Consolas", 9),
-        ).pack(anchor="w", **pad)
+        ).pack(anchor="w", padx=10, pady=8)
 
-        # v0.4.48 内嵌模块版本 (classify_pic 是 import 进来的, 跟 GUI 同版本, 走静态渲染)
-        core_frame = ttk.LabelFrame(page, text="内嵌模块 (classify_pic)")
-        core_frame.pack(fill="x", padx=12, pady=8)
+        # 内嵌模块版本 (classify_pic 是 import 进来的, 跟 GUI 同版本, 走静态渲染)
+        core_frame = ttk.LabelFrame(wrap, text="内嵌模块 (classify_pic)")
+        core_frame.pack(fill="x", padx=4, pady=6)
         _pg.render_static_version_frame(
             core_frame,
             label_text="模块版本",
