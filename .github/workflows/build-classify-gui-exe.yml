@@ -66,6 +66,7 @@ jobs:
           pyarmor gen --output dist_obf pipe_gui.py
           pyarmor gen --output dist_obf classify_gui.py
           pyarmor gen --output dist_obf classify_pic.py
+          pyarmor gen --output dist_obf dedupe_pic.py
           pyarmor gen --output dist_obf detector.py
           pyarmor gen --output dist_obf pose_detector.py
           pyarmor gen --output dist_obf embed_detector.py
@@ -76,6 +77,7 @@ jobs:
           copy /Y dist_obf\pipe_gui.py        pipe_gui.py
           copy /Y dist_obf\classify_gui.py     classify_gui.py
           copy /Y dist_obf\classify_pic.py     classify_pic.py
+          copy /Y dist_obf\dedupe_pic.py      dedupe_pic.py
           copy /Y dist_obf\detector.py         detector.py
           copy /Y dist_obf\pose_detector.py    pose_detector.py
           copy /Y dist_obf\embed_detector.py   embed_detector.py
@@ -127,6 +129,7 @@ jobs:
             --hidden-import embed_detector ^
             --hidden-import pipe_gui ^
             --hidden-import classify_pic ^
+            --hidden-import dedupe_pic ^
             --hidden-import licensing ^
             --hidden-import otp_utils ^
             --hidden-import stats_db ^

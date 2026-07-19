@@ -272,8 +272,28 @@ def _has_keyword(name: str, keywords: tuple[str, ...]) -> bool:
 
 
 def _copy_overwrite(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
+    # v0.4.59 长路径修复: Windows 上把 src / dst 都套 \\?\ 前缀走 NT 长路径 API,
+    # 绕开 MAX_PATH=260 限制. 复用 dedupe_pic._to_long_path (含 //?/ 混斜杠修复).
+    try:
+        from dedupe_pic import _to_long_path as _lp  # type: ignore
+    except Exception:
+        _lp = None  # 兜底: 拿不到就退化成原路径
+
+    # 先创建目标目录 (目录本身也可能超长)
+    parent_str = str(dst.parent)
+    if _lp is not None:
+        parent_long = _lp(parent_str)
+    else:
+        parent_long = parent_str
+    try:
+        os.makedirs(parent_long, exist_ok=True)
+    except Exception:
+        # makedirs 万一因长路径挂了, 走 pathlib mkdir 兜底
+        dst.parent.mkdir(parents=True, exist_ok=True)
+
+    src_arg = _lp(str(src)) if _lp is not None else str(src)
+    dst_arg = _lp(str(dst)) if _lp is not None else str(dst)
+    shutil.copy2(src_arg, dst_arg)
 
 
 def _iter_images(root: Path, extensions: tuple[str, ...]) -> Iterable[Path]:
