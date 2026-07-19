@@ -276,6 +276,74 @@ def safe_is_file(p) -> bool:
     return _safe_is_file_impl(p)[0]
 
 
+
+# --------------------- Win32 FindFirstFileW 兜底 (v0.4.70) --------------------
+
+def _find_first_file_w(long_path: str) -> tuple[str, str]:
+    r"""ctypes 直调 kernel32!FindFirstFileW, 绕开 Python IO 层归一化.
+
+    返回 (status, detail):
+      - ('HIT', f"attr={n}")  文件存在, attr = dwFileAttributes 十进制
+      - ('MISS', 'INVALID_HANDLE')  Win32 说找不到
+      - ('MISS', f'ERR:{errno}')    其他 Win32 错误码
+      - ('SKIP', 'non-nt')          非 Windows 平台
+      - ('SKIP', f'exc:{repr(e)}') ctypes 调用自身炸了
+    """
+    if os.name != "nt":
+        return ("SKIP", "non-nt")
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        INVALID_HANDLE_VALUE = -1
+
+        class FILETIME(ctypes.Structure):
+            _fields_ = [("dwLowDateTime", wintypes.DWORD),
+                        ("dwHighDateTime", wintypes.DWORD)]
+
+        class WIN32_FIND_DATAW(ctypes.Structure):
+            _fields_ = [
+                ("dwFileAttributes", wintypes.DWORD),
+                ("ftCreationTime", FILETIME),
+                ("ftLastAccessTime", FILETIME),
+                ("ftLastWriteTime", FILETIME),
+                ("nFileSizeHigh", wintypes.DWORD),
+                ("nFileSizeLow", wintypes.DWORD),
+                ("dwReserved0", wintypes.DWORD),
+                ("dwReserved1", wintypes.DWORD),
+                ("cFileName", wintypes.WCHAR * 260),
+                ("cAlternateFileName", wintypes.WCHAR * 14),
+            ]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        FindFirstFileW = k32.FindFirstFileW
+        FindFirstFileW.argtypes = [wintypes.LPCWSTR,
+                                   ctypes.POINTER(WIN32_FIND_DATAW)]
+        FindFirstFileW.restype = wintypes.HANDLE
+        FindClose = k32.FindClose
+        FindClose.argtypes = [wintypes.HANDLE]
+        FindClose.restype = wintypes.BOOL
+
+        data = WIN32_FIND_DATAW()
+        h = FindFirstFileW(long_path, ctypes.byref(data))
+        if h == INVALID_HANDLE_VALUE or h == ctypes.c_void_p(-1).value:
+            err = ctypes.get_last_error()
+            if err == 0:
+                return ("MISS", "INVALID_HANDLE")
+            return ("MISS", f"ERR:{err}")
+        try:
+            attr = data.dwFileAttributes
+            found_name = data.cFileName
+        finally:
+            FindClose(h)
+        # 拿到的 found_name 是实际存在的文件名. 跟我们查的 basename 对一下,
+        # 大小写 / 空格 / 隐形字符差异都能看出来.
+        base = os.path.basename(long_path)
+        return ("HIT", f"attr={attr} found={found_name!r} query={base!r}")
+    except Exception as e:
+        return ("SKIP", f"exc:{e!r}")
+
+
 def _safe_is_file_impl(p) -> tuple[bool, dict]:
     r"""safe_is_file 内部实现, 顺带把短路径 / 长路径 / stat 三条查询的原始
     结果收集起来. 上层判 False 时可以把 diag 打日志, 免得再回来加断点.
@@ -329,10 +397,18 @@ def _safe_is_file_impl(p) -> tuple[bool, dict]:
             diag["parent_listdir"] = f"HIT (parent 有 {len(names)} 项, 含目标)"
             return True, diag
         diag["parent_listdir"] = f"MISS (parent 有 {len(names)} 项, 不含目标)"
-        return False, diag
     except OSError as e:
         diag["parent_listdir"] = f"ERR:{type(e).__name__}:{e}"
-        return False, diag
+
+    # v0.4.70: listdir 也说没有时, 直调 Win32 FindFirstFileW 再兜一层.
+    # 现象: Python IO 层 (os.stat / os.listdir 内部走 CRT + Win32) 对某些
+    # SMB + 深路径 + 含特殊字符 (空格 / 加号 / 中文混排) 的组合会撒谎;
+    # FindFirstFileW 是最贴近 Win32 kernel 的查询, 不走 CRT 归一化, 常能救回来.
+    status, detail = _find_first_file_w(long_p)
+    diag["find_first"] = f"{status} {detail}"
+    if status == "HIT":
+        return True, diag
+    return False, diag
 
 
 def safe_isdir(p) -> bool:

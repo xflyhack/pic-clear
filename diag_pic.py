@@ -46,6 +46,7 @@ from winpath_util import (
     resolve_mapped_drive_to_unc_verbose as _resolve_mapped_drive_to_unc,
     to_long_path as _to_long_path,
     _safe_is_file_impl,
+    _find_first_file_w,
 )
 
 
@@ -516,6 +517,233 @@ def run_diagnostics(img_path: str) -> str:
 
 # ---------------- GUI ----------------
 
+
+def run_log_batch_diagnostics(log_path: str) -> str:
+    r"""扫抽帧日志, 抓每一条 [MARKER_MISS] 里的 marker 路径, 逐条深度诊断.
+
+    v0.4.70 新增. 输入是切帧工具落地的日志文件 (extract_gui / pipeline 都行);
+    输出一份汇总报告, 用户只填一个文件路径, 剩下的自动化.
+
+    抓 marker 路径的正则匹配以下两种:
+      1) "marker      = \\..._done.marker"   (extract_frames [MARKER_MISS] 段)
+      2) "marker      = \\..._done.marker\n"  (行尾)
+    """
+    import re
+
+    lines: list[str] = []
+    def w(s: str = "") -> None:
+        lines.append(s)
+
+    w("=" * 60)
+    w("pic-clear 日志批量 Marker 诊断  (v0.4.70+)")
+    w(f"生成时间 : {datetime.now().isoformat(timespec='seconds')}")
+    w(f"diag_pic 版本 : {APP_VERSION}")
+    w(f"平台 : {platform.platform()}")
+    w(f"日志文件 : {log_path}")
+    w("=" * 60)
+    w("")
+
+    if not os.path.isfile(log_path):
+        w(f"[FATAL] 日志文件不存在: {log_path}")
+        return "\n".join(lines)
+
+    # 读日志 (可能有 BOM / GBK / UTF-8, 都试一遍)
+    text = None
+    for enc in ("utf-8-sig", "utf-8", "gbk", "cp936"):
+        try:
+            with open(log_path, "r", encoding=enc, errors="strict") as f:
+                text = f.read()
+            w(f"[编码] 读取成功: {enc}")
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        w("[编码] 全部严格模式失败, fallback utf-8 + replace")
+    w(f"[日志大小] {len(text)} 字符")
+    w("")
+
+    # 抓 marker 路径. 支持 "marker      = XXX" 或 "marker=XXX"
+    pat = re.compile(r"marker\s*=\s*(.+?_done\.marker)\s*$", re.MULTILINE)
+    hits = pat.findall(text)
+    # 去重, 保序
+    seen = set()
+    markers: list[str] = []
+    for m in hits:
+        m = m.strip()
+        if m and m not in seen:
+            seen.add(m)
+            markers.append(m)
+
+    w(f"[抓到 marker 路径] 共 {len(markers)} 条 (去重后)")
+    w("")
+
+    if not markers:
+        w("[WARN] 日志里没抓到 marker 路径 (正则匹配 'marker = ..._done.marker')")
+        w("       请确认这是 extract_frames [MARKER_MISS] 段的日志.")
+        return "\n".join(lines)
+
+    # 逐条跑 6 层查询, 统计各层结果
+    counters = {
+        "short_isfile_true": 0,
+        "long_isfile_true":  0,
+        "stat_ok":           0,
+        "listdir_hit":       0,
+        "find_first_hit":    0,
+        "all_miss":          0,
+    }
+    miss_samples: list[dict] = []
+    hit_by_find_only: list[dict] = []  # 只有 FindFirstFileW 救回来的
+    hit_by_listdir_only: list[dict] = []  # listdir 救回来的
+    parent_lengths: list[int] = []
+
+    for idx, m in enumerate(markers, 1):
+        p_norm = _normalize_windows_path(m)
+        long_p = _to_long_path(p_norm)
+
+        # 1) short isfile
+        try:
+            short_isfile = os.path.isfile(p_norm)
+        except OSError:
+            short_isfile = False
+        # 2) long isfile
+        long_isfile = False
+        if long_p != p_norm:
+            try:
+                long_isfile = os.path.isfile(long_p)
+            except OSError:
+                long_isfile = False
+        # 3) long stat
+        stat_ok = False
+        stat_err = ""
+        if long_p != p_norm:
+            try:
+                os.stat(long_p)
+                stat_ok = True
+            except OSError as e:
+                stat_err = f"{type(e).__name__}:{e}"
+        # 4) parent listdir
+        listdir_hit = False
+        parent_count = -1
+        listdir_err = ""
+        target_p = long_p if long_p != p_norm else p_norm
+        parent = os.path.dirname(target_p)
+        fname  = os.path.basename(target_p)
+        try:
+            names = os.listdir(parent)
+            parent_count = len(names)
+            listdir_hit = fname in names
+        except OSError as e:
+            listdir_err = f"{type(e).__name__}:{e}"
+        # 5) FindFirstFileW
+        ff_status, ff_detail = _find_first_file_w(target_p)
+        find_hit = (ff_status == "HIT")
+
+        parent_lengths.append(len(parent))
+
+        # 统计
+        if short_isfile:
+            counters["short_isfile_true"] += 1
+        if long_isfile:
+            counters["long_isfile_true"] += 1
+        if stat_ok:
+            counters["stat_ok"] += 1
+        if listdir_hit:
+            counters["listdir_hit"] += 1
+        if find_hit:
+            counters["find_first_hit"] += 1
+
+        any_hit = short_isfile or long_isfile or stat_ok or listdir_hit or find_hit
+        if not any_hit:
+            counters["all_miss"] += 1
+            if len(miss_samples) < 5:
+                miss_samples.append({
+                    "marker": m,
+                    "len": len(target_p),
+                    "parent_count": parent_count,
+                    "listdir_err": listdir_err,
+                    "stat_err": stat_err,
+                    "find_detail": ff_detail,
+                })
+        # find 单独救回
+        if find_hit and not (short_isfile or long_isfile or stat_ok or listdir_hit):
+            if len(hit_by_find_only) < 5:
+                hit_by_find_only.append({
+                    "marker": m,
+                    "len": len(target_p),
+                    "find_detail": ff_detail,
+                })
+        # listdir 单独救回
+        if listdir_hit and not (short_isfile or long_isfile or stat_ok):
+            if len(hit_by_listdir_only) < 5:
+                hit_by_listdir_only.append({
+                    "marker": m,
+                    "len": len(target_p),
+                })
+
+    total = len(markers)
+    w("--- 各层 API 判定结果 ---")
+    def pct(n):
+        return f"{n} ({n * 100.0 / total:.1f}%)" if total else "0"
+    w(f"[1] os.path.isfile  短路径  HIT: {pct(counters['short_isfile_true'])}")
+    w(f"[2] os.path.isfile  长路径  HIT: {pct(counters['long_isfile_true'])}")
+    w(f"[3] os.stat         长路径  OK : {pct(counters['stat_ok'])}")
+    w(f"[4] parent listdir          HIT: {pct(counters['listdir_hit'])}")
+    w(f"[5] FindFirstFileW  长路径  HIT: {pct(counters['find_first_hit'])}")
+    w(f"[X] 全 5 层都 MISS (真找不到): {pct(counters['all_miss'])}")
+    w("")
+
+    if parent_lengths:
+        w(f"[父目录长度分布] min={min(parent_lengths)} max={max(parent_lengths)} "
+          f"avg={sum(parent_lengths)/len(parent_lengths):.0f}")
+        w("")
+
+    # 单独救回的样本 = 揭示哪一层是"救命层"
+    if hit_by_find_only:
+        w(f"--- 只有 FindFirstFileW 救回来的 marker ({len(hit_by_find_only)} 条样本, 共 {counters['find_first_hit']} 条命中) ---")
+        w("(说明: Python IO 全撒谎, 只有 Win32 底层 API 认帐 -> 根因是 Python CRT 归一化)")
+        for s in hit_by_find_only:
+            w(f"  * len={s['len']}  {s['marker']}")
+            w(f"    find: {s['find_detail']}")
+        w("")
+
+    if hit_by_listdir_only:
+        w(f"--- 只有 listdir 救回来的 marker ({len(hit_by_listdir_only)} 条样本) ---")
+        w("(说明: 单文件 stat 撒谎, 父目录 listdir 讲真话)")
+        for s in hit_by_listdir_only:
+            w(f"  * len={s['len']}  {s['marker']}")
+        w("")
+
+    if miss_samples:
+        w(f"--- 全 5 层都 MISS 的 marker ({len(miss_samples)} 条样本, 共 {counters['all_miss']} 条) ---")
+        w("(说明: marker 真的不在这个位置; 可能是 pipeline 写路径 bug / 迁移遗漏)")
+        for s in miss_samples:
+            w(f"  * len={s['len']}  {s['marker']}")
+            w(f"    parent listdir 项数: {s['parent_count']}  listdir_err: {s['listdir_err'] or '-'}")
+            w(f"    stat_err : {s['stat_err'] or '-'}")
+            w(f"    find     : {s['find_detail']}")
+        w("")
+
+    w("=" * 60)
+    w("解读:")
+    w("  - [1]/[2] short_isfile 或 long_isfile HIT 高 (>80%)")
+    w("    -> Python IO 层能查到, 但为什么切帧当时 [MARKER_MISS]?")
+    w("       可能是 SMB 缓存瞬时不一致; 短暂 miss 后自动 recover, 不严重")
+    w("  - [4] listdir 显著高于 [1]/[2]/[3]")
+    w("    -> 单文件 stat 撒谎, listdir 讲真话 (SMB quirk)")
+    w("       -> v0.4.69 的 parent_listdir 兜底就是干这个")
+    w("  - [5] FindFirstFileW 显著高于 [4]")
+    w("    -> 连 listdir 都撒谎, Win32 底层才认账")
+    w("       -> v0.4.70 加的 FindFirstFileW 兜底就是干这个")
+    w("  - [X] all_miss 很高 (>10%)")
+    w("    -> marker 真的不在预期位置, 是历史欠账/写路径 bug, 需要单独排查")
+    w("=" * 60)
+    w("诊断结束. 请把上面全部内容复制并贴给作者.")
+    w("=" * 60)
+    return "\n".join(lines)
+
+
 class DiagApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -534,6 +762,11 @@ class DiagApp:
         mk_tab = ttk.Frame(nb)
         nb.add(mk_tab, text="Marker 诊断")
         self._build_marker_tab(mk_tab)
+
+        # Tab 3: 日志批量诊断 (v0.4.70 新增)
+        lb_tab = ttk.Frame(nb)
+        nb.add(lb_tab, text="日志批量诊断")
+        self._build_logbatch_tab(lb_tab)
 
     # ---------- Tab 1: 图片诊断 ----------
 
@@ -746,6 +979,98 @@ class DiagApp:
         except Exception:
             report = "深度诊断脚本自身抛异常:\n" + traceback.format_exc()
         self._mk_append(report + "\n")
+
+    # ---------- Tab 3: 日志批量诊断 (v0.4.70) ----------
+
+    def _build_logbatch_tab(self, parent):
+        top = ttk.Frame(parent, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="切帧日志文件:").pack(side=tk.LEFT)
+        self.lb_path_var = tk.StringVar()
+        ttk.Entry(top, textvariable=self.lb_path_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        ttk.Button(top, text="浏览...", command=self.on_lb_browse).pack(
+            side=tk.LEFT, padx=2)
+
+        btns = ttk.Frame(parent, padding=(8, 4))
+        btns.pack(fill=tk.X)
+        ttk.Button(btns, text="开始批量诊断",
+                   command=self.on_lb_run).pack(side=tk.LEFT)
+        ttk.Button(btns, text="清空日志",
+                   command=self.on_lb_clear).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="复制全部日志",
+                   command=self.on_lb_copy).pack(side=tk.LEFT)
+
+        body = ttk.Frame(parent, padding=8)
+        body.pack(fill=tk.BOTH, expand=True)
+        self.lb_txt = tk.Text(body, wrap=tk.NONE, font=("Consolas", 10))
+        yscroll = ttk.Scrollbar(body, orient=tk.VERTICAL,
+                                command=self.lb_txt.yview)
+        xscroll = ttk.Scrollbar(body, orient=tk.HORIZONTAL,
+                                command=self.lb_txt.xview)
+        self.lb_txt.configure(yscrollcommand=yscroll.set,
+                              xscrollcommand=xscroll.set)
+        self.lb_txt.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+
+        self.lb_txt.bind("<Control-a>", self._select_all_lb)
+        self.lb_txt.bind("<Control-A>", self._select_all_lb)
+
+        self._lb_append("日志批量 Marker 诊断  (v0.4.70+)\n\n")
+        self._lb_append("用法:\n")
+        self._lb_append("  1) 浏览选一份切帧日志 (extract_gui 或 pipeline 落地的 .log/.txt)\n")
+        self._lb_append("  2) 点 [开始批量诊断]\n")
+        self._lb_append("  3) 工具会自动:\n")
+        self._lb_append("       - 抓日志里所有 [MARKER_MISS] 段的 marker 路径\n")
+        self._lb_append("       - 每条 marker 用 5 层 API 复查一遍:\n")
+        self._lb_append("           isfile(短) / isfile(长) / stat / listdir / FindFirstFileW\n")
+        self._lb_append("       - 汇总哪一层能救回、哪一层撒谎、哪些真的丢失\n")
+        self._lb_append("  4) 把结果复制贴给作者定位.\n\n")
+
+    def _select_all_lb(self, _event=None):
+        self.lb_txt.tag_add("sel", "1.0", "end")
+        return "break"
+
+    def _lb_append(self, s: str) -> None:
+        self.lb_txt.insert(tk.END, s)
+        self.lb_txt.see(tk.END)
+
+    def on_lb_browse(self):
+        p = filedialog.askopenfilename(
+            title="选切帧日志文件",
+            filetypes=[("Log files", "*.log *.txt *.out"),
+                       ("All files", "*.*")])
+        if p:
+            self.lb_path_var.set(p)
+
+    def on_lb_clear(self):
+        self.lb_txt.delete("1.0", tk.END)
+
+    def on_lb_copy(self):
+        try:
+            content = self.lb_txt.get("1.0", tk.END)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self.root.update()
+            messagebox.showinfo("已复制", "日志批量诊断已复制到剪贴板")
+        except Exception as e:
+            messagebox.showerror("复制失败", str(e))
+
+    def on_lb_run(self):
+        p = self.lb_path_var.get().strip().strip(chr(34)).strip("'")
+        if not p:
+            messagebox.showwarning("请选文件", "请先浏览选一份切帧日志")
+            return
+        self._lb_append(f"\n>>> 开始批量诊断: {p}\n\n")
+        self.root.update()
+        try:
+            report = run_log_batch_diagnostics(p)
+        except Exception:
+            report = "批量诊断脚本自身抛异常:\n" + traceback.format_exc()
+        self._lb_append(report + "\n")
 
 
 def main():
