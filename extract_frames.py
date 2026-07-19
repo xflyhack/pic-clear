@@ -29,6 +29,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -44,6 +45,7 @@ from winpath_util import (
     safe_unlink as _safe_unlink,
     safe_exists as _safe_exists,
     safe_is_file as _safe_is_file,
+    safe_move as _safe_move,
     safe_mkdir as _safe_mkdir,
     safe_read_text as _safe_read_text,
     safe_write_text as _safe_write_text,
@@ -231,13 +233,16 @@ def build_name_pattern(
     style: str,
     template: str | None,
     digits: int,
-) -> tuple[str, str]:
-    """根据规则算出 (ffmpeg_pattern, glob_pattern)。
+) -> tuple[str, str, str]:
+    """根据规则算出 (ffmpeg_pattern, ffmpeg_name, glob_pattern)。
 
-    - ffmpeg_pattern: 传给 ffmpeg 的完整输出路径，形如
-        DST/.../video1/video1_%04d.jpg
-    - glob_pattern  : 供 Path.glob() 用来枚举已生成帧，形如
-        "video1_*.jpg"（不含目录部分）
+    - ffmpeg_pattern: 传给 ffmpeg 的完整输出路径 (含目录), 形如
+        DST/.../video1/video1_%04d.jpg  —— 现在只用来打日志 / 兼容旧调用者
+    - ffmpeg_name   : 只有文件名部分, 形如 "video1_%04d.jpg"
+        (v0.4.62 新加: ffmpeg 直接写本地 temp 目录, 需要短相对路径避开 image2
+         muxer 对 \\\\?\\ 前缀的坑, 详见 docs/windows_long_path.md §10)
+    - glob_pattern  : 供 Path.glob() 用来枚举已生成帧, 形如
+        "video1_*.jpg" (不含目录部分)
     """
     digits = max(1, min(8, int(digits or 4)))
     tmpl = _resolve_template(style, template)
@@ -248,7 +253,7 @@ def build_name_pattern(
     ffmpeg_name = resolved.replace("{seq}", f"%0{digits}d") + ".jpg"
     glob_name = resolved.replace("{seq}", "*") + ".jpg"
     ffmpeg_pattern = str(out_dir / ffmpeg_name)
-    return ffmpeg_pattern, glob_name
+    return ffmpeg_pattern, ffmpeg_name, glob_name
 
 
 def collect_tasks(
@@ -452,7 +457,7 @@ def _extract_one_impl(
     marker = marker_dir / "_done.marker"
     lock_path = marker_dir / _LOCK_NAME
     # 计算本次运行使用的命名 pattern；out_dir 一定存在（或即将创建），name 只用到 out_dir.name
-    ffmpeg_pattern, glob_pattern = build_name_pattern(
+    ffmpeg_pattern, ffmpeg_name, glob_pattern = build_name_pattern(
         out_dir, name_style, name_template, name_digits,
     )
     if skip_existing and _safe_is_file(marker):
@@ -494,7 +499,7 @@ def _extract_one_impl(
     try:
         return _do_extract(
             task, ffmpeg, fps, quality, out_dir, marker,
-            ffmpeg_pattern, glob_pattern,
+            ffmpeg_pattern, ffmpeg_name, glob_pattern,
         )
     finally:
         _release_lock(lock_path)
@@ -508,20 +513,37 @@ def _do_extract(
     out_dir: Path,
     marker: Path,
     ffmpeg_pattern: str,
+    ffmpeg_name: str,
     glob_pattern: str,
 ) -> tuple[str, int, str]:
-    """真正跑 ffmpeg 的部分。已在锁保护内。"""
-    # ffmpeg 在 Windows 上仍走 CRT fopen, 长路径要显式 \\?\; Linux/Mac 原样返回.
-    src_arg = _to_long_path(str(task.src_path))
-    out_pattern = _to_long_path(ffmpeg_pattern)
+    """真正跑 ffmpeg 的部分。已在锁保护内。
 
-    # ffmpeg 命令：
-    #   -hide_banner / -loglevel error：静默
-    #   -y：覆盖已存在文件
-    #   -vf fps=N：每秒抽 N 帧
-    #   -q:v Q：JPEG 质量（2-31，越小越好；q=2 约等于视觉无损，q=5 约等于 quality 90+）
-    # 用户想要 "q=90" 概念，映射到 ffmpeg 的 -q:v 3（大约 92）
+    v0.4.62 关键改动 (docs/windows_long_path.md §10):
+    ffmpeg 的 image2 muxer 在处理带 \\\\?\\ 前缀的输出 pattern 时,
+    展开 %04d 序号阶段会破坏路径, 表现为
+        "Error submitting a packet to the muxer: No such file or directory"
+        "Task finished with error code: -2"
+    v0.4.61 给 out_pattern 加 _to_long_path 就撞到了这个坑.
+
+    修法: ffmpeg 只写"本地 temp 目录 + 短文件名" (永远短路径, 不加 \\\\?\\),
+    跑完再用 _safe_move 把生成的 .jpg 逐个搬到真正的 out_dir (SMB 长路径,
+    _safe_move 自带 \\\\?\\ 兜底).
+    """
     q_map = max(2, min(31, int((100 - quality) / 3)))
+
+    # ---- 输入侧: -i 仍走 _to_long_path (ffmpeg avio_open2 吃得下 \\?\) ----
+    src_str = str(task.src_path)
+    src_arg = _to_long_path(src_str)
+    src_had_prefix = (src_arg != src_str and os.name == "nt")
+
+    # ---- 输出侧: 强制走本地 temp 目录, 永远短路径 ----
+    try:
+        tmp_out = Path(tempfile.mkdtemp(prefix="pic-clear-ext-"))
+    except OSError as e:
+        return "failed", 0, (
+            f"建 temp 输出目录失败 (系统 temp 不可写?): {type(e).__name__}: {e}"
+        )
+    tmp_out_pattern = str(tmp_out / ffmpeg_name)
 
     cmd = [
         str(ffmpeg),
@@ -532,55 +554,135 @@ def _do_extract(
         "-vf", f"fps={fps}",
         "-q:v", str(q_map),
         "-an",   # 丢弃音频
-        out_pattern,
+        tmp_out_pattern,
     ]
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=None,
-            creationflags=(0x08000000 if sys.platform == "win32" else 0),
-        )
-    except FileNotFoundError:
-        return "failed", 0, f"ffmpeg 不存在: {ffmpeg}"
-    except Exception as e:
-        return "failed", 0, f"ffmpeg 调用异常: {e}"
+    def _diag_prefix() -> str:
+        r"""失败时准备一段完整上下文, 供 [FFMPEG_FAIL] 日志使用."""
+        parts = [
+            f"    rel      = {task.rel_path}",
+            f"    src      = {src_str}",
+            f"    src_arg  = {src_arg}   len={len(src_arg)} long_prefix={src_had_prefix}",
+            f"    out_dir  = {out_dir}   len={len(str(out_dir))}",
+            f"    tmp_out  = {tmp_out}",
+            f"    ff_name  = {ffmpeg_name}",
+            f"    tmp_pat  = {tmp_out_pattern}   len={len(tmp_out_pattern)}",
+        ]
+        return "\n".join(parts)
 
-    stderr_text = proc.stderr.decode("utf-8", errors="replace")
-    if proc.returncode != 0:
-        err = stderr_text.strip()
-        # 保留末尾一段，避免刷屏
-        if len(err) > 400:
-            err = "..." + err[-400:]
-        # 判断是不是可预期的"没帧可解码"错误——这类视频本身就没内容，
-        # 应当当作 empty 记 marker 永久跳过，而不是当失败让下次再试
-        if _is_no_frame_error(stderr_text):
-            # 空目录也写 marker，防止 pipeline 下次轮询到又跑一遍
+    try:
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=None,
+                creationflags=(0x08000000 if sys.platform == "win32" else 0),
+            )
+        except FileNotFoundError:
+            _log_err(f"[FFMPEG_FAIL] ffmpeg 不存在: {ffmpeg}\n{_diag_prefix()}")
+            return "failed", 0, f"ffmpeg 不存在: {ffmpeg}"
+        except Exception as e:
+            _log_err(
+                f"[FFMPEG_FAIL] ffmpeg subprocess 起不来: "
+                f"{type(e).__name__}: {e}\n{_diag_prefix()}"
+            )
+            return "failed", 0, f"ffmpeg 调用异常: {e}"
+
+        stderr_text = proc.stderr.decode("utf-8", errors="replace")
+        stdout_text = proc.stdout.decode("utf-8", errors="replace")
+
+        if proc.returncode != 0:
+            # 完整贴 stderr, 不截断 (排查长路径类问题时截断=白瞎)
+            # rc uint32 -> int32 换算, 让 -2 / -1 之类的 posix 错误码人眼可读
+            rc_signed = proc.returncode
+            if rc_signed > 0x7FFFFFFF:
+                rc_signed -= 0x100000000
+            _log_err(
+                f"[FFMPEG_FAIL] ffmpeg 返回 rc={proc.returncode} (signed {rc_signed})\n"
+                f"{_diag_prefix()}\n"
+                f"    stderr   (完整, {len(stderr_text)} 字节):\n"
+                f"{stderr_text.rstrip()}\n"
+                f"    stdout   ({len(stdout_text)} 字节):\n"
+                f"{stdout_text.rstrip()}\n"
+                f"    ---END OF [FFMPEG_FAIL]---"
+            )
+            if _is_no_frame_error(stderr_text):
+                # 空目录也写 marker, 防止 pipeline 下次轮询到又跑一遍
+                try:
+                    _safe_write_text(marker, "empty", encoding="utf-8")
+                except OSError as e:
+                    _log_err(
+                        f"写 empty marker 失败(rc!=0 分支): {marker} -> "
+                        f"{type(e).__name__}: {e}"
+                    )
+                short_err = stderr_text.strip()
+                if len(short_err) > 400:
+                    short_err = "..." + short_err[-400:]
+                return "empty", 0, (
+                    f"视频无可解码帧（ffmpeg rc={proc.returncode}，signed {rc_signed}）"
+                    f"，已记 empty 标记，说明：{short_err[:200]}"
+                )
+            # 真失败: 摘要给 stdout 主日志, 完整 stderr 已经在 [FFMPEG_FAIL] 里
+            short_err = stderr_text.strip()
+            if len(short_err) > 400:
+                short_err = "..." + short_err[-400:]
+            return "failed", 0, (
+                f"ffmpeg 返回 {proc.returncode} (signed {rc_signed}); "
+                f"完整 stderr 见 [FFMPEG_FAIL] 段; 摘要: {short_err[:200]}"
+            )
+
+        # ---- rc == 0: temp 里数一下产出, 再搬到最终 out_dir ----
+        tmp_frames = sorted(tmp_out.glob(glob_pattern))
+        if not tmp_frames:
+            # rc=0 但真的一帧没出来 (比如极短视频 / fps 太低)
             try:
                 _safe_write_text(marker, "empty", encoding="utf-8")
             except OSError as e:
-                _log_err(f"写 empty marker 失败(rc!=0 分支): {marker} -> {type(e).__name__}: {e}")
+                _log_err(
+                    f"写 empty marker 失败(rc=0 无帧分支): {marker} -> "
+                    f"{type(e).__name__}: {e}"
+                )
             return "empty", 0, (
-                f"视频无可解码帧（ffmpeg rc={proc.returncode}），已记 empty 标记"
-                f"，说明：{err[:200]}"
+                "ffmpeg 成功退出但未产出任何帧（视频可能极短），已记 empty 标记"
             )
-        return "failed", 0, f"ffmpeg 返回 {proc.returncode}: {err}"
 
-    frames = sorted(_safe_glob(out_dir, glob_pattern))
-    if not frames:
-        # rc=0 但真的一帧没出来（比如极短视频 / fps 太低）——也算 empty，写 marker
+        # 搬到真正的 out_dir. _safe_move 自带 \\?\ 兜底, 跨盘也 OK
+        moved = 0
+        move_errs: list[str] = []
+        for src_frame in tmp_frames:
+            dst_frame = out_dir / src_frame.name
+            try:
+                _safe_move(src_frame, dst_frame)
+                moved += 1
+            except OSError as e:
+                move_errs.append(f"{src_frame.name} -> {type(e).__name__}: {e}")
+
+        if move_errs:
+            _log_err(
+                f"[MOVE_FAIL] {len(move_errs)}/{len(tmp_frames)} 帧搬迁失败\n"
+                f"{_diag_prefix()}\n"
+                f"    错误列表 (最多 20 条):\n"
+                + "\n".join(f"      - {e}" for e in move_errs[:20])
+            )
+            # 搬失败也别写 done marker, 让下次重试
+            return "failed", moved, (
+                f"ffmpeg 成功但 {len(move_errs)} 帧搬到 out_dir 失败; "
+                f"详见 [MOVE_FAIL] 段"
+            )
+
         try:
-            _safe_write_text(marker, "empty", encoding="utf-8")
+            _safe_write_text(marker, "done", encoding="utf-8")
         except OSError as e:
-            _log_err(f"写 empty marker 失败(rc=0 无帧分支): {marker} -> {type(e).__name__}: {e}")
-        return "empty", 0, "ffmpeg 成功退出但未产出任何帧（视频可能极短），已记 empty 标记"
-    try:
-        _safe_write_text(marker, "done", encoding="utf-8")
-    except OSError as e:
-        _log_err(f"写 done marker 失败: {marker} -> {type(e).__name__}: {e}")
-    return "ok", len(frames), "OK"
+            _log_err(f"写 done marker 失败: {marker} -> {type(e).__name__}: {e}")
+        return "ok", moved, "OK"
+
+    finally:
+        # 无论成功失败都清 temp; 别留一批半成品挤爆 C:\
+        try:
+            shutil.rmtree(tmp_out, ignore_errors=True)
+        except Exception as e:
+            _log_err(f"清 temp 目录失败: {tmp_out} -> {type(e).__name__}: {e}")
 
 
 _NO_FRAME_PATTERNS = (
@@ -844,7 +946,7 @@ def main() -> int:
     if args.dry_run:
         print("\n[dry-run] 将会做的事：")
         for i, t in enumerate(tasks, 1):
-            _, gp = build_name_pattern(t.out_dir, name_style, name_template, name_digits)
+            _, _, gp = build_name_pattern(t.out_dir, name_style, name_template, name_digits)
             print(f"  {i:4d}. {t.src_path}")
             print(f"        → {t.out_dir}{os.sep}{gp}")
         print(f"\n[dry-run] 共 {len(tasks)} 个视频，未真正执行。")
