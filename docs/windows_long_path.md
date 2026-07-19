@@ -282,6 +282,7 @@ if rc == 0 and done_marker is not None:
 | **v0.4.61** | 抽公共模块 `winpath_util.py` + `extract_frames.py` 接入 `safe_mkdir/glob/read_text/write_text/os_open` | ✅ **抽帧长路径通了** |
 | **v0.4.62** | ffmpeg image2 muxer + `\\?\` 输出 pattern 的新坑 → 走本地 temp 中转 + 完整 stderr 日志 | ✅ **抽帧真正通了** |
 | v0.4.63 | *(不是长路径坑, 顺带记一下)* ffmpeg 7.x mjpeg encoder 拒 full-range YUV → 加 `-strict unofficial` + `-pix_fmt yuvj420p`; 主日志摘要改成 `_pick_key_error_line` | ✅ DMS/OMS 视频通了 |
+| **v0.4.65** | `safe_is_file` 加 `_impl` 版返回诊断; extract_frames marker miss 打 `[MARKER_MISS]` 完整段; GUI `_count_done_markers` 走 `\\?\` 长路径 rglob | ✅ **诊断 SMB `\\?\UNC\` marker 撒谎; GUI 进度数稳定** |
 | **v0.4.64** | `safe_mkdir` 加建后验证 + 新增 `safe_isdir` + `[MKDIR_QUIRK]` 日志; `extract_frames` 搬迁前再 mkdir 一次 safety net | ✅ **修 SMB `\\?\UNC\` makedirs 撒谎导致 [MOVE_FAIL] 138/138 全挂** |
 
 **关键教训**：改一个 helper 影响面看似小，实际打包成 exe 分发要 20 分钟 CI + 5 分钟堡垒机验证。**能提前用 `diag_pic.exe` 摊事实的场景，永远不要靠 tag 迭代猜方向**。
@@ -489,3 +490,67 @@ raise 到 `_do_extract` 里. 如果 `_do_extract` 还是打了 `[MOVE_FAIL]`,
 - 挂了 raise 时**优先 raise 走最长路径 (fallback) 的实际错**, 而不是 raise
   短路径的错 (老代码 `raise e_short` 在长路径 fallback 挂时会遮住真实原因,
   排查时人眼看不见 `\\?\UNC\` 那条链).
+
+---
+
+## §12 弯路 7：SMB `\\?\UNC\` 上 marker 撒谎导致重复抽帧（v0.4.65 诊断）
+
+**现象**: 用户勾"跳过已完成"的前提下, 抽帧工具**每次运行都从 [1/N] 起真跑一批**,
+20+ 秒/个, 直到某个中点 (比如 [23/N]) 突然 `跳过（已完成，marker 存在）` 才开始
+生效. GUI 侧 `[恢复] 预扫 markers` 两次数量还不一样 (堡垒机实测 113 → 65).
+
+**根因怀疑 (未 100% 锁死)**:
+
+- Markers 根用**原始 UNC** (`\\filestor01...\节点`), `to_long_path` 会转成
+  `\\?\UNC\filestor01...\...`, 长度 260+
+- 堡垒机 SMB 客户端对 `\\?\UNC\` 深路径**首次访问不稳定**:
+    - `os.path.isfile(short_path)` 短路径 260+ 直接 CRT 层挂, 返回 False (不 raise)
+    - `os.path.isfile(long_path)` 长路径 `\\?\UNC\...` **也返回 False** (SMB 客户端"没预热")
+    - `safe_is_file` 判定 False → skip 逻辑失效 → 视频被重跑
+- **同一路径过一段时间再查, `\\?\UNC\` 又能查到了** —— 所以 [23] 起 skip 突然生效, GUI rglob 数出 113 / 65 抖动
+
+**为什么不能像 v0.4.32 那样绕开**: v0.4.32 的解法是用户建了 Z: 映射盘, `to_long_path`
+就能用 `\\?\Z:\` 分支绕过 `\\?\UNC\` 坑. 但这次用户配置里**直接用了原始 UNC**,
+没映射盘可换, 强行走 `\\?\UNC\`, 老坑现形.
+
+**v0.4.65 修法 (阶段 1: 只加诊断, 不改判定逻辑)**:
+
+1. **`winpath_util.safe_is_file` 拆出 `_safe_is_file_impl`**: 除了返回 bool, 还返回一个
+   `diag` dict 记录短路径 / 长路径 / os.stat 三条查询的原始结果 (含异常类型和消息).
+   对外 API `safe_is_file` 行为不变, 所有老调用零影响.
+2. **`safe_is_file` 加 `os.stat` 兜底**: 长路径 `os.path.isfile` 说 False 时, 再用
+   `os.stat(long_p)` 兜一次; stat 能过就认为文件存在 (SMB 上偶发 isfile 和 stat
+   结果不一致, 见过). 这是本次唯一改变判定逻辑的地方, 只能让 skip 更倾向"生效",
+   不会让"已跑过的又跑一遍"变严重.
+3. **`extract_frames` marker miss 打 `[MARKER_MISS]` 完整段**: 判 skip 分支时如果
+   `_safe_is_file_impl` 返回 False 且长路径也说 False, 打一段完整日志:
+    ```
+    [MARKER_MISS] marker 应存在但 safe_is_file=False, 视频将被重跑
+        marker      = \\filestor01...\节点\...\_done.marker
+        len         = 266
+        short_isfile= False
+        long_p      = \\?\UNC\filestor01...\节点\...\_done.marker
+        long_isfile = False
+        long_stat   = ERR:FileNotFoundError:[Errno 2] ...
+    ```
+   下次堡垒机日志一贴, 能立刻分辨:
+    - `long_stat=OK size=4` → 兜底应该救回来了 (但没救回来说明还有 bug)
+    - `long_stat=ERR:...` → `\\?\UNC\` 深路径确实不通, 不是 marker 撒谎, 是 SMB / 权限
+    - `long_isfile=True` → 判定其实过了, `_mk_hit` 会被赋 True, 不该走这条日志
+4. **`extract_gui._count_done_markers` 走 `\\?\` 长路径 `rglob`**: 让 GUI 预扫的
+   `[恢复] 已完成 X/Y` 数得稳, 不再出现 113/65 抖动. 底层就是先把 markers_root
+   过 `to_long_path`, 再 `Path(...).rglob("_done.marker")`.
+
+**下一步 (阶段 2, 视 `[MARKER_MISS]` 日志再决定)**:
+
+- 如果日志里 `long_stat=OK` 但 `long_isfile=False` 大量出现, 说明 SMB isfile 撒谎,
+  `safe_is_file` 应彻底改用 `safe_stat` 判定.
+- 如果 `long_stat=ERR:FileNotFoundError` 大量出现, 说明 SMB `\\?\UNC\` 就是查不到,
+  只能建议用户配 `SMB2CreditsMax` 之类的 SMB 客户端调参, 或在 GUI 层做重试.
+- 如果 `[MARKER_MISS]` 一条不打就恢复正常, 说明本次 `os.stat` 兜底已经足够, 收工.
+
+**给运维的诊断话术**: 堡垒机上跑一次抽帧, 结束后:
+```cmd
+findstr /c:"[MARKER_MISS]" C:\path\to\extract_gui_*.log > marker_miss.txt
+```
+把 `marker_miss.txt` 前 20 条贴回来, 一眼定位.

@@ -45,6 +45,7 @@ from winpath_util import (
     safe_unlink as _safe_unlink,
     safe_exists as _safe_exists,
     safe_is_file as _safe_is_file,
+    _safe_is_file_impl,
     safe_move as _safe_move,
     safe_mkdir as _safe_mkdir,
     safe_read_text as _safe_read_text,
@@ -460,7 +461,20 @@ def _extract_one_impl(
     ffmpeg_pattern, ffmpeg_name, glob_pattern = build_name_pattern(
         out_dir, name_style, name_template, name_digits,
     )
-    if skip_existing and _safe_is_file(marker):
+    if skip_existing:
+        _mk_hit, _mk_diag = _safe_is_file_impl(marker)
+        if not _mk_hit and _mk_diag.get("long_isfile") == "False":
+            # marker 应该在但两条查询都说不在 -> 高价值排查线索
+            _log_err(
+                "[MARKER_MISS] marker 应存在但 safe_is_file=False, 视频将被重跑\n"
+                f"    marker      = {marker}\n"
+                f"    len         = {len(str(marker))}\n"
+                f"    short_isfile= {_mk_diag.get('short_isfile')}\n"
+                f"    long_p      = {_mk_diag.get('long_p')}\n"
+                f"    long_isfile = {_mk_diag.get('long_isfile')}\n"
+                f"    long_stat   = {_mk_diag.get('long_stat')}"
+            )
+    if skip_existing and _mk_hit:
         # marker 存在时按当前命名规则数帧；也兜底扫一下旧的 frame_*.jpg
         existing = _safe_glob(out_dir, glob_pattern)
         if not existing and glob_pattern != "frame_*.jpg":

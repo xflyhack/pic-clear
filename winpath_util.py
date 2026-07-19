@@ -273,18 +273,49 @@ def safe_exists(p) -> bool:
 
 
 def safe_is_file(p) -> bool:
+    return _safe_is_file_impl(p)[0]
+
+
+def _safe_is_file_impl(p) -> tuple[bool, dict]:
+    r"""safe_is_file 内部实现, 顺带把短路径 / 长路径 / stat 三条查询的原始
+    结果收集起来. 上层判 False 时可以把 diag 打日志, 免得再回来加断点.
+
+    diag dict keys (全为字符串, 缺失表示未走到这条分支):
+      - 'short_isfile': 'True' / 'False' / 'ERR:<type>:<msg>'
+      - 'long_p'      : 长路径字符串 (若走了 to_long_path)
+      - 'long_isfile' : 同 short_isfile 三种取值 (若走了长路径)
+      - 'long_stat'   : 'OK size=<n>' / 'ERR:<type>:<msg>' (若长路径 isfile False)
+    """
+    diag: dict[str, str] = {}
+    p_str = str(p)
     try:
-        if os.path.isfile(str(p)):
-            return True
-    except OSError:
-        pass
-    long_p = to_long_path(str(p))
-    if long_p == str(p):
-        return False
+        r = os.path.isfile(p_str)
+        diag["short_isfile"] = "True" if r else "False"
+        if r:
+            return True, diag
+    except OSError as e:
+        diag["short_isfile"] = f"ERR:{type(e).__name__}:{e}"
+    long_p = to_long_path(p_str)
+    if long_p == p_str:
+        return False, diag
+    diag["long_p"] = long_p
     try:
-        return os.path.isfile(long_p)
-    except OSError:
-        return False
+        r = os.path.isfile(long_p)
+        diag["long_isfile"] = "True" if r else "False"
+        if r:
+            return True, diag
+    except OSError as e:
+        diag["long_isfile"] = f"ERR:{type(e).__name__}:{e}"
+        return False, diag
+    # 长路径 isfile 说 False, 再用 os.stat 兜一层, 有时 stat 能过 (SMB quirk)
+    try:
+        st = os.stat(long_p)
+        diag["long_stat"] = f"OK size={st.st_size}"
+        # stat 能过, 说明文件其实在 -> 认为存在
+        return True, diag
+    except OSError as e:
+        diag["long_stat"] = f"ERR:{type(e).__name__}:{e}"
+        return False, diag
 
 
 def safe_isdir(p) -> bool:
