@@ -35,6 +35,32 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
+# 长路径 / tkinter 混斜杠 helper (v0.4.61 新接入).
+# 参见 docs/windows_long_path.md; extract_frames 是 v0.4.60 前的漏网之鱼.
+from winpath_util import (
+    normalize_windows_path as _normalize_windows_path,
+    to_long_path as _to_long_path,
+    safe_stat as _safe_stat,
+    safe_unlink as _safe_unlink,
+    safe_exists as _safe_exists,
+    safe_is_file as _safe_is_file,
+    safe_mkdir as _safe_mkdir,
+    safe_read_text as _safe_read_text,
+    safe_write_text as _safe_write_text,
+    safe_glob as _safe_glob,
+    safe_os_open as _safe_os_open,
+)
+
+
+def _log_err(msg: str) -> None:
+    """stderr 打 [ERROR] 日志. 用来替换掉那些 marker/lock 静默 except: pass 的坑."""
+    try:
+        sys.stderr.write("[ERROR] " + msg + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 # stats_db 可选; 打包时 hidden-import, 缺失时不影响主流程
 try:
     import stats_db as _stats_db  # type: ignore
@@ -287,8 +313,8 @@ def _lock_payload() -> str:
 def _lock_is_stale(lock_path: Path, ttl_seconds: float) -> bool:
     """锁是否已过期（对方可能崩了 / 断网）。读不到内容也视为 stale。"""
     try:
-        content = lock_path.read_text(encoding="utf-8", errors="replace").strip()
-    except Exception:
+        content = _safe_read_text(lock_path, encoding="utf-8", errors="replace").strip()
+    except OSError:
         return True
     parts = content.split("|")
     if len(parts) < 3:
@@ -305,28 +331,34 @@ def _acquire_lock(lock_path: Path, ttl_seconds: float) -> bool:
     原子抢占锁。返回 True 表示抢到，False 表示别人正在跑。
     SMB/CIFS/NFS/本地 FS 都保证 O_CREAT|O_EXCL 的原子性。
     """
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _safe_mkdir(lock_path.parent, parents=True, exist_ok=True)
+    except OSError as e:
+        _log_err(f"锁父目录 mkdir 失败: {lock_path.parent} -> {type(e).__name__}: {e}")
+        return False
     payload = _lock_payload().encode("utf-8")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     try:
-        fd = os.open(str(lock_path), flags, 0o644)
+        fd = _safe_os_open(lock_path, flags, 0o644)
     except FileExistsError:
         # 已存在：看看是不是过期锁
         if _lock_is_stale(lock_path, ttl_seconds):
             try:
-                lock_path.unlink()
+                _safe_unlink(lock_path)
             except FileNotFoundError:
                 pass
-            except Exception:
+            except OSError as e:
+                _log_err(f"清理 stale 锁失败: {lock_path} -> {type(e).__name__}: {e}")
                 return False
             # 再抢一次；这次还失败就让给别人
             try:
-                fd = os.open(str(lock_path), flags, 0o644)
+                fd = _safe_os_open(lock_path, flags, 0o644)
             except Exception:
                 return False
         else:
             return False
-    except Exception:
+    except Exception as e:
+        _log_err(f"抢锁 os.open 异常: {lock_path} -> {type(e).__name__}: {e}")
         return False
     try:
         os.write(fd, payload)
@@ -340,11 +372,11 @@ def _acquire_lock(lock_path: Path, ttl_seconds: float) -> bool:
 
 def _release_lock(lock_path: Path) -> None:
     try:
-        lock_path.unlink()
+        _safe_unlink(lock_path)
     except FileNotFoundError:
         pass
-    except Exception:
-        pass
+    except OSError as e:
+        _log_err(f"释放锁 unlink 失败: {lock_path} -> {type(e).__name__}: {e}")
 
 
 def extract_one(
@@ -413,22 +445,25 @@ def _extract_one_impl(
     """真正的抽帧主体, 从 extract_one 拆出来纯净版, 便于外层统一计时+落库."""
     out_dir = task.out_dir
     marker_dir = task.marker_dir
-    marker_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        _safe_mkdir(marker_dir, parents=True, exist_ok=True)
+    except OSError as e:
+        return "failed", 0, f"marker_dir mkdir 失败: {type(e).__name__}: {e}"
     marker = marker_dir / "_done.marker"
     lock_path = marker_dir / _LOCK_NAME
     # 计算本次运行使用的命名 pattern；out_dir 一定存在（或即将创建），name 只用到 out_dir.name
     ffmpeg_pattern, glob_pattern = build_name_pattern(
         out_dir, name_style, name_template, name_digits,
     )
-    if skip_existing and marker.is_file():
+    if skip_existing and _safe_is_file(marker):
         # marker 存在时按当前命名规则数帧；也兜底扫一下旧的 frame_*.jpg
-        existing = list(out_dir.glob(glob_pattern))
+        existing = _safe_glob(out_dir, glob_pattern)
         if not existing and glob_pattern != "frame_*.jpg":
-            existing = list(out_dir.glob("frame_*.jpg"))
+            existing = _safe_glob(out_dir, "frame_*.jpg")
         # 老 marker 里可能写着 'done' 或 'empty'，都当已处理，直接跳过
         try:
-            content = marker.read_text(encoding="utf-8", errors="replace").strip().lower()
-        except Exception:
+            content = _safe_read_text(marker, encoding="utf-8", errors="replace").strip().lower()
+        except OSError:
             content = "done"
         if content == "empty" or len(existing) == 0:
             return "empty", 0, "跳过（已完成，历史标记为 empty / 目录中无帧）"
@@ -436,22 +471,25 @@ def _extract_one_impl(
 
     # 抢锁：多机共享盘下同一视频只能被一台机器抽。
     # 抢不到就直接返回 locked，交给其它进程处理。
-    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        _safe_mkdir(out_dir, parents=True, exist_ok=True)
+    except OSError as e:
+        return "failed", 0, f"out_dir mkdir 失败: {type(e).__name__}: {e}"
     if not _acquire_lock(lock_path, lock_ttl):
         return "locked", 0, "跳过（其他机器/进程正在抽，锁存在且未过期）"
 
     # 抢到锁之后再清理半成品（此时只有本进程会碰这个目录，安全）
     if skip_existing:
-        stale = list(out_dir.glob(glob_pattern))
+        stale = _safe_glob(out_dir, glob_pattern)
         # 若切换过命名规则，把老前缀的半成品也清掉，避免混着两套图
         if glob_pattern != "frame_*.jpg":
-            stale += list(out_dir.glob("frame_*.jpg"))
+            stale += _safe_glob(out_dir, "frame_*.jpg")
         if stale:
             for f in stale:
                 try:
-                    f.unlink()
-                except Exception:
-                    pass
+                    _safe_unlink(f)
+                except OSError as e:
+                    _log_err(f"清半成品 unlink 失败: {f} -> {type(e).__name__}: {e}")
 
     try:
         return _do_extract(
@@ -473,7 +511,9 @@ def _do_extract(
     glob_pattern: str,
 ) -> tuple[str, int, str]:
     """真正跑 ffmpeg 的部分。已在锁保护内。"""
-    out_pattern = ffmpeg_pattern
+    # ffmpeg 在 Windows 上仍走 CRT fopen, 长路径要显式 \\?\; Linux/Mac 原样返回.
+    src_arg = _to_long_path(str(task.src_path))
+    out_pattern = _to_long_path(ffmpeg_pattern)
 
     # ffmpeg 命令：
     #   -hide_banner / -loglevel error：静默
@@ -488,7 +528,7 @@ def _do_extract(
         "-hide_banner",
         "-loglevel", "error",
         "-y",
-        "-i", str(task.src_path),
+        "-i", src_arg,
         "-vf", f"fps={fps}",
         "-q:v", str(q_map),
         "-an",   # 丢弃音频
@@ -519,27 +559,27 @@ def _do_extract(
         if _is_no_frame_error(stderr_text):
             # 空目录也写 marker，防止 pipeline 下次轮询到又跑一遍
             try:
-                marker.write_text("empty", encoding="utf-8")
-            except Exception:
-                pass
+                _safe_write_text(marker, "empty", encoding="utf-8")
+            except OSError as e:
+                _log_err(f"写 empty marker 失败(rc!=0 分支): {marker} -> {type(e).__name__}: {e}")
             return "empty", 0, (
                 f"视频无可解码帧（ffmpeg rc={proc.returncode}），已记 empty 标记"
                 f"，说明：{err[:200]}"
             )
         return "failed", 0, f"ffmpeg 返回 {proc.returncode}: {err}"
 
-    frames = sorted(out_dir.glob(glob_pattern))
+    frames = sorted(_safe_glob(out_dir, glob_pattern))
     if not frames:
         # rc=0 但真的一帧没出来（比如极短视频 / fps 太低）——也算 empty，写 marker
         try:
-            marker.write_text("empty", encoding="utf-8")
-        except Exception:
-            pass
+            _safe_write_text(marker, "empty", encoding="utf-8")
+        except OSError as e:
+            _log_err(f"写 empty marker 失败(rc=0 无帧分支): {marker} -> {type(e).__name__}: {e}")
         return "empty", 0, "ffmpeg 成功退出但未产出任何帧（视频可能极短），已记 empty 标记"
     try:
-        marker.write_text("done", encoding="utf-8")
-    except Exception:
-        pass
+        _safe_write_text(marker, "done", encoding="utf-8")
+    except OSError as e:
+        _log_err(f"写 done marker 失败: {marker} -> {type(e).__name__}: {e}")
     return "ok", len(frames), "OK"
 
 
@@ -788,7 +828,7 @@ def main() -> int:
 
     print("[扫描] 正在收集视频文件...", flush=True)
     t0 = time.time()
-    args.markers_root.mkdir(parents=True, exist_ok=True)
+    _safe_mkdir(args.markers_root, parents=True, exist_ok=True)
     tasks = collect_tasks(
         args.src_root, args.dst_root, extensions, skip_dirs, args.markers_root,
     )
