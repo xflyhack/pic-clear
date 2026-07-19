@@ -17,6 +17,7 @@ import os
 import queue
 import sys
 import threading
+import uuid
 from pathlib import Path
 import tkinter as tk
 from tkinter import (
@@ -27,6 +28,12 @@ from tkinter import ttk
 
 import classify_pic
 import pipe_gui as _pg  # noqa: E402
+
+# stats_db 可选; 主流程不能因为落库失败中断
+try:
+    import stats_db as _stats_db  # type: ignore
+except Exception:  # pragma: no cover
+    _stats_db = None  # type: ignore
 from classify_pic import (
     ClassifyConfig, DEFAULT_FRONT_KEYWORDS, DEFAULT_IMAGE_EXT, run,
     BUCKET_LIVENESS, BUCKET_KEYPOINT, BUCKET_FRUNK, BUCKET_HOOD,
@@ -353,6 +360,12 @@ class ClassifyApp:
         self.stop_btn.configure(state=NORMAL)
         self._log(f"[启动] 输入={cfg.in_root}  输出={cfg.out_root}")
 
+        # 生成本次任务 task_id, 落 task_runs 快照; classify_pic 用 env 读取
+        task_id = uuid.uuid4().hex[:16]
+        self._current_task_id = task_id
+        os.environ["PICCLEAR_TASK_ID"] = task_id
+        self._record_run_snapshot(task_id, cfg)
+
         def _target():
             try:
                 run(cfg, log=self._enqueue_log, cancel=self.cancel_flag.is_set)
@@ -540,6 +553,33 @@ class ClassifyApp:
             "lock_ttl": int(self.lock_ttl_var.get()),
             "force_rerun": bool(self.force_rerun_var.get()),
         }
+
+    def _record_run_snapshot(self, task_id: str, cfg) -> None:
+        """把本次分类任务的完整 GUI 配置落 task_runs 表. 静默失败."""
+        if _stats_db is None:
+            return
+        try:
+            snap = self._dump_config()
+            snap["_task_id"] = task_id
+            snap["_in_root_norm"] = str(cfg.in_root)
+            snap["_out_root_norm"] = str(cfg.out_root)
+            try:
+                snap["_markers_root_norm"] = (
+                    str(cfg.markers_root) if cfg.markers_root else ""
+                )
+            except Exception:
+                pass
+            _stats_db.record_task_run(
+                task_id=task_id,
+                task_type="classify",
+                config=snap,
+                cmdline=None,
+                version=APP_VERSION,
+            )
+            self._log(f"[stats] task_id={task_id}")
+        except Exception as e:
+            print(f"[record_run_snapshot] {type(e).__name__}: {e}",
+                  file=sys.stderr)
 
     def _apply_config(self, cfg: dict) -> None:
         if not cfg:

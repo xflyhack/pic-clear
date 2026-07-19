@@ -26,6 +26,7 @@ from subproc_group import SubprocGroup
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -40,6 +41,12 @@ except Exception as e:
 # pipe_gui.py 会跟这个 GUI 一起被 PyInstaller 打包
 import pipe_gui as _pg  # noqa: E402
 import pipeline  # noqa: E402
+
+# stats_db 可选; 主流程不能因为落库失败中断
+try:
+    import stats_db as _stats_db  # type: ignore
+except Exception:  # pragma: no cover
+    _stats_db = None  # type: ignore
 
 
 APP_TITLE = "pic-clear 抽帧工具"
@@ -753,6 +760,13 @@ class ExtractGUI:
 
         # 启动后台线程
         self._worker_stop_flag.clear()
+        # 生成本次任务 task_id, 落一条 task_runs 快照 (完整 GUI 配置),
+        # 再通过环境变量传给 extract_frames.exe, 让每条 extract_stats 都能关联
+        task_id = uuid.uuid4().hex[:16]
+        self._current_task_id = task_id
+        os.environ["PICCLEAR_TASK_ID"] = task_id
+        self._record_run_snapshot(task_id, sub_pairs, exe, name_style,
+                                  name_template, name_digits)
         self._worker_thread = threading.Thread(
             target=self._worker_run, args=(exe, sub_pairs), daemon=True)
         self._worker_thread.start()
@@ -1031,6 +1045,39 @@ class ExtractGUI:
         if "hide_close_hint" in old:
             cfg["hide_close_hint"] = old["hide_close_hint"]
         return cfg
+
+    def _record_run_snapshot(
+        self, task_id: str,
+        sub_pairs: list[tuple[Path, Path, Path]],
+        exe: str,
+        name_style: str, name_template: str, name_digits: int,
+    ) -> None:
+        """把本次抽帧任务的完整 GUI 配置落 task_runs 表. 静默失败."""
+        if _stats_db is None:
+            return
+        try:
+            cfg = self._dump_cfg()
+            # 额外补几个关键字段, 方便日后排查
+            cfg["_task_id"] = task_id
+            cfg["_exe"] = exe
+            cfg["_sub_pairs"] = [
+                {"sub_src": str(s), "sub_dst": str(d), "sub_markers": str(m)}
+                for s, d, m in sub_pairs
+            ]
+            cfg["_effective_name_style"] = name_style
+            cfg["_effective_name_template"] = name_template
+            cfg["_effective_name_digits"] = name_digits
+            _stats_db.record_task_run(
+                task_id=task_id,
+                task_type="extract",
+                config=cfg,
+                cmdline=None,
+                version=APP_VERSION,
+            )
+            self._log(f"[stats] task_id={task_id}")
+        except Exception as e:
+            print(f"[record_run_snapshot] {type(e).__name__}: {e}",
+                  file=sys.stderr)
 
     # ---------- 关闭 / 托盘 ----------
 

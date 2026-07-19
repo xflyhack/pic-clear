@@ -133,6 +133,22 @@ CREATE INDEX IF NOT EXISTS idx_classify_task   ON classify_stats(task_id);
 CREATE INDEX IF NOT EXISTS idx_classify_camera ON classify_stats(camera_dir);
 """
 
+_DDL_TASK_RUNS = """
+CREATE TABLE IF NOT EXISTS task_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT    NOT NULL,       -- 记录时间
+    host         TEXT    NOT NULL,       -- 机器名
+    task_id      TEXT    NOT NULL,       -- 任务 uuid (16 位十六进制)
+    task_type    TEXT    NOT NULL,       -- extract / dedupe / classify
+    version      TEXT,                   -- GUI 版本号
+    cmdline      TEXT,                   -- 完整命令行 (若有)
+    config_json  TEXT                    -- GUI 侧收集的完整配置 JSON
+);
+CREATE INDEX IF NOT EXISTS idx_task_runs_ts       ON task_runs(ts);
+CREATE INDEX IF NOT EXISTS idx_task_runs_task_id  ON task_runs(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_runs_type     ON task_runs(task_type);
+"""
+
 _DDL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
@@ -146,6 +162,7 @@ def _init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL_EXTRACT)
     conn.executescript(_DDL_DEDUPE)
     conn.executescript(_DDL_CLASSIFY)
+    conn.executescript(_DDL_TASK_RUNS)
     cur = conn.execute("SELECT COUNT(1) FROM schema_version")
     if cur.fetchone()[0] == 0:
         conn.execute(
@@ -354,6 +371,40 @@ def record_classify(
         _log_silent("record_classify", e)
 
 
+def record_task_run(
+    *,
+    task_id: str,
+    task_type: str,
+    config: dict | None = None,
+    cmdline: str | None = None,
+    version: str | None = None,
+    db_path: str | os.PathLike | None = None,
+) -> None:
+    """记录一次 GUI 任务的完整启动配置 (每次点开始 = 一条). 静默失败.
+
+    task_type: 'extract' / 'dedupe' / 'classify'
+    config:    GUI 收集的完整配置 dict, 会 json.dumps 存起来
+    cmdline:   完整命令行 (可选, 有则存)
+    """
+    try:
+        cfg_json = json.dumps(config or {}, ensure_ascii=False, default=str)
+        target = Path(db_path) if db_path else default_db_path()
+        _insert_with_retry(
+            target,
+            """
+            INSERT INTO task_runs(
+                ts, host, task_id, task_type, version, cmdline, config_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _now_str(), _safe_hostname(), task_id, task_type,
+                version, cmdline, cfg_json,
+            ),
+        )
+    except Exception as e:
+        _log_silent("record_task_run", e)
+
+
 # ---------------------------------------------------------------- 查询辅助
 
 def iter_db_files(scan_dir: str | os.PathLike | None = None) -> list[Path]:
@@ -398,6 +449,34 @@ def query_all(
         except Exception as e:
             print(f"[stats_db] WARN query {f}: {e}", file=sys.stderr)
     return rows
+
+
+def query_task_run(
+    db_files: list[Path], task_id: str,
+) -> dict | None:
+    """按 task_id 找一条 task_runs (聚合多机 db), 找不到返回 None."""
+    if not task_id:
+        return None
+    for f in db_files:
+        try:
+            conn = _open(f)
+            try:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute(
+                    "SELECT * FROM task_runs WHERE task_id = ? "
+                    "ORDER BY ts DESC LIMIT 1", (task_id,),
+                )
+                r = cur.fetchone()
+                if r:
+                    d = dict(r)
+                    d["_db_file"] = str(f)
+                    return d
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"[stats_db] WARN query_task_run {f}: {e}",
+                  file=sys.stderr)
+    return None
 
 
 if __name__ == "__main__":
