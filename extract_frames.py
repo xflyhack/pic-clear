@@ -177,6 +177,57 @@ def resolve_ffmpeg(user_path: str | None) -> Path | None:
     return None
 
 
+def resolve_ffprobe(ffmpeg: Path | None) -> Path | None:
+    """v0.4.83: ffprobe 一般跟 ffmpeg 同目录 (Windows ffmpeg release 打包如此).
+    找不到就返回 None, 上层用不到 duration 时可以静默跳过.
+    """
+    candidates: list[Path] = []
+    if ffmpeg is not None:
+        parent = ffmpeg.parent
+        candidates.append(parent / "ffprobe.exe")
+        candidates.append(parent / "ffprobe")
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / "ffprobe.exe")
+        candidates.append(Path(sys.executable).resolve().parent / "ffprobe")
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "ffprobe.exe")
+        candidates.append(Path(meipass) / "ffprobe")
+    for c in candidates:
+        if c.is_file():
+            return c
+    which = shutil.which("ffprobe")
+    if which:
+        return Path(which)
+    return None
+
+
+def probe_video_duration(ffprobe: Path | None, video_path: Path) -> float | None:
+    r"""跑 ffprobe 拿视频时长 (秒). 失败返回 None.
+
+    v0.4.83: 日志里 '视频总时长' 用. 每个视频多一次 ffprobe 调用 (~100-300ms),
+    在 SMB 深路径上更慢, 但对'抽帧多久 / 视频多长'一目了然值得.
+    """
+    if ffprobe is None:
+        return None
+    src_arg = _to_long_path(str(video_path))
+    try:
+        result = subprocess.run(
+            [str(ffprobe), "-v", "error",
+             "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1",
+             src_arg],
+            capture_output=True, text=True, timeout=15,
+            encoding="utf-8", errors="replace",
+        )
+        s = (result.stdout or "").strip()
+        if not s:
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+
 # ------------------------------ 目录扫描 ------------------------------------
 
 @dataclass
@@ -1013,6 +1064,9 @@ def main() -> int:
         )
         return 2
 
+    # v0.4.83: ffprobe 可选, 找不到就静默降级 (日志少打一行 '视频总时长').
+    ffprobe = resolve_ffprobe(ffmpeg)
+
     extensions = {
         e.strip().lower().lstrip(".")
         for e in args.ext.split(",") if e.strip()
@@ -1153,13 +1207,21 @@ def main() -> int:
         tag = {"ok": "✓", "empty": "⊘", "locked": "◇", "failed": "✗"}.get(stage, "?")
         # v0.4.80: 打完整 src_path (含 UNC 头) 而不是 rel_path,
         # 用双引号包起来, 用户能直接复制粘贴到资源管理器打开.
-        # 目录名里可能有空格 (上游给的目录 ' 04_yintian_...' 开头带空格),
-        # 引号内保持原样不转义, 复制过去即可用.
+        # v0.4.83: 改成 3 行树状结构, 便于长路径场景阅读:
+        #     [第 N 个/共 M 个] ✓
+        #         源视频: "..."   视频总时长=X.Xs
+        #         结果  : 已抽帧数=... 本次耗时=... (已运行 ..., 预计剩余 ~...)  OK
         _full_src = f'"{task.src_path}"'
+        # 视频总时长: 只有非跳过场景才跑 ffprobe (跳过时已知不会抽帧, 也不用探测)
+        _dur = None
+        if stage in ("ok", "failed"):
+            _dur = probe_video_duration(ffprobe, task.src_path)
+        _dur_str = f"视频总时长={_dur:.1f}s" if _dur else "视频总时长=未知"
         with print_lock:
             print(
-                f"[第 {idx} 个/共 {len(tasks)} 个] {tag} {_full_src}  "
-                f"已抽帧数={n} 本次耗时={dt:.1f}s  "
+                f"[第 {idx} 个/共 {len(tasks)} 个] {tag}\n"
+                f"    源视频: {_full_src}   {_dur_str}\n"
+                f"    结果  : 已抽帧数={n} 本次耗时={dt:.1f}s  "
                 f"(已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)})  {msg}",
                 flush=True,
             )
@@ -1174,9 +1236,13 @@ def main() -> int:
             rate = (i - 1) / elapsed if elapsed > 0 else 0
             remain = (len(tasks) - i + 1) / rate if rate > 0 else float("nan")
             _full_src = f'"{task.src_path}"'
+            # v0.4.83: 单线程分支的开头 header 也走同款 3 行结构.
+            _dur = probe_video_duration(ffprobe, task.src_path)
+            _dur_str = f"视频总时长={_dur:.1f}s" if _dur else "视频总时长=未知"
             print(
-                f"\n[第 {i} 个/共 {len(tasks)} 个] {_full_src}   "
-                f"(已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)})",
+                f"\n[第 {i} 个/共 {len(tasks)} 个]\n"
+                f"    源视频: {_full_src}   {_dur_str}\n"
+                f"    进度  : (已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)})",
                 flush=True,
             )
             print(f'    → "{task.out_dir}"', flush=True)
