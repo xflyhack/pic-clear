@@ -281,6 +281,13 @@ class ExtractGUI:
         self._build_ui()
         self.root.after(200, self._drain_log_queue)
 
+        # v0.4.72: 启动即打印一行环境画像到日志
+        try:
+            from env_probe import probe_and_log
+            self.root.after(100, lambda: probe_and_log(self._log))
+        except Exception as _e:
+            self._log(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}")
+
         # 环境预检
         self.root.after(300, self._check_environment)
         # 启动后按当前配置 (视频源目录 + markers 根) 自动预扫一次进度,

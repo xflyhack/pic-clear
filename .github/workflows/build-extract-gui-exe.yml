@@ -47,6 +47,7 @@ jobs:
           copy pipe_gui.py build_extract_gui\
           copy extract_gui.py build_extract_gui\
           copy winpath_util.py build_extract_gui\
+          copy env_probe.py build_extract_gui\
           copy subproc_group.py build_extract_gui\
           copy licensing.py build_extract_gui\
           copy otp_utils.py build_extract_gui\
@@ -82,6 +83,7 @@ jobs:
             --hidden-import _version ^
             --hidden-import subproc_group ^
             --hidden-import winpath_util ^
+            --hidden-import env_probe ^
             --hidden-import json ^
             --hidden-import base64 ^
             --hidden-import hashlib ^

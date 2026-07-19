@@ -1004,6 +1004,12 @@ def main() -> int:
     print(f"  markers   : {args.markers_root}")
     print(f"  命名规则  : {name_style}  模板={_resolve_template(name_style, name_template)!r}  位数={name_digits}")
     print(f"  hostname  : {_HOSTNAME}")
+    # v0.4.72: 打一行环境画像到 stdout, 让日志开头就有环境证据
+    try:
+        from env_probe import probe_and_log
+        probe_and_log(lambda s: print(s, flush=True))
+    except Exception as _e:
+        print(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}", flush=True)
     print("=" * 60)
 
     print("[扫描] 正在收集视频文件...", flush=True)

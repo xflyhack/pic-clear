@@ -41,6 +41,7 @@ jobs:
           mkdir build_diag_pic
           copy diag_pic.py build_diag_pic\
           copy winpath_util.py build_diag_pic\
+          copy env_probe.py build_diag_pic\
           copy _version.py build_diag_pic\
         shell: cmd
 
@@ -52,6 +53,7 @@ jobs:
             --add-data "..\icon.ico;." ^
             --hidden-import _version ^
             --hidden-import winpath_util ^
+            --hidden-import env_probe ^
             --hidden-import tkinter ^
             --hidden-import tkinter.ttk ^
             --hidden-import tkinter.filedialog ^

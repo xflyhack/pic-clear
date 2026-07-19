@@ -408,6 +408,44 @@ def _safe_is_file_impl(p) -> tuple[bool, dict]:
     diag["find_first"] = f"{status} {detail}"
     if status == "HIT":
         return True, diag
+
+    # v0.4.72: Samba + Windows SMB Client 缓存假 miss 兜底.
+    # 现象: Samba 服务端不发 SMB Change Notify, Windows 客户端只能靠
+    # DirectoryCacheLifetime (默认 10 秒) 缓存过期. 抽帧刚写完 marker 立刻查
+    # 隔壁 marker, 会读到 10 秒前的"空目录"缓存 -> 假 miss -> 视频被重抽.
+    # 只在 env_probe 判定 "should_do_samba_retry" 时才 sleep, 避免本地盘 / Windows Server
+    # 环境无谓浪费.
+    try:
+        from env_probe import should_do_samba_retry, samba_retry_wait_secs
+        if should_do_samba_retry():
+            wait_s = samba_retry_wait_secs()
+            if wait_s > 0:
+                import time as _time
+                _time.sleep(wait_s)
+                # 复查最有希望的三条 (isfile 短/长 + FindFirstFile), listdir 不再重跑
+                # (10 秒后 SMB 缓存已过期, 短路径 isfile 大概率就 True 了)
+                try:
+                    if os.path.isfile(p_str):
+                        diag["retry_short_isfile"] = "True"
+                        return True, diag
+                    diag["retry_short_isfile"] = "False"
+                except OSError as e:
+                    diag["retry_short_isfile"] = f"ERR:{type(e).__name__}:{e}"
+                try:
+                    if os.path.isfile(long_p):
+                        diag["retry_long_isfile"] = "True"
+                        return True, diag
+                    diag["retry_long_isfile"] = "False"
+                except OSError as e:
+                    diag["retry_long_isfile"] = f"ERR:{type(e).__name__}:{e}"
+                status2, detail2 = _find_first_file_w(long_p)
+                diag["retry_find_first"] = f"{status2} {detail2}"
+                if status2 == "HIT":
+                    return True, diag
+    except Exception as e:
+        # env_probe 加载失败: 老版本兼容, 不影响原判定
+        diag["retry_skipped"] = f"{type(e).__name__}:{e}"
+
     return False, diag
 
 
