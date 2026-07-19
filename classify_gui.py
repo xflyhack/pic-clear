@@ -118,6 +118,10 @@ class ClassifyApp:
         self.jobs_var = IntVar(value=1)
         self.lock_ttl_var = IntVar(value=900)
         self.force_rerun_var = BooleanVar(value=False)
+        # v0.4.56 常驻循环 & 空转间隔
+        self.scan_interval_var = IntVar(value=10)
+        self._loop_thread: "threading.Thread | None" = None
+        self._loop_stop_event = threading.Event()
         # 每桶阈值
         self.bucket_thres_vars: dict[str, DoubleVar] = {
             b: DoubleVar(value=0.75) for b in BUCKET_ORDER
@@ -265,11 +269,22 @@ class ClassifyApp:
             foreground="#888",
         ).grid(row=1, column=2, columnspan=3, sticky="w", **pad)
 
+        ttk.Label(conc, text="扫描间隔(s)").grid(row=2, column=0, sticky="e", **pad)
+        ttk.Spinbox(
+            conc, from_=2, to=3600, increment=1, width=8,
+            textvariable=self.scan_interval_var,
+        ).grid(row=2, column=1, sticky="w", **pad)
+        ttk.Label(
+            conc,
+            text="常驻模式：本轮无待处理目录时，间隔多久重新扫描一次",
+            foreground="#888",
+        ).grid(row=2, column=2, columnspan=3, sticky="w", **pad)
+
         ttk.Checkbutton(
             conc,
             text="强制重跑（忽略 _classify_done.marker）",
             variable=self.force_rerun_var,
-        ).grid(row=2, column=0, columnspan=4, sticky="w", **pad)
+        ).grid(row=3, column=0, columnspan=4, sticky="w", **pad)
 
         # 按钮
         btn = ttk.Frame(outer)
@@ -346,18 +361,26 @@ class ClassifyApp:
         threading.Thread(target=_target, daemon=True).start()
 
     def _start(self) -> None:
-        if self.worker and self.worker.is_alive():
+        # v0.4.56 常驻循环: 点开始 -> 后台线程无限循环 (扫描 + 处理 + 空转 sleep)
+        if self._loop_thread and self._loop_thread.is_alive():
+            messagebox.showinfo(APP_TITLE, "已经在跑了，请先点停止。")
             return
         try:
             cfg = self._build_config()
         except Exception as e:
             messagebox.showerror(APP_TITLE, f"参数错误: {e}")
             return
+        # markers_root 强制必填 (_build_config 已校验, 这里再兜一次防未来变更)
+        if not str(cfg.markers_root or "").strip():
+            messagebox.showerror(APP_TITLE, "Marker 根目录必选")
+            return
 
         self.cancel_flag.clear()
+        self._loop_stop_event.clear()
         self._persist_config()   # 每次点开始都存一次，防意外崩溃丢配置
         self.start_btn.configure(state=DISABLED)
         self.stop_btn.configure(state=NORMAL)
+        self._log("[启动] 常驻模式：不点停止会一直循环扫描 + 处理")
         self._log(f"[启动] 输入={cfg.in_root}  输出={cfg.out_root}")
 
         # 生成本次任务 task_id, 落 task_runs 快照; classify_pic 用 env 读取
@@ -367,21 +390,54 @@ class ClassifyApp:
         self._record_run_snapshot(task_id, cfg)
 
         def _target():
+            round_no = 0
             try:
-                run(cfg, log=self._enqueue_log, cancel=self.cancel_flag.is_set)
-            except Exception as e:
-                self._enqueue_log(f"[FATAL] {e}")
+                while not self._loop_stop_event.is_set():
+                    round_no += 1
+                    self._enqueue_log(f"[扫描] 第 {round_no} 轮开始")
+                    try:
+                        stats = run(
+                            cfg,
+                            log=self._enqueue_log,
+                            cancel=lambda: self.cancel_flag.is_set() or self._loop_stop_event.is_set(),
+                        )
+                        scanned = int(getattr(stats, "scanned", 0) or 0)
+                    except Exception as e:
+                        self._enqueue_log(f"[异常] {type(e).__name__}: {e}")
+                        scanned = 0
+
+                    if self._loop_stop_event.is_set():
+                        break
+
+                    if scanned > 0:
+                        # 本轮真的干活了, 立刻回头继续扫
+                        self._enqueue_log(f"[本轮完成] 处理 {scanned} 张，回头继续扫描")
+                        continue
+
+                    # 空转
+                    interval = max(2, int(self.scan_interval_var.get() or 10))
+                    self._enqueue_log(f"[空转] 未发现待处理目录，{interval}s 后重试")
+                    if self._loop_stop_event.wait(interval):
+                        break
             finally:
+                self._enqueue_log("[结束] 主循环已退出")
                 self._enqueue_log("__DONE__")
 
-        self.worker = threading.Thread(target=_target, daemon=True)
-        self.worker.start()
+        self._loop_thread = threading.Thread(
+            target=_target, daemon=True, name="classify-loop"
+        )
+        self.worker = self._loop_thread  # 兼容 _drain_log 里的语义
+        self._loop_thread.start()
 
     def _stop(self) -> None:
-        if not (self.worker and self.worker.is_alive()):
+        if not (self._loop_thread and self._loop_thread.is_alive()):
             return
+        if not messagebox.askyesno(APP_TITLE,
+                                   "确定要停止吗？当前正在处理的图片会跑完再退出。"):
+            return
+        self._loop_stop_event.set()
         self.cancel_flag.set()
-        self._log("[停止] 请求已发送，等当前图片处理完…")
+        self._log("[停止] 已请求停止，等当前批次跑完就退出")
 
     def _build_config(self) -> ClassifyConfig:
         in_root = self.in_var.get().strip()
@@ -566,6 +622,7 @@ class ClassifyApp:
             "jobs": int(self.jobs_var.get()),
             "lock_ttl": int(self.lock_ttl_var.get()),
             "force_rerun": bool(self.force_rerun_var.get()),
+            "scan_interval": int(self.scan_interval_var.get()),
         }
 
     def _record_run_snapshot(self, task_id: str, cfg) -> None:
@@ -623,6 +680,7 @@ class ClassifyApp:
         _set(self.jobs_var, "jobs", int)
         _set(self.lock_ttl_var, "lock_ttl", int)
         _set(self.force_rerun_var, "force_rerun", bool)
+        _set(self.scan_interval_var, "scan_interval", int)
         thres = cfg.get("bucket_thres") or {}
         for b, v in self.bucket_thres_vars.items():
             if b in thres:
