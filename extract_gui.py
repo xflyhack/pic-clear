@@ -21,6 +21,7 @@ import json
 import os
 import queue
 import re
+from winpath_util import to_long_path as _to_long_path
 import subprocess
 from subproc_group import SubprocGroup
 import sys
@@ -164,15 +165,30 @@ def _list_videos(root: Path) -> list[Path]:
 
 
 def _count_done_markers(markers_root: Path) -> int:
-    """数一下 markers_root 下已存在的 _done.marker 数量.
+    r"""数一下 markers_root 下已存在的 _done.marker 数量.
 
     extract_frames 里每个视频对应一个 <markers_root>/.../<视频stem>/_done.marker,
     无论内容是 'done' 还是 'empty' 都表示这个视频跑过了, 都算已完成.
+
+    v0.4.65: 深路径 (UNC + 12 层) Windows scandir 会 silently skip 部分子目录,
+    导致 rglob 数出的结果每次不同 (堡垒机实测同一目录连着数 113 / 65).
+    改成先给根目录套 \\?\ 前缀再 rglob, 让 scandir 走 NT namespace, 稳定得多.
     """
-    if not markers_root or not markers_root.is_dir():
+    if not markers_root:
         return 0
+    root_str = str(markers_root)
+    if not Path(root_str).is_dir():
+        # 短路径可能因长度 fail, 试一下长路径 is_dir
+        long_root = _to_long_path(root_str)
+        if long_root == root_str or not Path(long_root).is_dir():
+            return 0
+        walk_root = Path(long_root)
+    else:
+        # 无论短路径通不通, 递归时统一走长路径, 避免 scandir 走深了才 fail
+        long_root = _to_long_path(root_str)
+        walk_root = Path(long_root) if long_root != root_str else Path(root_str)
     try:
-        return sum(1 for _ in markers_root.rglob("_done.marker"))
+        return sum(1 for _ in walk_root.rglob("_done.marker"))
     except Exception:
         return 0
 
