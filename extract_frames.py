@@ -1119,9 +1119,14 @@ def main() -> int:
         rate = idx / elapsed if elapsed > 0 else 0
         remain = (len(tasks) - idx) / rate if rate > 0 else float("nan")
         tag = {"ok": "✓", "empty": "⊘", "locked": "◇", "failed": "✗"}.get(stage, "?")
+        # v0.4.80: 打完整 src_path (含 UNC 头) 而不是 rel_path,
+        # 用双引号包起来, 用户能直接复制粘贴到资源管理器打开.
+        # 目录名里可能有空格 (上游给的目录 ' 04_yintian_...' 开头带空格),
+        # 引号内保持原样不转义, 复制过去即可用.
+        _full_src = f'"{task.src_path}"'
         with print_lock:
             print(
-                f"[第 {idx} 个/共 {len(tasks)} 个] {tag} {task.rel_path}  "
+                f"[第 {idx} 个/共 {len(tasks)} 个] {tag} {_full_src}  "
                 f"已抽帧数={n} 本次耗时={dt:.1f}s  "
                 f"(已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)})  {msg}",
                 flush=True,
@@ -1136,12 +1141,13 @@ def main() -> int:
             elapsed = time.time() - t_start
             rate = (i - 1) / elapsed if elapsed > 0 else 0
             remain = (len(tasks) - i + 1) / rate if rate > 0 else float("nan")
+            _full_src = f'"{task.src_path}"'
             print(
-                f"\n[第 {i} 个/共 {len(tasks)} 个] {task.rel_path}   "
+                f"\n[第 {i} 个/共 {len(tasks)} 个] {_full_src}   "
                 f"(已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)})",
                 flush=True,
             )
-            print(f"    → {task.out_dir}", flush=True)
+            print(f'    → "{task.out_dir}"', flush=True)
             print("    ...抽帧中，请稍候（ffmpeg 静默运行，视频越长等得越久）", flush=True)
             try:
                 stage, n, msg = extract_one(
