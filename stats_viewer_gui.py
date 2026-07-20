@@ -306,6 +306,11 @@ class StatsViewerApp:
            self._show_row_detail("分类记录", row, "classify"))
         self._classify_tv = tv
 
+        # v0.4.99: 分类 footer 汇总, 跟抽帧/去重 footer 一致的位置和样式.
+        self._classify_footer_var = tk.StringVar(value="")
+        ttk.Label(bot, textvariable=self._classify_footer_var,
+                  anchor="w", padding=(6, 4)).pack(side="bottom", fill="x")
+
     # ---------- Tab: 每日趋势
 
     def _build_trend_tab(self) -> None:
@@ -849,6 +854,37 @@ class StatsViewerApp:
             ("elapsed_sec",
              lambda r: f"{(r.get('elapsed_sec') or 0):.1f}"),
         ])
+
+        # v0.4.99: footer 汇总. classify_final PK=(camera_dir, host), 天然按
+        # camera 目录去重. len(rows) 就是涉及 camera 目录数. 累加 scanned /
+        # copied_bucket / errors / elapsed_sec, 顺带把桶分布 (bucket_json) 合并.
+        _mode = self.view_mode_var.get() or "最终"
+        _cams = len(rows)
+        _scanned = 0
+        _copied = 0
+        _errors = 0
+        _elapsed = 0.0
+        _bucket_sum: dict[str, int] = {}
+        for r in rows:
+            _scanned += int(r.get("scanned") or 0)
+            _copied += int(r.get("copied_bucket") or 0)
+            _errors += int(r.get("errors") or 0)
+            _elapsed += float(r.get("elapsed_sec") or 0)
+            try:
+                d = json.loads(r.get("bucket_json") or "{}")
+                for k, v in d.items():
+                    _bucket_sum[k] = _bucket_sum.get(k, 0) + int(v or 0)
+            except Exception:
+                pass
+        # 桶分布拼成 "a=10 b=20 c=5" 形式, 空的省略
+        _bkt_str = " ".join(f"{k}={v}" for k, v in _bucket_sum.items() if v)
+        self._classify_footer_var.set(
+            f"[{_mode}] 统计数据: 涉及 {_cams} 个 camera 目录, "
+            f"扫描 {_scanned} 张, 复制到桶 {_copied} 张, "
+            f"出错 {_errors} 个, "
+            f"总耗时: {_fmt_duration_human(_elapsed)}"
+            + (f"  |  桶分布: {_bkt_str}" if _bkt_str else "")
+        )
 
         # 桶柱状图: 6 个桶的总数
         bucket_totals: dict[str, int] = {}
