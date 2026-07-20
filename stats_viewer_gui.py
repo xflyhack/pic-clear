@@ -70,7 +70,7 @@ def _read_version() -> str:
         return "dev"
 
 
-APP_TITLE = f"pic-clear 统计查看器  {_read_version()}"
+APP_TITLE = f"数旗_数据分析工具  {_read_version()}"
 
 
 # ------------------------------------------------ 主界面
@@ -118,7 +118,7 @@ class StatsViewerApp:
             tooltip=TOOLTIP_STATS_VIEWER,
             fallback_glyph=((39, 174, 96, 255), "ST"),
             hotkey_default=HOTKEY_DEFAULT,
-            app_title="pic-clear 统计工具",
+            app_title="数旗_数据分析工具",
             ui_scale=float(getattr(root, "__ui_scale__", 1.0)),
         )
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)

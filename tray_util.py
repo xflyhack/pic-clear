@@ -365,7 +365,7 @@ class TrayController:
 
 
 # 4 个 GUI 的 tooltip 常量, 供导入方使用 (v0.4.88 用户明确要求, 去掉 pic-clear 前缀).
-TOOLTIP_EXTRACT = "切帧工具"
-TOOLTIP_DEDUPE = "去重工具"
-TOOLTIP_CLASSIFY = "二次过滤工具"
-TOOLTIP_STATS_VIEWER = "统计工具"
+TOOLTIP_EXTRACT = "数旗_视频抽帧工具"
+TOOLTIP_DEDUPE = "数旗_图片去重工具"
+TOOLTIP_CLASSIFY = "数旗_图片分类工具"
+TOOLTIP_STATS_VIEWER = "数旗_数据分析工具"

@@ -47,7 +47,7 @@ except Exception:  # pragma: no cover
     _stats_db = None  # type: ignore
 
 
-APP_TITLE = "pic-clear 去重工具"
+APP_TITLE = "数旗_图片去重工具"
 # 版本号: CI 会在打包前覆盖 _version.py 里的 VERSION 成 tag 名 (如 v0.4.30);
 # 本地跑 py 时 fallback 到 'dev', 找不到 _version.py 也能启动.
 try:
@@ -93,7 +93,7 @@ def _save_config(cfg: dict) -> None:
 
 def _find_dedupe_exe() -> str | None:
     try:
-        return pipeline.resolve_worker_exe("dedupe_pic")
+        return pipeline.resolve_worker_exe("sqDedupe")
     except Exception:
         return None
 
@@ -403,7 +403,7 @@ class DedupeGUI:
                 _core_probe(
                     self._log,
                     exe_finder=_find_dedupe_exe,
-                    exe_name="dedupe_pic.exe",
+                    exe_name="sqDedupe.exe",
                     gui_version=APP_VERSION,
                 )
             self.root.after(200, _run_core_probe)
@@ -503,7 +503,7 @@ class DedupeGUI:
         ttk.Label(row, text="并发数：", width=14).pack(side="left")
         ttk.Spinbox(row, from_=1, to=16, increment=1, width=8,
                     textvariable=self._dedupe_jobs_var).pack(side="left")
-        ttk.Label(row, text="  同时跑多少个 dedupe_pic.exe，默认 1；"
+        ttk.Label(row, text="  同时跑多少个 sqDedupe.exe，默认 1；"
                             "多机共享盘并发也安全",
                   foreground="#666").pack(side="left", padx=8)
 
@@ -767,7 +767,7 @@ class DedupeGUI:
                   foreground="#888").pack(padx=10, pady=8, anchor="w")
 
         # v0.4.48 内核版本 (走共享 helper, 与 extract_gui / classify_gui 风格一致)
-        self._about_core_frame = ttk.LabelFrame(page, text="内核版本 (dedupe_pic.exe)")
+        self._about_core_frame = ttk.LabelFrame(page, text="内核版本 (sqDedupe.exe)")
         self._about_core_frame.pack(fill="x", padx=12, pady=8)
         self.root.after(400, self._refresh_core_version)
 
@@ -793,7 +793,7 @@ class DedupeGUI:
             self.root, self._about_core_frame,
             label_text="内核版本",
             exe_finder=_find_dedupe_exe,
-            missing_hint="请把 dedupe_pic.exe 放到本 GUI 同目录 / System32 / PATH 后重启",
+            missing_hint="请把 sqDedupe.exe 放到本 GUI 同目录 / System32 / PATH 后重启",
         )
 
     def _browse_target(self):
@@ -821,7 +821,7 @@ class DedupeGUI:
         if not exe:
             messagebox.showwarning(
                 "环境缺失",
-                "未找到 dedupe_pic.exe。\n\n"
+                "未找到 sqDedupe.exe。\n\n"
                 "请把它放到本 GUI 同目录 或 C:\\Windows\\System32\\ 下。")
 
     # ---------- 运行 ----------
@@ -841,7 +841,7 @@ class DedupeGUI:
         if not exe:
             messagebox.showerror(
                 "环境缺失",
-                "未找到 dedupe_pic.exe，请放到本 GUI 同目录或 System32 后重试。")
+                "未找到 sqDedupe.exe，请放到本 GUI 同目录或 System32 后重试。")
             return
         mr = self._markers_root_var.get().strip()
         if not mr:

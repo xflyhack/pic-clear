@@ -83,7 +83,7 @@ jobs:
       - name: Build single-file exe (embed ffmpeg + pyarmor runtime)
         run: |
           cd build_extract
-          pyinstaller --onefile --console --name extract_frames ^
+          pyinstaller --onefile --console --name sqFrameGrab ^
             --icon "..\icon.ico" ^
             --add-binary "..\ffmpeg.exe;." ^
             --add-binary "..\ffprobe.exe;." ^
@@ -118,7 +118,7 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: |
           chcp 65001
-          build_extract\dist\extract_frames.exe --fingerprint
+          build_extract\dist\sqFrameGrab.exe --fingerprint
         shell: cmd
 
       - name: Smoke test (no license → must exit 3)
@@ -126,7 +126,7 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: |
           chcp 65001
-          build_extract\dist\extract_frames.exe D:\ D:\out
+          build_extract\dist\sqFrameGrab.exe D:\ D:\out
           set RC=%ERRORLEVEL%
           if "%RC%"=="3" (
             echo Smoke test PASS: got expected exit code 3
@@ -142,13 +142,13 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: extract_frames-windows-exe
-          path: build_extract/dist/extract_frames.exe
+          name: sqFrameGrab-windows-exe
+          path: build_extract/dist/sqFrameGrab.exe
           if-no-files-found: error
 
       - name: Attach exe to GitHub Release (only on tag push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build_extract/dist/extract_frames.exe
+          files: build_extract/dist/sqFrameGrab.exe
           fail_on_unmatched_files: true

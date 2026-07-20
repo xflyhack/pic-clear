@@ -43,7 +43,7 @@ from classify_pic import (
 )
 
 
-APP_TITLE = "pic-clear 二次分类工具"
+APP_TITLE = "数旗_图片分类工具"
 HOTKEY_DEFAULT = "ctrl+alt+f"  # v0.4.88: filter 二次过滤工具, 全局呼出主窗口
 # 版本号: CI 会在打包前覆盖 _version.py 里的 VERSION 成 tag 名 (如 v0.4.30);
 # 本地跑 py 时 fallback 到 'dev', 找不到 _version.py 也能启动.

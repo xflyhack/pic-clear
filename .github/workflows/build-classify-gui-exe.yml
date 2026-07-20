@@ -89,7 +89,7 @@ jobs:
 
       - name: Build single-file exe (windowed, no console)
         run: |
-          pyinstaller --onefile --windowed --name classify_gui ^
+          pyinstaller --onefile --windowed --name sqClassifyGui ^
             --icon "icon.ico" ^
             --add-data "icon.ico;." ^
             --add-data "icon.png;." ^
@@ -152,13 +152,13 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: classify-gui-windows-exe
-          path: dist/classify_gui.exe
+          name: sqClassifyGui-windows-exe
+          path: dist/sqClassifyGui.exe
           if-no-files-found: error
 
       - name: Attach exe to GitHub Release (only on tag push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/classify_gui.exe
+          files: dist/sqClassifyGui.exe
           fail_on_unmatched_files: true

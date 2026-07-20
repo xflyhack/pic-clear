@@ -78,7 +78,7 @@ jobs:
       - name: Build single-file exe (windowed，无控制台黑窗)
         run: |
           cd build_dedupe_gui
-          pyinstaller --onefile --windowed --name dedupe_gui ^
+          pyinstaller --onefile --windowed --name sqDedupeGui ^
             --icon "..\icon.ico" ^
             --add-data "..\icon.ico;." ^
             --add-data "..\icon.png;." ^
@@ -131,13 +131,13 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dedupe-gui-windows-exe
-          path: build_dedupe_gui/dist/dedupe_gui.exe
+          name: sqDedupeGui-windows-exe
+          path: build_dedupe_gui/dist/sqDedupeGui.exe
           if-no-files-found: error
 
       - name: Attach exe to GitHub Release (only on tag push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build_dedupe_gui/dist/dedupe_gui.exe
+          files: build_dedupe_gui/dist/sqDedupeGui.exe
           fail_on_unmatched_files: true

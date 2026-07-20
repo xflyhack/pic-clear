@@ -63,7 +63,7 @@ jobs:
       - name: Build single-file exe (windowed)
         run: |
           cd build_stats_viewer
-          pyinstaller --onefile --windowed --name stats_viewer_gui ^
+          pyinstaller --onefile --windowed --name sqStatsViewerGui ^
             --icon "..\icon.ico" ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import _version ^
@@ -94,13 +94,13 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: stats-viewer-gui-windows-exe
-          path: build_stats_viewer/dist/stats_viewer_gui.exe
+          name: sqStatsViewerGui-windows-exe
+          path: build_stats_viewer/dist/sqStatsViewerGui.exe
           if-no-files-found: error
 
       - name: Attach exe to GitHub Release (only on tag push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build_stats_viewer/dist/stats_viewer_gui.exe
+          files: build_stats_viewer/dist/sqStatsViewerGui.exe
           fail_on_unmatched_files: true
