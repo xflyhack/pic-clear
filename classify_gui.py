@@ -183,6 +183,10 @@ class ClassifyApp:
         except Exception as _e:
             self._log(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}")
         self._apply_config(_load_config())
+        # v0.4.104: 首次启动 (rules_var 空) 时静默在 ~/.pic-clear/rules/ 建 6 桶骨架
+        # + 自动填回输入框. 老用户若已手动配过别的 rules 路径, 尊重原配置不动.
+        if not self.rules_var.get().strip():
+            self._create_sample_dir_skeleton(silent=True)
         # v0.4.88: 注入托盘退出流程要跑的业务收尾动作
         self._install_shutdown_hooks()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -387,8 +391,13 @@ class ClassifyApp:
 
     # v0.4.103: 一键在 ~/.pic-clear/rules/ 下建齐 6 个中文桶目录 + README,
     # 用户只需往对应桶里丢样例图, 点"刷新样例"就能加载 embedding, 免去手工建目录.
-    def _create_sample_dir_skeleton(self) -> None:
-        """点『新建样例目录』按钮: 在 ~/.pic-clear/rules/ 下建齐 6 桶骨架."""
+    # v0.4.104: silent=True 走首次启动静默模式 (不弹窗, 只往日志 tab 打一条).
+    def _create_sample_dir_skeleton(self, silent: bool = False) -> None:
+        """在 ~/.pic-clear/rules/ 下建齐 6 桶骨架.
+
+        silent=False (默认, 手动点按钮): 建完弹提示 + 步骤.
+        silent=True (首次启动自动调): 不弹窗, 只把结果打到日志 tab; 失败也静默.
+        """
         rules_path = Path(os.path.expanduser("~")) / ".pic-clear" / "rules"
         # 3 桶走 embedding, 用户在这里丢样例图有效
         embed_buckets = {BUCKET_HOOD, BUCKET_GESTURE, BUCKET_OCCLUSION}
@@ -419,11 +428,26 @@ class ClassifyApp:
                     note = embed_note if bucket in embed_buckets else yolo_note
                     readme.write_text(note, encoding="utf-8")
         except Exception as e:
-            messagebox.showerror(APP_TITLE, f"创建样例目录失败: {e}")
+            if silent:
+                # 首次静默场景失败不打扰用户, 仅 stderr + 日志 tab 留痕
+                sys.stderr.write(f"[classify_gui] 首次自动建样例目录失败: {e}\n")
+                try:
+                    self._enqueue_log(f"[样例] 首次自动建骨架失败: {type(e).__name__}: {e}")
+                except Exception:
+                    pass
+            else:
+                messagebox.showerror(APP_TITLE, f"创建样例目录失败: {e}")
             return
 
         # 自动把新目录填回输入框, 用户点『刷新样例』直接生效
         self.rules_var.set(str(rules_path))
+
+        if silent:
+            self._enqueue_log(
+                f"[样例] 首次启动, 已自动在 {rules_path} 建 6 桶骨架 "
+                f"(新建 {len(created)} / 已存在 {len(skipped)}); 把样例图丢进去后点『刷新样例』"
+            )
+            return
 
         msg_lines = [f"样例目录已建在: {rules_path}", ""]
         if created:
