@@ -25,6 +25,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller pyarmor
+          pip install pystray>=0.19.5 keyboard>=0.13.5
 
       # ------------------------------------------------------------------
       # 导出 3 个 onnx（yolov8n / yolov8n-pose / mobilenetv3_embed）
@@ -99,6 +100,9 @@ jobs:
             --hidden-import _version ^
             --hidden-import gui_log_util ^
             --hidden-import tray_util ^
+            --hidden-import pystray ^
+            --hidden-import pystray._win32 ^
+            --hidden-import keyboard ^
             --hidden-import env_probe ^
             --hidden-import winpath_util ^
             --hidden-import onnxruntime ^
