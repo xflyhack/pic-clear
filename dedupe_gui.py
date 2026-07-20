@@ -563,10 +563,11 @@ class DedupeGUI:
         ttk.Checkbutton(row, text="场景保护（保留纯色/异常帧）",
                         variable=self._scene_protect_var).pack(
             side="left", padx=4)
-        ttk.Checkbutton(row,
-                        text=f"强制重跑（忽略 {DEDUP_DONE_MARKER}）",
-                        variable=self._force_rerun_var).pack(
-            side="left", padx=4)
+        ttk.Checkbutton(
+            row,
+            text=f"强制重跑（忽略 {DEDUP_DONE_MARKER}，跑完一轮即退出）",
+            variable=self._force_rerun_var,
+        ).pack(side="left", padx=4)
 
         # 进度（日志区已挪到独立 Tab）
         row = ttk.Frame(page); row.pack(fill="x", **pad)
@@ -952,7 +953,18 @@ class DedupeGUI:
 
         - 停止旗触发时立刻退出 (Event.wait 支持提前唤醒)
         - 任何异常 log + sleep, 不让循环崩掉
+
+        v0.4.98: 强制重跑 (force_once) 模式下语义变成"一次性":
+        - 跑完 1 轮立刻退出主循环 (不再回头重扫, 避免死循环重跑同一批目录,
+          之前的 bug: 强制模式没过滤 marker, 每轮都返回全量 pairs -> 死循环)
+        - pairs 空 (目标目录里根本没匹配到目录) 也直接退, 不空转等新目录
+
+        未勾强制模式沿用老逻辑: 常驻监控生产端新目录, 空转睡等.
         """
+        force_once = bool(self._force_rerun_var.get())
+        if force_once:
+            self._log("● 强制重跑模式: 忽略 marker, 跑完 1 轮即退出 (不轮询新目录)")
+
         round_no = 0
         while not self._loop_stop_event.is_set():
             round_no += 1
@@ -975,10 +987,21 @@ class DedupeGUI:
                     self._log(f"● 执行异常: {type(e).__name__}: {e}")
                 if self._loop_stop_event.is_set():
                     break
+                # v0.4.98: 强制模式跑完这一轮就退, 不再回头扫
+                if force_once:
+                    self._log("● 强制模式跑完 1 轮, 退出主循环")
+                    break
                 # 处理完立刻回头再扫, 不睡
                 continue
 
-            # 没活儿: 空转睡, 每秒刷新一次状态栏倒计时
+            # 走到这说明本轮 pairs 为空
+            if force_once:
+                # v0.4.98: 强制模式下 pairs 空 = 目标目录里就没匹配到任何目录,
+                # 没必要空转等新目录, 直接退
+                self._log("● 强制模式: 未发现任何匹配目录, 退出主循环")
+                break
+
+            # 未勾强制: 空转睡, 每秒刷新一次状态栏倒计时
             interval = max(2, int(self._scan_interval_var.get()))
             self._log(f"● 空转: 未发现待处理目录, {interval}s 后重试")
             for i in range(interval, 0, -1):
