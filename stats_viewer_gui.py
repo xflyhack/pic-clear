@@ -891,6 +891,11 @@ def _open_row_detail_dialog(parent, title, row, task_run, task_type):
             pass
 
     inner.columnconfigure(1, weight=1)
+    # v0.4.91: 必须持有 StringVar 引用, 否则 for 循环退出后 var 被 GC,
+    # tkinter 侧 tk variable 被 unset, readonly Entry 就显示成空.
+    # (video_path/output_dir/rel_path 走 tk.Text 分支不受影响, 所以之前
+    #  看起来"只有 3 个长字段能显示, 其他全空", 就是这个坑.)
+    top._detail_stringvars = []  # type: ignore[attr-defined]
     r = 0
     for key, val in row.items():
         label = _ROW_FIELD_LABELS.get(key, key)
@@ -906,6 +911,7 @@ def _open_row_detail_dialog(parent, title, row, task_run, task_type):
             txt.grid(row=r, column=1, sticky="ew", pady=2)
         else:
             var = tk.StringVar(value=display)
+            top._detail_stringvars.append(var)  # type: ignore[attr-defined]
             ent = ttk.Entry(inner, textvariable=var, state="readonly")
             ent.grid(row=r, column=1, sticky="ew", pady=2)
         ttk.Button(inner, text="复制", width=6,
