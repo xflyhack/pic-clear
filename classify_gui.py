@@ -29,6 +29,7 @@ from tkinter import ttk
 import classify_pic
 import pipe_gui as _pg  # noqa: E402
 from gui_log_util import GuiLogController  # noqa: E402
+from tray_util import TrayController, TOOLTIP_CLASSIFY  # noqa: E402
 
 # stats_db 可选; 主流程不能因为落库失败中断
 try:
@@ -43,6 +44,7 @@ from classify_pic import (
 
 
 APP_TITLE = "pic-clear 二次分类工具"
+HOTKEY_DEFAULT = "ctrl+alt+f"  # v0.4.88: filter 二次过滤工具, 全局呼出主窗口
 # 版本号: CI 会在打包前覆盖 _version.py 里的 VERSION 成 tag 名 (如 v0.4.30);
 # 本地跑 py 时 fallback 到 'dev', 找不到 _version.py 也能启动.
 try:
@@ -105,6 +107,24 @@ class ClassifyApp:
         self.worker: threading.Thread | None = None
         self.cancel_flag = threading.Event()
 
+        # v0.4.88: 托盘 + 全局快捷键 + 关闭最小化. 老版 classify_gui 没有这套,
+        # 现在跟 dedupe/extract 拉齐: 点 X 默认最小化到托盘, 右下角图标
+        # 鼠标 hover 显示 "二次过滤工具". 图标 fallback: 紫底 "CL".
+        # DPI scale 从 root 拿 (extract_gui / dedupe_gui 走 pipe_gui 注入).
+        self._ui_scale = float(getattr(root, "__ui_scale__", 1.0))
+        self._minimize_to_tray_var = tk.BooleanVar(value=True)
+        self._hotkey_var = tk.StringVar(value=HOTKEY_DEFAULT)
+        self._hide_close_hint_var = tk.BooleanVar(value=False)
+        self._tray = TrayController(
+            root=self.root,
+            app_id="pic-clear-classify",
+            tooltip=TOOLTIP_CLASSIFY,
+            fallback_glyph=((155, 89, 182, 255), "CL"),
+            hotkey_default=HOTKEY_DEFAULT,
+            app_title=APP_TITLE,
+            ui_scale=self._ui_scale,
+        )
+
         # ---- 变量 ----
         self.in_var = StringVar()
         self.out_var = StringVar()
@@ -163,6 +183,8 @@ class ClassifyApp:
         except Exception as _e:
             self._log(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}")
         self._apply_config(_load_config())
+        # v0.4.88: 注入托盘退出流程要跑的业务收尾动作
+        self._install_shutdown_hooks()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(150, self._drain_log)
 
@@ -681,6 +703,22 @@ class ClassifyApp:
             extra_note="classify_pic 与本 GUI 同版本一起打包, 无独立 exe",
         )
 
+        # v0.4.88: 托盘 & 快捷键 LabelFrame (跟 dedupe / extract 一致的关于页布局)
+        tray_frame = ttk.LabelFrame(wrap, text="托盘 & 快捷键")
+        tray_frame.pack(fill="x", padx=4, pady=6)
+        row = ttk.Frame(tray_frame); row.pack(fill="x", padx=10, pady=(8, 2))
+        ttk.Checkbutton(row, text="关闭时最小化到托盘",
+                        variable=self._minimize_to_tray_var
+                        ).pack(side="left")
+        row = ttk.Frame(tray_frame); row.pack(fill="x", padx=10, pady=(2, 8))
+        ttk.Label(row, text="全局快捷键：").pack(side="left")
+        ttk.Entry(row, textvariable=self._hotkey_var, width=16
+                  ).pack(side="left", padx=(2, 6))
+        ttk.Button(row, text="注册", command=self._register_hotkey
+                   ).pack(side="left")
+        ttk.Label(row, text="  (默认 ctrl+alt+f, 全局呼出主窗口)",
+                  foreground="#888").pack(side="left", padx=8)
+
     # -------------------------------------------------- 配置持久化
     def _dump_config(self) -> dict:
         return {
@@ -707,6 +745,10 @@ class ClassifyApp:
             "lock_ttl": int(self.lock_ttl_var.get()),
             "force_rerun": bool(self.force_rerun_var.get()),
             "scan_interval": int(self.scan_interval_var.get()),
+            # v0.4.88 托盘相关
+            "minimize_to_tray": bool(self._minimize_to_tray_var.get()),
+            "hotkey": self._hotkey_var.get(),
+            "hide_close_hint": bool(self._hide_close_hint_var.get()),
         }
 
     def _record_run_snapshot(self, task_id: str, cfg) -> None:
@@ -765,6 +807,10 @@ class ClassifyApp:
         _set(self.lock_ttl_var, "lock_ttl", int)
         _set(self.force_rerun_var, "force_rerun", bool)
         _set(self.scan_interval_var, "scan_interval", int)
+        # v0.4.88 托盘相关
+        _set(self._minimize_to_tray_var, "minimize_to_tray", bool)
+        _set(self._hotkey_var, "hotkey")
+        _set(self._hide_close_hint_var, "hide_close_hint", bool)
         thres = cfg.get("bucket_thres") or {}
         for b, v in self.bucket_thres_vars.items():
             if b in thres:
@@ -780,8 +826,47 @@ class ClassifyApp:
             self._log(f"[配置] 保存失败: {e}")
 
     def _on_close(self) -> None:
+        # v0.4.88: 点 × 默认最小化到托盘, 取消勾选才真正退出.
         self._persist_config()
-        self.root.destroy()
+        if self._minimize_to_tray_var.get():
+            self._tray.hide_to_tray()
+            self._tray.maybe_show_close_hint(
+                cfg_get=lambda: bool(self._hide_close_hint_var.get()),
+                cfg_set=self._persist_hide_close_hint,
+                hotkey_display=self._hotkey_var.get(),
+            )
+        else:
+            self.quit_all()
+
+    def _persist_hide_close_hint(self, val: bool) -> None:
+        self._hide_close_hint_var.set(bool(val))
+        try:
+            self._persist_config()
+        except Exception:
+            pass
+
+    # v0.4.88: 托盘转发 API, 供 GUI 内部 / 关于 tab 按钮调用
+    def hide_to_tray(self) -> None:
+        self._tray.hide_to_tray()
+
+    def show_main(self) -> None:
+        self._tray.show_main()
+
+    def quit_all(self) -> None:
+        self._tray.quit_all()
+
+    def _install_shutdown_hooks(self) -> None:
+        """业务收尾: 停 worker 循环 + cancel flag, 注入托盘退出流程."""
+        self._tray.add_shutdown_hook(self.cancel_flag.set)
+        self._tray.add_shutdown_hook(self._loop_stop_event.set)
+
+    def _register_hotkey(self) -> None:
+        hk = self._hotkey_var.get().strip() or HOTKEY_DEFAULT
+        ok, msg = self._tray.register_hotkey(hk)
+        if ok:
+            messagebox.showinfo("已注册", msg)
+        else:
+            messagebox.showerror("注册失败", msg)
 
 
 def _check_license_or_die_gui() -> None:

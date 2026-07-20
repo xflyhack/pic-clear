@@ -38,6 +38,7 @@ except Exception as e:
 import pipe_gui as _pg  # noqa: E402
 import pipeline  # noqa: E402
 from gui_log_util import GuiLogController  # noqa: E402
+from tray_util import TrayController, TOOLTIP_DEDUPE  # noqa: E402
 
 # stats_db 可选; 主流程不能因为落库失败中断
 try:
@@ -335,10 +336,17 @@ class DedupeGUI:
             for name in _pg.COCO_ZH.keys()
         }
 
-        # 运行时状态
-        self._tray_icon = None
-        self._tray_thread = None
-        self._hotkey_registered = False
+        # 运行时状态. v0.4.88: 托盘 + 全局快捷键 + 关闭最小化 走 TrayController.
+        # fallback_glyph: 红底 + "DE" (跟老版本视觉一致).
+        self._tray = TrayController(
+            root=self.root,
+            app_id="pic-clear-dedupe",
+            tooltip=TOOLTIP_DEDUPE,
+            fallback_glyph=((192, 57, 43, 255), "DE"),
+            hotkey_default=HOTKEY_DEFAULT,
+            app_title=APP_TITLE,
+            ui_scale=self._ui_scale,
+        )
         self._worker_thread: threading.Thread | None = None
         self._worker_stop_flag = threading.Event()
         # v0.4.87: 日志改公共模块 GuiLogController (落盘 + preload + queue).
@@ -365,6 +373,8 @@ class DedupeGUI:
             value=int(self._cfg.get("scan_interval", 10)))
 
         self._build_ui()
+        # v0.4.88: 注入托盘退出流程要跑的业务收尾动作
+        self._install_shutdown_hooks()
         self.root.after(200, self._drain_log_queue)
         self.root.after(300, self._check_environment)
 
@@ -1222,7 +1232,7 @@ class DedupeGUI:
             print(f"[record_run_snapshot] {type(e).__name__}: {e}",
                   file=sys.stderr)
 
-    # ---------- 关闭 / 托盘 ----------
+    # ---------- 关闭 / 托盘 (v0.4.88: 走 tray_util 公共模块) ----------
 
     def on_close(self):
         try:
@@ -1230,144 +1240,57 @@ class DedupeGUI:
         except Exception:
             pass
         if self._minimize_to_tray_var.get():
-            self.hide_to_tray()
-            self._maybe_show_close_hint()
+            self._tray.hide_to_tray()
+            self._tray.maybe_show_close_hint(
+                cfg_get=lambda: bool((self._cfg or {}).get("hide_close_hint")),
+                cfg_set=self._persist_hide_close_hint,
+                hotkey_display=self._hotkey_var.get(),
+            )
         else:
             self.quit_all()
 
-    def _maybe_show_close_hint(self):
-        cfg = self._cfg or {}
-        if cfg.get("hide_close_hint"):
-            return
+    def _persist_hide_close_hint(self, val: bool) -> None:
         try:
-            top = tk.Toplevel(self.root)
+            self._cfg["hide_close_hint"] = bool(val)
+            _save_config(self._dump_cfg())
         except Exception:
-            return
-        top.title(f"{APP_TITLE} 已最小化到托盘")
-        top.transient(self.root)
-        top.attributes("-topmost", True)
-        scale = self._ui_scale
-        top.geometry(_pg._scale_geometry(520, 260, scale))
-        top.resizable(False, False)
-        tk.Label(top, text="ⓘ  程序已最小化到系统托盘",
-                 font=("Microsoft YaHei", 14, "bold"),
-                 foreground="#0066cc").pack(pady=(18, 6))
-        tk.Label(top, text=(
-            "点右上角 × 只是把窗口收起来了，程序仍在后台运行。\n\n"
-            "• 通知区域（时间旁边）有本程序图标，右键 → 退出\n"
-            f"• 快捷键 {self._hotkey_var.get()} 可呼出主窗口\n\n"
-            "不想最小化，请取消勾选『关闭时最小化到托盘』。"),
-            font=("Microsoft YaHei", 10), justify="left",
-            wraplength=int(480 * scale), foreground="#333").pack(
-            padx=18, pady=(0, 8), anchor="w")
-        hide_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(top, text="以后不再提示",
-                        variable=hide_var).pack(anchor="w", padx=18, pady=(0, 6))
+            pass
 
-        def _confirm():
-            if hide_var.get():
-                self._cfg["hide_close_hint"] = True
-                try:
-                    _save_config(self._dump_cfg())
-                except Exception:
-                    pass
-            top.destroy()
-
-        ttk.Button(top, text="知道了", command=_confirm, width=12).pack(
-            pady=(4, 14))
-        top.protocol("WM_DELETE_WINDOW", _confirm)
-
+    # thin 转发, 保持老 API 不变 (GUI 其它地方引用 self.hide_to_tray 等)
     def hide_to_tray(self):
-        self._start_tray_if_needed()
-        self.root.withdraw()
+        self._tray.hide_to_tray()
 
     def show_main(self):
-        self.root.deiconify()
-        self.root.lift()
-        self.root.focus_force()
+        self._tray.show_main()
 
     def quit_all(self):
-        try:
-            if self._tray_icon is not None:
-                self._tray_icon.stop()
-        except Exception:
-            pass
-        try:
-            if self._hotkey_registered:
-                import keyboard
-                keyboard.unhook_all_hotkeys()
-        except Exception:
-            pass
-        self._worker_stop_flag.set()
-        self._loop_stop_event.set()
-        # v0.4.46 主动杀所有子进程 (dedupe_pic.exe), 避免变孤儿
-        try:
-            self._subproc_group.terminate_all(wait_timeout=2.0)
-        except Exception:
-            pass
-        try:
-            # Windows: close Job handle 触发 KILL_ON_JOB_CLOSE, 兜底再杀一次
-            self._subproc_group.close()
-        except Exception:
-            pass
-        self.root.destroy()
-        try:
-            threading.Timer(0.4, lambda: os._exit(0)).start()
-        except Exception:
-            os._exit(0)
+        # 业务收尾通过 add_shutdown_hook 注入托盘退出流程, 见 _install_shutdown_hooks.
+        self._tray.quit_all()
 
-    def _start_tray_if_needed(self):
-        if self._tray_icon is not None:
-            return
-        try:
-            import pystray
-            from PIL import Image
-        except Exception as e:
-            messagebox.showwarning("托盘不可用", f"缺少 pystray/Pillow：{e}")
-            return
-        try:
-            icon_path = _pg._resource_path("icon.png")
-            img = Image.open(icon_path)
-        except Exception:
-            from PIL import Image, ImageDraw
-            img = Image.new("RGBA", (64, 64), (192, 57, 43, 255))
-            d = ImageDraw.Draw(img)
-            d.text((16, 20), "DE", fill="white")
-        menu = pystray.Menu(
-            pystray.MenuItem("显示主窗口",
-                             lambda: self.root.after(0, self.show_main)),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("退出",
-                             lambda: self.root.after(0, self.quit_all)),
-        )
-        self._tray_icon = pystray.Icon(
-            "pic-clear-dedupe", img, APP_TITLE, menu)
+    def _install_shutdown_hooks(self) -> None:
+        """把业务收尾 (worker/loop 停止 + 子进程组终结) 注入托盘退出流程."""
+        self._tray.add_shutdown_hook(self._worker_stop_flag.set)
+        self._tray.add_shutdown_hook(self._loop_stop_event.set)
 
-        def run_tray():
+        def _kill_subproc():
             try:
-                self._tray_icon.run()  # type: ignore[union-attr]
+                self._subproc_group.terminate_all(wait_timeout=2.0)
             except Exception:
                 pass
-
-        self._tray_thread = threading.Thread(target=run_tray, daemon=True)
-        self._tray_thread.start()
+            try:
+                # Windows: close Job handle 触发 KILL_ON_JOB_CLOSE
+                self._subproc_group.close()
+            except Exception:
+                pass
+        self._tray.add_shutdown_hook(_kill_subproc)
 
     def _register_hotkey(self):
-        try:
-            import keyboard
-        except Exception as e:
-            messagebox.showwarning("快捷键不可用",
-                                   f"缺少 keyboard 库：{e}")
-            return
-        try:
-            if self._hotkey_registered:
-                keyboard.unhook_all_hotkeys()
-            hk = self._hotkey_var.get().strip() or HOTKEY_DEFAULT
-            keyboard.add_hotkey(hk, lambda: self.root.after(0, self.show_main))
-            self._hotkey_registered = True
-            messagebox.showinfo("已注册", f"快捷键 {hk} 已注册")
-        except Exception as e:
-            messagebox.showerror("注册失败", f"{type(e).__name__}: {e}")
+        hk = self._hotkey_var.get().strip() or HOTKEY_DEFAULT
+        ok, msg = self._tray.register_hotkey(hk)
+        if ok:
+            messagebox.showinfo("已注册", msg)
+        else:
+            messagebox.showerror("注册失败", msg)
 
 
 # ---------- 入口 ----------

@@ -29,6 +29,9 @@ except Exception as e:  # pragma: no cover
     raise
 
 from gui_log_util import GuiLogController  # noqa: E402
+from tray_util import TrayController, TOOLTIP_STATS_VIEWER  # noqa: E402
+
+HOTKEY_DEFAULT = "ctrl+alt+s"  # v0.4.88: stats 统计工具全局呼出主窗口
 
 
 # ------------------------------------------------ matplotlib 软依赖
@@ -93,6 +96,23 @@ class StatsViewerApp:
         # v0.4.87: 日志改公共模块 GuiLogController (落盘 + preload + queue).
         self._log_ctl = GuiLogController(app_name="stats_viewer_gui")
         self._auto_scroll_var = tk.BooleanVar(value=True)
+
+        # v0.4.88: 托盘 + 全局快捷键 + 关闭最小化.
+        # stats_viewer 之前没有配置持久化, 托盘偏好只在内存里 (下次启动重置默认).
+        # 图标 fallback: 绿底 "ST".
+        self._minimize_to_tray_var = tk.BooleanVar(value=True)
+        self._hotkey_var = tk.StringVar(value=HOTKEY_DEFAULT)
+        self._hide_close_hint_var = tk.BooleanVar(value=False)
+        self._tray = TrayController(
+            root=self.root,
+            app_id="pic-clear-stats-viewer",
+            tooltip=TOOLTIP_STATS_VIEWER,
+            fallback_glyph=((39, 174, 96, 255), "ST"),
+            hotkey_default=HOTKEY_DEFAULT,
+            app_title="pic-clear 统计工具",
+            ui_scale=float(getattr(root, "__ui_scale__", 1.0)),
+        )
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_topbar()
         self._build_tabs()
@@ -255,6 +275,17 @@ class StatsViewerApp:
             ttk.Checkbutton(tb, text="自动滚到底",
                             variable=self._auto_scroll_var
                             ).pack(side="left", padx=4)
+            # v0.4.88: 托盘 & 快捷键 (stats_viewer 没独立"关于" tab, 挤到日志工具条)
+            ttk.Separator(tb, orient="vertical").pack(
+                side="left", fill="y", padx=6)
+            ttk.Checkbutton(tb, text="关闭最小化到托盘",
+                            variable=self._minimize_to_tray_var
+                            ).pack(side="left", padx=4)
+            ttk.Label(tb, text="  快捷键：").pack(side="left")
+            ttk.Entry(tb, textvariable=self._hotkey_var, width=14
+                      ).pack(side="left")
+            ttk.Button(tb, text="注册", command=self._register_hotkey
+                       ).pack(side="left", padx=4)
         self._log_ctl.build_toolbar(self.tab_log, extra_toolbar=_extra)
 
         frame = ttk.Frame(self.tab_log)
@@ -275,6 +306,41 @@ class StatsViewerApp:
         # v0.4.87: Text 绑给控制器 + preload 上次 tail 200 行
         self._log_ctl.attach_text(self._log_text)
         self._log_ctl.preload_prev_tail_to_text()
+
+    # ---------- v0.4.88 托盘 / 关闭 -----------
+
+    def _on_close(self) -> None:
+        # 点 × 默认最小化到托盘, 取消勾选才真正退出.
+        if self._minimize_to_tray_var.get():
+            self._tray.hide_to_tray()
+            self._tray.maybe_show_close_hint(
+                cfg_get=lambda: bool(self._hide_close_hint_var.get()),
+                # stats_viewer 没有配置持久化, cfg_set 只更新内存变量.
+                # 下次启动"以后不再提示"会重置 (未来若加配置持久化再改).
+                cfg_set=lambda v: self._hide_close_hint_var.set(bool(v)),
+                hotkey_display=self._hotkey_var.get(),
+            )
+        else:
+            self.quit_all()
+
+    def hide_to_tray(self) -> None:
+        self._tray.hide_to_tray()
+
+    def show_main(self) -> None:
+        self._tray.show_main()
+
+    def quit_all(self) -> None:
+        self._tray.quit_all()
+
+    def _register_hotkey(self) -> None:
+        hk = self._hotkey_var.get().strip() or HOTKEY_DEFAULT
+        ok, msg = self._tray.register_hotkey(hk)
+        if ok:
+            from tkinter import messagebox
+            messagebox.showinfo("已注册", msg)
+        else:
+            from tkinter import messagebox
+            messagebox.showerror("注册失败", msg)
 
     # ---------- 公共
 
