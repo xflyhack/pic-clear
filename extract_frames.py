@@ -83,24 +83,29 @@ _STATS_CTX: dict = {
     "naming_style": None,
     "seq_digits": None,
     "version": None,
+    "ffprobe": None,  # v0.4.92: 抽帧完立即 probe duration 落库, 别到 GUI 查询时二次算
 }
 
 
 def _video_fingerprint(video_path: str) -> tuple[str | None, int | None]:
     """算视频"快速指纹" (file_size + head/mid/tail 各 1MB 的 sha1).
 
-    足够区分同视频/不同视频, 避免全量读大文件. 出错返回 (None, None),
-    主流程静默继续 (只是 final 表少一条 UPSERT, 流水表照常).
+    v0.4.92: 抽帧那一刻算 (源文件肯定在), 结果跟这次抽帧一起入库.
+    以后源视频被删/盘挂了/路径变了都不再重算, stats_viewer 纯读库.
 
-    返回: (fingerprint_hex, file_size)
+    - stat 走 winpath_util.safe_stat (自动兜底 backslash-?-backslash 长路径)
+    - open 走 to_long_path (Windows MAX_PATH=260 保护)
+    - 失败打 [ERROR] 到 stderr, 别静默吞 (对齐仓库其他 IO helper 规范)
+
+    返回: (fingerprint_hex, file_size); 失败 (None, None).
     """
     try:
-        st = os.stat(video_path)
+        st = _safe_stat(video_path)
         size = int(st.st_size)
         h = hashlib.sha1()
         h.update(str(size).encode("ascii"))
         chunk = 1024 * 1024  # 1MB
-        with open(video_path, "rb") as f:
+        with open(_to_long_path(str(video_path)), "rb") as f:
             # head
             h.update(f.read(chunk))
             if size > chunk * 3:
@@ -115,7 +120,8 @@ def _video_fingerprint(video_path: str) -> tuple[str | None, int | None]:
                 f.seek(max(0, size - chunk))
                 h.update(f.read(chunk))
         return h.hexdigest(), size
-    except Exception:
+    except Exception as e:
+        _log_err(f"_video_fingerprint 失败: {video_path} -> {type(e).__name__}: {e}")
         return None, None
 
 
@@ -498,15 +504,26 @@ def extract_one(
         lock_ttl, name_style, name_template, name_digits,
     )
     _elapsed = time.time() - _t_start
-    # 落库 (静默失败, 出问题不影响抽帧主流程)
+    # 落库. v0.4.92: fingerprint + duration 都在这里算好塞库,
+    # stats_viewer 只读, 不再涉及二次计算 / 二次 IO.
+    # locked 分支 (别的进程正在抽) 跳过 fingerprint & duration:
+    # 一是省 IO, 二是这条本来就等下一次抽完再 UPSERT extract_final.
     if _stats_db is not None:
-        try:
+        _md5: str | None = None
+        _fsize: int | None = None
+        _duration: float | None = None
+        if stage != "locked":
             _md5, _fsize = _video_fingerprint(str(task.src_path))
+            _ffprobe = _STATS_CTX.get("ffprobe")
+            if _ffprobe is not None:
+                _duration = probe_video_duration(_ffprobe, task.src_path)
+        try:
             _stats_db.record_extract(
                 video_path=str(task.src_path),
                 output_dir=str(task.out_dir),
                 rel_path=str(task.rel_path),
                 frames=int(n or 0),
+                duration_sec=_duration,
                 fps=_STATS_CTX.get("fps"),
                 quality=_STATS_CTX.get("quality"),
                 naming_style=name_style,
@@ -522,8 +539,9 @@ def extract_one(
                 video_md5=_md5,
                 file_size=_fsize,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            _log_err(f"record_extract 失败: {type(task.src_path).__name__} "
+                     f"{task.src_path} -> {type(e).__name__}: {e}")
     return stage, n, msg
 
 
@@ -1138,6 +1156,7 @@ def main() -> int:
     _STATS_CTX["naming_style"] = name_style
     _STATS_CTX["seq_digits"] = int(name_digits)
     _STATS_CTX["version"] = _read_version()
+    _STATS_CTX["ffprobe"] = ffprobe  # v0.4.92: 抽帧完立即 probe duration 一并落库
     if _stats_db is not None:
         try:
             _stats_db.open_stats_db()
