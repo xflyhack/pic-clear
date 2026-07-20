@@ -28,6 +28,7 @@ from tkinter import ttk
 
 import classify_pic
 import pipe_gui as _pg  # noqa: E402
+from gui_log_util import GuiLogController  # noqa: E402
 
 # stats_db 可选; 主流程不能因为落库失败中断
 try:
@@ -93,7 +94,14 @@ class ClassifyApp:
         root.title(f"{APP_TITLE}  {APP_VERSION}")
         root.geometry("1000x880")
 
+        # log_queue: 外部 worker (classify_pic) 通过这个 queue 把日志送回 GUI 主线程.
+        # 这一层保留, 因为 classify_pic 的 API 期望的就是"外部 put 一个 queue".
+        # v0.4.87: 新增 GuiLogController 负责"落盘 + preload + Tab 展示".
+        # 数据流: worker -> self.log_queue -> _drain_log -> self._log_ctl.log()
+        #        -> ctl 内部 queue -> ctl.pump() -> Text
         self.log_queue: "queue.Queue[str]" = queue.Queue()
+        self._log_ctl = GuiLogController(app_name="classify_gui")
+        self._auto_scroll_var = tk.BooleanVar(value=True)
         self.worker: threading.Thread | None = None
         self.cancel_flag = threading.Event()
 
@@ -555,6 +563,8 @@ class ClassifyApp:
         self.log_queue.put(msg)
 
     def _drain_log(self) -> None:
+        # v0.4.87: 先从 worker queue 抽消息给控制器 (落盘 + 时间戳),
+        # 再让控制器 pump 把新行灌进 Text.
         try:
             while True:
                 msg = self.log_queue.get_nowait()
@@ -571,28 +581,31 @@ class ClassifyApp:
                 self._log(msg)
         except queue.Empty:
             pass
+        if self._log_ctl.pump() and self._auto_scroll_var.get():
+            try:
+                self.log.see(END)
+            except Exception:
+                pass
         self.root.after(150, self._drain_log)
 
     def _log(self, msg: str) -> None:
-        self.log.configure(state="normal")
-        self.log.insert(END, msg + "\n")
-        self.log.see(END)
-        self.log.configure(state="disabled")
-
-    def _clear_log(self) -> None:
-        self.log.configure(state="normal")
-        self.log.delete("1.0", END)
-        self.log.configure(state="disabled")
+        # v0.4.87: 转发到 GuiLogController (加时间戳 + 落盘 + 塞 controller queue).
+        # 下一次 _drain_log 里 pump() 就会把该行灌进 Text.
+        self._log_ctl.log(msg)
 
     # -------------------------------------------------- 日志 tab
     def _build_log_tab(self, page: ttk.Frame) -> None:
-        toolbar = ttk.Frame(page)
-        toolbar.pack(fill="x", padx=6, pady=(6, 2))
-        ttk.Button(toolbar, text="清空日志", command=self._clear_log).pack(
-            side="left", padx=4
-        )
-        ttk.Button(toolbar, text="跳到底部",
-                   command=lambda: self.log.see(END)).pack(side="left", padx=4)
+        # v0.4.87: 工具条走 GuiLogController.build_toolbar
+        # (清空日志(Tab) / 打开日志文件夹 / 当前日志文件名).
+        # "跳到底部" + "自动滚到底" 通过 extra_toolbar 追加, 保留老功能.
+        def _extra(tb):
+            ttk.Checkbutton(tb, text="自动滚到底",
+                            variable=self._auto_scroll_var
+                            ).pack(side="left", padx=4)
+            ttk.Button(tb, text="跳到底部",
+                       command=lambda: self.log.see(END)
+                       ).pack(side="left", padx=4)
+        self._log_ctl.build_toolbar(page, extra_toolbar=_extra)
 
         wrap = ttk.Frame(page)
         wrap.pack(fill="both", expand=True, padx=6, pady=(2, 6))
@@ -609,6 +622,10 @@ class ClassifyApp:
         wrap.rowconfigure(0, weight=1)
         wrap.columnconfigure(0, weight=1)
         self.log.configure(state="disabled")
+
+        # v0.4.87: Text 绑给控制器 + preload 上次 tail 200 行
+        self._log_ctl.attach_text(self.log)
+        self._log_ctl.preload_prev_tail_to_text()
 
     # -------------------------------------------------- 关于 tab
     def _build_about_tab(self, page: ttk.Frame) -> None:

@@ -42,6 +42,7 @@ except Exception as e:
 # pipe_gui.py 会跟这个 GUI 一起被 PyInstaller 打包
 import pipe_gui as _pg  # noqa: E402
 import pipeline  # noqa: E402
+from gui_log_util import GuiLogController  # noqa: E402
 
 # stats_db 可选; 主流程不能因为落库失败中断
 try:
@@ -70,39 +71,9 @@ def _config_path() -> Path:
     return Path(os.path.expanduser("~")) / ".pic-clear" / CONFIG_NAME
 
 
-def _log_dir() -> Path:
-    return Path(os.path.expanduser("~")) / ".pic-clear" / "extract_gui_logs"
-
-
-def _new_log_path() -> Path:
-    """本次启动的日志文件路径：extract_gui_YYYYMMDD_HHMM.log。"""
-    ts = datetime.now().strftime("%Y%m%d_%H%M")
-    d = _log_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    return d / f"extract_gui_{ts}.log"
-
-
-def _latest_prev_log(exclude: Path) -> Path | None:
-    """找上次留下的最新日志文件（时间戳最大，排除本次刚建的）。"""
-    d = _log_dir()
-    if not d.is_dir():
-        return None
-    candidates = sorted(
-        (p for p in d.glob("extract_gui_*.log") if p != exclude),
-        key=lambda p: p.name,
-        reverse=True,
-    )
-    return candidates[0] if candidates else None
-
-
-def _tail_lines(path: Path, n: int = 200) -> list[str]:
-    """读文件末尾 n 行；文件不大直接 readlines，够用。"""
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        return lines[-n:]
-    except Exception:
-        return []
+# v0.4.87: 日志落盘 / preload / 打开目录 逻辑全部搬到 gui_log_util.py 公共模块.
+# 老路径 ~/.pic-clear/extract_gui_logs/ 里的历史 log 通过 GuiLogController
+# 的 legacy_dir 兜底继续能被 preload 读到.
 
 
 def _load_config() -> dict:
@@ -264,18 +235,21 @@ class ExtractGUI:
         self._worker_stop_flag = threading.Event()
         # v0.4.46 子进程组: Windows 用 Job Object 保证 GUI 死后子进程一起死
         self._subproc_group = SubprocGroup()
-        self._log_queue: queue.Queue[str] = queue.Queue()
         self._progress_var = tk.StringVar(value="就绪")
         self._total_videos = 0
         self._done_videos = 0
 
-        # 日志文件（本次启动新建一份，不覆盖历史）
-        self._log_path = _new_log_path()
-        try:
-            self._log_file = self._log_path.open("a", encoding="utf-8")
-        except Exception:
-            self._log_file = None
-        self._log_file_lock = threading.Lock()
+        # v0.4.87: 日志改公共模块 GuiLogController.
+        # legacy_dir 兜底: 迁移前的 ~/.pic-clear/extract_gui_logs/ 里的老 log
+        # 首次跑新版时仍能被 preload 读到, 不至于丢历史.
+        self._log_ctl = GuiLogController(
+            app_name="extract_gui",
+            legacy_dir=(Path(os.path.expanduser("~"))
+                        / ".pic-clear" / "extract_gui_logs"),
+            legacy_pattern="extract_gui_*.log",
+        )
+        # 兼容旧字段名, 外部 (env_probe 等) 可能通过 self._log_path 拿路径.
+        self._log_path = self._log_ctl.log_path
 
         # 智能自动滚动：手动往上翻则暂停跟随，滚回底部自动恢复
         self._auto_scroll_var = tk.BooleanVar(value=True)
@@ -509,17 +483,15 @@ class ExtractGUI:
                    command=self._register_hotkey).pack(side="left", padx=4)
 
     def _build_log_tab(self, page: ttk.Frame):
-        pad = {"padx": 6, "pady": 4}
-        # 顶部控制条：打开日志文件夹 / 自动滚 / 当前日志文件名
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
-        ttk.Button(row, text="打开日志文件夹",
-                   command=self._open_log_dir).pack(side="left")
-        ttk.Checkbutton(row, text="自动滚到底",
-                        variable=self._auto_scroll_var).pack(side="left", padx=8)
-        ttk.Label(row, text=f"日志文件：{self._log_path.name}",
-                  foreground="#888").pack(side="left", padx=8)
+        # v0.4.87: 工具条走 GuiLogController.build_toolbar, "自动滚到底"
+        # 复选框通过 extra_toolbar 回调追加, 保留原智能滚动行为.
+        def _extra(tb):
+            ttk.Checkbutton(tb, text="自动滚到底",
+                            variable=self._auto_scroll_var
+                            ).pack(side="left", padx=8)
+        self._log_ctl.build_toolbar(page, extra_toolbar=_extra)
 
-        # 日志区：Text + 纵/横滚动条（放在同一个 Frame 里）
+        # 日志区: Text + 纵/横滚动条 (GUI 自建, 保留智能滚动 hook)
         log_wrap = ttk.Frame(page)
         log_wrap.pack(fill="both", expand=True, padx=6, pady=(2, 6))
         self._log_text = tk.Text(log_wrap, height=24,
@@ -535,15 +507,15 @@ class ExtractGUI:
         self._log_hsb.grid(row=1, column=0, sticky="ew")
         log_wrap.rowconfigure(0, weight=1)
         log_wrap.columnconfigure(0, weight=1)
-        # 鼠标滚轮 / 键盘翻页触发时判定是否在底部（暂停自动滚）
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>",
                     "<Prior>", "<Next>", "<Up>", "<Down>",
                     "<Key-Home>", "<Key-End>"):
             self._log_text.bind(seq, self._on_log_user_scroll, add="+")
         self._log_text.config(state="disabled")
 
-        # 载入上次日志末尾 200 行，方便接着看
-        self._preload_prev_log_tail()
+        # v0.4.87: 把 Text 绑给控制器 + preload 上次 tail 200 行
+        self._log_ctl.attach_text(self._log_text)
+        self._log_ctl.preload_prev_tail_to_text()
 
     def _build_about_tab(self, page: ttk.Frame):
         pad = {"padx": 12, "pady": 6}
@@ -964,34 +936,16 @@ class ExtractGUI:
     # ---------- 日志 ----------
 
     def _log(self, msg: str):
-        """线程安全：把日志放进队列 + 同步 append 到当前日志文件。"""
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{ts}] {msg}\n"
-        # 落盘（跨线程写文件加锁）
-        if self._log_file is not None:
-            try:
-                with self._log_file_lock:
-                    self._log_file.write(line)
-                    self._log_file.flush()
-            except Exception:
-                pass
-        # 主线程刷 UI
-        self._log_queue.put(line)
+        """线程安全: 转发到 GuiLogController (加时间戳 + 落盘 + 塞 queue)."""
+        self._log_ctl.log(msg)
 
     def _drain_log_queue(self):
-        try:
-            appended = False
-            while True:
-                line = self._log_queue.get_nowait()
-                self._log_text.config(state="normal")
-                self._log_text.insert("end", line)
-                self._log_text.config(state="disabled")
-                appended = True
-        except queue.Empty:
-            pass
-        # 只有勾选『自动滚到底』才追到最新
-        if appended and self._auto_scroll_var.get():
-            self._log_text.see("end")
+        # v0.4.87: pump 由公共控制器做, 智能滚由 GUI 自己判断 (跟原行为一致).
+        if self._log_ctl.pump() and self._auto_scroll_var.get():
+            try:
+                self._log_text.see("end")
+            except Exception:
+                pass
         self.root.after(200, self._drain_log_queue)
 
     # ---- 智能滚动 & 日志文件辅助 ----
@@ -1035,36 +989,7 @@ class ExtractGUI:
         except Exception:
             pass
 
-    def _preload_prev_log_tail(self) -> None:
-        """启动时把上次日志末尾若干行填进 Text，方便接着看。"""
-        prev = _latest_prev_log(exclude=self._log_path)
-        if prev is None:
-            return
-        lines = _tail_lines(prev, 200)
-        if not lines:
-            return
-        self._log_text.config(state="normal")
-        self._log_text.insert("end",
-            f"===== 上次日志 tail 200 行：{prev.name} =====\n")
-        for line in lines:
-            self._log_text.insert("end", line)
-        self._log_text.insert("end",
-            f"===== 上次日志结束 · 当前日志：{self._log_path.name} =====\n")
-        self._log_text.see("end")
-        self._log_text.config(state="disabled")
-
-    def _open_log_dir(self) -> None:
-        d = _log_dir()
-        d.mkdir(parents=True, exist_ok=True)
-        try:
-            if os.name == "nt":
-                os.startfile(str(d))  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(d)])
-            else:
-                subprocess.Popen(["xdg-open", str(d)])
-        except Exception as e:
-            self._log(f"[错误] 打开日志目录失败：{e}")
+    # v0.4.87: _preload_prev_log_tail / _open_log_dir 已搬到 gui_log_util 公共模块.
 
     # ---------- 配置 ----------
 

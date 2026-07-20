@@ -37,6 +37,7 @@ except Exception as e:
 
 import pipe_gui as _pg  # noqa: E402
 import pipeline  # noqa: E402
+from gui_log_util import GuiLogController  # noqa: E402
 
 # stats_db 可选; 主流程不能因为落库失败中断
 try:
@@ -340,7 +341,8 @@ class DedupeGUI:
         self._hotkey_registered = False
         self._worker_thread: threading.Thread | None = None
         self._worker_stop_flag = threading.Event()
-        self._log_queue: queue.Queue[str] = queue.Queue()
+        # v0.4.87: 日志改公共模块 GuiLogController (落盘 + preload + queue).
+        self._log_ctl = GuiLogController(app_name="dedupe_gui")
         self._progress_var = tk.StringVar(value="就绪")
         self._done_dirs = 0
         self._total_dirs = 0
@@ -666,15 +668,18 @@ class DedupeGUI:
         return ",".join(names)
 
     def _build_log_tab(self, page: ttk.Frame):
-        pad = {"padx": 6, "pady": 4}
-        # 顶部控制条
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
-        ttk.Checkbutton(row, text="自动滚到底",
-                        variable=self._auto_scroll_var).pack(side="left", padx=4)
-        ttk.Label(row, text="（手动上滚会自动暂停跟随，滚回底部恢复）",
-                  foreground="#888").pack(side="left", padx=8)
+        # v0.4.87: 工具条走 GuiLogController.build_toolbar
+        # (清空日志(Tab) / 打开日志文件夹 / 当前日志文件名).
+        # "自动滚到底" 复选框通过 extra_toolbar 追加, 保留原智能滚动行为.
+        def _extra(tb):
+            ttk.Checkbutton(tb, text="自动滚到底",
+                            variable=self._auto_scroll_var
+                            ).pack(side="left", padx=4)
+            ttk.Label(tb, text="（手动上滚会自动暂停跟随，滚回底部恢复）",
+                      foreground="#888").pack(side="left", padx=8)
+        self._log_ctl.build_toolbar(page, extra_toolbar=_extra)
 
-        # 日志区：Text + 纵/横滚动条
+        # 日志区: Text + 纵/横滚动条 (GUI 自建, 保留智能滚动 hook)
         log_wrap = ttk.Frame(page)
         log_wrap.pack(fill="both", expand=True, padx=6, pady=(2, 6))
         self._log_text = tk.Text(log_wrap, height=24,
@@ -690,12 +695,15 @@ class DedupeGUI:
         self._log_hsb.grid(row=1, column=0, sticky="ew")
         log_wrap.rowconfigure(0, weight=1)
         log_wrap.columnconfigure(0, weight=1)
-        # 鼠标滚轮 / 键盘翻页触发时判定是否在底部（暂停自动滚）
         for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>",
                     "<Prior>", "<Next>", "<Up>", "<Down>",
                     "<Key-Home>", "<Key-End>"):
             self._log_text.bind(seq, self._on_log_user_scroll, add="+")
         self._log_text.config(state="disabled")
+
+        # v0.4.87: Text 绑给控制器 + preload 上次 tail 200 行
+        self._log_ctl.attach_text(self._log_text)
+        self._log_ctl.preload_prev_tail_to_text()
 
     def _on_log_yview(self, first: str, last: str) -> None:
         """Text 的 yscrollcommand：同步滚动条位置 + 到底部时恢复自动滚。"""
@@ -1145,22 +1153,13 @@ class DedupeGUI:
     # ---------- 日志 ----------
 
     def _log(self, msg: str):
-        # v0.4.83: 时间戳加上年月日, 树状层级前缀由调用方自己拼 (● / ├─ / │ / └─)
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self._log_queue.put(f"[{ts}] {msg}\n")
+        # v0.4.87: 转发到 GuiLogController (加时间戳 + 落盘 + 塞 queue).
+        # 树状层级前缀 (● / ├─ / │ / └─) 仍由调用方自己拼.
+        self._log_ctl.log(msg)
 
     def _drain_log_queue(self):
-        appended = False
-        try:
-            while True:
-                line = self._log_queue.get_nowait()
-                self._log_text.config(state="normal")
-                self._log_text.insert("end", line)
-                self._log_text.config(state="disabled")
-                appended = True
-        except queue.Empty:
-            pass
-        if appended and self._auto_scroll_var.get():
+        # v0.4.87: pump 由公共控制器做, 智能滚由 GUI 自己判断 (跟原行为一致).
+        if self._log_ctl.pump() and self._auto_scroll_var.get():
             try:
                 self._log_text.see("end")
             except Exception:

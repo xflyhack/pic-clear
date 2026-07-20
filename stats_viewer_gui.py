@@ -28,6 +28,8 @@ except Exception as e:  # pragma: no cover
     print(f"[FATAL] 无法导入 stats_db: {e}", file=sys.stderr)
     raise
 
+from gui_log_util import GuiLogController  # noqa: E402
+
 
 # ------------------------------------------------ matplotlib 软依赖
 
@@ -88,9 +90,16 @@ class StatsViewerApp:
         self.range_var = tk.StringVar(value="最近 7 天")
         self.host_var = tk.StringVar(value="全部")
 
+        # v0.4.87: 日志改公共模块 GuiLogController (落盘 + preload + queue).
+        self._log_ctl = GuiLogController(app_name="stats_viewer_gui")
+        self._auto_scroll_var = tk.BooleanVar(value=True)
+
         self._build_topbar()
         self._build_tabs()
         self._build_footer()
+
+        # v0.4.87: 起 pump 循环, 把 controller queue 里的行灌进 Text.
+        self.root.after(200, self._drain_log_queue)
 
         self._log(f"就绪. 版本 {_read_version()}")
 
@@ -240,9 +249,17 @@ class StatsViewerApp:
     # ---------- Tab: 日志
 
     def _build_log_tab(self) -> None:
+        # v0.4.87: 工具条走 GuiLogController.build_toolbar
+        # (清空日志(Tab) / 打开日志文件夹 / 当前日志文件名).
+        def _extra(tb):
+            ttk.Checkbutton(tb, text="自动滚到底",
+                            variable=self._auto_scroll_var
+                            ).pack(side="left", padx=4)
+        self._log_ctl.build_toolbar(self.tab_log, extra_toolbar=_extra)
+
         frame = ttk.Frame(self.tab_log)
         frame.pack(fill="both", expand=True)
-        self._log_text = tk.Text(frame, wrap="none")
+        self._log_text = tk.Text(frame, wrap="none", font=("Consolas", 9))
         sb_y = ttk.Scrollbar(frame, orient="vertical",
                              command=self._log_text.yview)
         sb_x = ttk.Scrollbar(frame, orient="horizontal",
@@ -255,16 +272,24 @@ class StatsViewerApp:
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
+        # v0.4.87: Text 绑给控制器 + preload 上次 tail 200 行
+        self._log_ctl.attach_text(self._log_text)
+        self._log_ctl.preload_prev_tail_to_text()
+
     # ---------- 公共
 
     def _log(self, msg: str) -> None:
-        ts = datetime.now().strftime("%H:%M:%S")
-        line = f"[{ts}] {msg}\n"
-        try:
-            self._log_text.insert("end", line)
-            self._log_text.see("end")
-        except Exception:
-            print(line, end="")
+        # v0.4.87: 转发到 GuiLogController (加时间戳 + 落盘 + 塞 controller queue).
+        # 下一次 _drain_log_queue 里 pump() 就会把该行灌进 Text.
+        self._log_ctl.log(msg)
+
+    def _drain_log_queue(self) -> None:
+        if self._log_ctl.pump() and self._auto_scroll_var.get():
+            try:
+                self._log_text.see("end")
+            except Exception:
+                pass
+        self.root.after(200, self._drain_log_queue)
 
     def _on_pick_dir(self) -> None:
         d = filedialog.askdirectory(
