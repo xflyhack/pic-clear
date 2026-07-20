@@ -222,7 +222,7 @@ class ClassifyApp:
 
         row = 0
 
-        def add_path_row(parent, label, var, is_dir=True):
+        def add_path_row(parent, label, var, is_dir=True, extra_button=None):
             nonlocal row
             ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", **pad)
             ttk.Entry(parent, textvariable=var, width=68).grid(
@@ -232,11 +232,19 @@ class ClassifyApp:
                 parent, text="浏览…",
                 command=lambda: self._pick(var, is_dir),
             ).grid(row=row, column=2, **pad)
+            if extra_button is not None:
+                btn_text, btn_cmd = extra_button
+                ttk.Button(parent, text=btn_text, command=btn_cmd).grid(
+                    row=row, column=3, **pad
+                )
             row += 1
 
         add_path_row(top, "输入根目录", self.in_var, True)
         add_path_row(top, "输出根目录", self.out_var, True)
-        add_path_row(top, "样例目录 (rules)", self.rules_var, True)
+        add_path_row(
+            top, "样例目录 (rules)", self.rules_var, True,
+            extra_button=("新建样例目录", self._create_sample_dir_skeleton),
+        )
         add_path_row(top, "Marker 根目录", self.markers_root_var, True)
 
         def add_text_row(parent, label, var, tip=""):
@@ -376,6 +384,65 @@ class ClassifyApp:
             )
         if p:
             var.set(p)
+
+    # v0.4.103: 一键在 ~/.pic-clear/rules/ 下建齐 6 个中文桶目录 + README,
+    # 用户只需往对应桶里丢样例图, 点"刷新样例"就能加载 embedding, 免去手工建目录.
+    def _create_sample_dir_skeleton(self) -> None:
+        """点『新建样例目录』按钮: 在 ~/.pic-clear/rules/ 下建齐 6 桶骨架."""
+        rules_path = Path(os.path.expanduser("~")) / ".pic-clear" / "rules"
+        # 3 桶走 embedding, 用户在这里丢样例图有效
+        embed_buckets = {BUCKET_HOOD, BUCKET_GESTURE, BUCKET_OCCLUSION}
+        # 另外 3 桶走 YOLO / 路径关键字, 样例图不生效, 建目录仅是"占位提示"
+        yolo_note = (
+            "本桶走 YOLO / 路径关键字判定, 不使用 embedding 相似度匹配.\n"
+            "往这里丢样例图不会生效 (放了也会被忽略).\n"
+            "此目录仅作为占位, 保持 rules/ 骨架完整.\n"
+        )
+        embed_note = (
+            "本桶走 少样本 embedding 相似度匹配.\n"
+            "把 2-10 张具有代表性的样例图 (jpg/png) 直接丢到这个目录, 然后回到 GUI 点『刷新样例』.\n"
+            "样例越像目标场景越好; 数量太多反而稀释, 一般 5 张左右够用.\n"
+        )
+        try:
+            rules_path.mkdir(parents=True, exist_ok=True)
+            created: list[str] = []
+            skipped: list[str] = []
+            for bucket in BUCKET_ORDER:
+                sub = rules_path / bucket
+                if sub.is_dir():
+                    skipped.append(bucket)
+                else:
+                    sub.mkdir(parents=True, exist_ok=True)
+                    created.append(bucket)
+                readme = sub / "README.txt"
+                if not readme.is_file():
+                    note = embed_note if bucket in embed_buckets else yolo_note
+                    readme.write_text(note, encoding="utf-8")
+        except Exception as e:
+            messagebox.showerror(APP_TITLE, f"创建样例目录失败: {e}")
+            return
+
+        # 自动把新目录填回输入框, 用户点『刷新样例』直接生效
+        self.rules_var.set(str(rules_path))
+
+        msg_lines = [f"样例目录已建在: {rules_path}", ""]
+        if created:
+            msg_lines.append(f"新建 {len(created)} 个桶: {', '.join(created)}")
+        if skipped:
+            msg_lines.append(f"已存在 {len(skipped)} 个桶 (未覆盖): {', '.join(skipped)}")
+        msg_lines.extend([
+            "",
+            "使用步骤:",
+            "  1) 打开上面这个目录",
+            "  2) 把样例图 (2-10 张) 分别丢到:",
+            f"     · {BUCKET_HOOD}/",
+            f"     · {BUCKET_GESTURE}/",
+            f"     · {BUCKET_OCCLUSION}/",
+            "     (另外 3 桶走 YOLO/关键字, 无需丢样例图)",
+            "  3) 回到 GUI 点『刷新样例』即可加载",
+        ])
+        messagebox.showinfo(APP_TITLE, "\n".join(msg_lines))
+        self._enqueue_log(f"[样例] 已建骨架于 {rules_path}, 新建 {len(created)} / 已存在 {len(skipped)}")
 
     def _refresh_samples(self) -> None:
         """点按钮：加载 rules/ 下的样例（增量），把每桶数量显示到界面。"""
