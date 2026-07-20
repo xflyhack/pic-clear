@@ -38,15 +38,20 @@ jobs:
           type _version.py
         shell: cmd
 
-      - name: Download ffmpeg (static build for Windows)
-        # BtbN 提供的 gpl 静态编译版：解压后 bin/ffmpeg.exe 直接可用
+      - name: Download ffmpeg + ffprobe (static build for Windows)
+        # BtbN 提供的 gpl 静态编译版, 一个 zip 里同时带 ffmpeg.exe / ffprobe.exe.
+        # v0.4.100: 顺带把 ffprobe.exe 也拿出来, 供 extract_frames 抽帧后 probe
+        # 视频时长落库 (v0.4.92 加的 duration 逻辑依赖它).
         run: |
           Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_dl
-          # 找到 ffmpeg.exe 拷到当前目录
-          $ff = Get-ChildItem -Recurse ffmpeg_dl -Filter ffmpeg.exe | Select-Object -First 1
+          # 找到 ffmpeg.exe / ffprobe.exe 各自拷到当前目录
+          $ff = Get-ChildItem -Recurse ffmpeg_dl -Filter ffmpeg.exe  | Select-Object -First 1
+          $fp = Get-ChildItem -Recurse ffmpeg_dl -Filter ffprobe.exe | Select-Object -First 1
           Copy-Item $ff.FullName -Destination ffmpeg.exe
-          Get-Item ffmpeg.exe | Select-Object Name, Length
+          Copy-Item $fp.FullName -Destination ffprobe.exe
+          Get-Item ffmpeg.exe   | Select-Object Name, Length
+          Get-Item ffprobe.exe  | Select-Object Name, Length
         shell: pwsh
 
       - name: Prepare build folder
@@ -81,6 +86,7 @@ jobs:
           pyinstaller --onefile --console --name extract_frames ^
             --icon "..\icon.ico" ^
             --add-binary "..\ffmpeg.exe;." ^
+            --add-binary "..\ffprobe.exe;." ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import _version ^
             --hidden-import winpath_util ^
