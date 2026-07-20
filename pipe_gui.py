@@ -1543,6 +1543,403 @@ def require_otp_or_die() -> None:
         sys.exit(4)
 
 
+# ---------- v0.4.105: 常驻式 OTP 守护 (睡觉场景优化) ----------
+#
+# 老的 require_otp_or_die 是"启动时一次性校验": 24h 到期时 exe 早已启动,
+# 不会重新弹; 但用户又想"运行中过期能补输". 老逻辑还有个大坑: 输错/取消
+# 会 sys.exit(4), 睡觉场景一觉起来 exe 全没了.
+#
+# 新的 install_otp_daemon 语义:
+# 1) 启动时不校验, 直接进主 UI
+# 2) 装 tk after() 心跳, 每 60 秒检查 session 文件
+# 3) session 到期 -> 抢锁 (~/.pic-clear/otp_prompting.lock) -> 弹 Toplevel 常驻窗
+#    - 窗口不消失, 不重弹; 用户睡一夜起来窗口还在
+#    - 输对 -> 写 session, 删锁, 摘黄条 (自身 + 其他 GUI 共享 session 自动摘)
+#    - 输错 3 次 -> 冷却 60s, 不 sys.exit
+#    - 用户关窗 -> 只关弹窗, 加持久黄条 "OTP 已过期, 点这里输入口令"; 不退出
+# 4) 抢不到锁 (另一个 GUI 在弹) -> 挂黄条, 心跳继续
+# 5) 后台 worker 完全不受影响 (跟弹窗解耦)
+#
+# 为什么放在 pipe_gui.py 而不是新建 otp_gate.py:
+# 4 个数旗 GUI 的 workflow 都已经 hidden-import pipe_gui + copy pipe_gui.py +
+# pyarmor gen pipe_gui.py. 新建模块要改 4 处 workflow 容易漏 (血泪 #14 静默失败).
+
+OTP_PROMPT_LOCK_PATH = Path.home() / ".pic-clear" / "otp_prompting.lock"
+OTP_PROMPT_LOCK_TTL = 30 * 60  # 30 分钟, 防止 GUI 崩溃后锁永久卡住
+OTP_DAEMON_TICK_MS = 60 * 1000  # 心跳 1 分钟, 到期精度足够
+
+
+def _otp_session_expires_at() -> float:
+    """读 session 文件返回过期时刻 (unix ts); 无 session / 读失败返回 0."""
+    try:
+        if not OTP_SESSION_PATH.is_file():
+            return 0.0
+        data = json.loads(OTP_SESSION_PATH.read_text(encoding="utf-8"))
+        return float(data.get("expires_at", 0))
+    except Exception:
+        return 0.0
+
+
+def _otp_prompt_lock_acquire() -> bool:
+    """尝试抢"当前正在弹 OTP 输入框"的全局锁.
+
+    - 用 O_CREAT|O_EXCL 原子写文件, 多 GUI 同时到期只有一个能抢到
+    - 锁自带 TTL (30 分钟), 过期视为陈旧, 允许覆盖 (防 GUI 崩溃后锁永卡)
+    """
+    try:
+        OTP_PROMPT_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # 先看现有锁是否过期
+        if OTP_PROMPT_LOCK_PATH.is_file():
+            try:
+                data = json.loads(OTP_PROMPT_LOCK_PATH.read_text(encoding="utf-8"))
+                created_at = float(data.get("created_at", 0))
+                if time.time() - created_at < OTP_PROMPT_LOCK_TTL:
+                    return False  # 别人还在弹, 且没超时
+                # 超时, 走下面覆盖逻辑
+            except Exception:
+                pass  # 锁文件损坏, 覆盖
+        # 原子创建 (O_EXCL 抢锁)
+        try:
+            fd = os.open(str(OTP_PROMPT_LOCK_PATH),
+                         os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            # 极端情况: 上面判过期但另一进程刚好也进来抢, 强制覆盖 (陈旧锁)
+            try:
+                OTP_PROMPT_LOCK_PATH.unlink()
+                fd = os.open(str(OTP_PROMPT_LOCK_PATH),
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            except Exception:
+                return False
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"created_at": time.time(), "pid": os.getpid()}, f)
+            return True
+        except Exception:
+            return False
+    except Exception as e:
+        # 抢锁本身失败不能拦住 OTP (否则永远弹不出来), 保守放行
+        print(f"[OTP] 抢锁失败, 直接弹: {e}", file=sys.stderr)
+        return True
+
+
+def _otp_prompt_lock_release() -> None:
+    """释放弹窗锁 (输对 / 用户关窗都要调)."""
+    try:
+        if OTP_PROMPT_LOCK_PATH.is_file():
+            OTP_PROMPT_LOCK_PATH.unlink()
+    except Exception as e:
+        print(f"[OTP] 释放锁失败: {e}", file=sys.stderr)
+
+
+def _otp_prompt_lock_alive() -> bool:
+    """当前是否有活着的弹窗锁 (仅用于'该不该挂黄条'的判断)."""
+    try:
+        if not OTP_PROMPT_LOCK_PATH.is_file():
+            return False
+        data = json.loads(OTP_PROMPT_LOCK_PATH.read_text(encoding="utf-8"))
+        created_at = float(data.get("created_at", 0))
+        return (time.time() - created_at) < OTP_PROMPT_LOCK_TTL
+    except Exception:
+        return False
+
+
+def _show_otp_toplevel(parent, secret: str, on_success, on_close) -> None:
+    """常驻式 OTP 输入 Toplevel; 跟宿主 GUI 共享事件循环, 不 mainloop.
+
+    - 输对 -> 写 session -> 调 on_success() -> destroy
+    - 输错 3 次 -> 冷却 60s 后可再输 (不 exit)
+    - 用户点关闭 / 退出 -> 调 on_close() (由调用方决定是否加持久黄条); 不 exit
+    """
+    try:
+        from otp_utils import verify as _otp_verify
+    except Exception as e:
+        # otp_utils 挂了, 保守放行避免误伤 (跟老逻辑一致)
+        print(f"[OTP] 加载 otp_utils 失败: {e}", file=sys.stderr)
+        _otp_session_mark_ok()
+        try:
+            on_success()
+        except Exception:
+            pass
+        return
+
+    top = tk.Toplevel(parent)
+    top.title("动态口令 - 请输入 6 位")
+    try:
+        _apply_window_icon(top)
+    except Exception:
+        pass
+    top.resizable(False, False)
+    try:
+        top.attributes("-topmost", True)
+    except Exception:
+        pass
+    try:
+        top.transient(parent)
+    except Exception:
+        pass
+
+    scale = getattr(parent, "__ui_scale__", 1.0) or 1.0
+    w, h = int(420 * scale), int(280 * scale)
+    top.geometry(f"{w}x{h}")
+
+    state = {"attempts": 0, "lock_until": 0.0, "done": False}
+
+    tk.Label(top, text="24 小时使用期限已到, 请输入 6 位动态口令",
+             font=("Microsoft YaHei", 12, "bold"),
+             wraplength=int(380 * scale)).pack(pady=(16, 4))
+    tk.Label(top, text="口令每 30 秒变化一次, 容忍 ±90 秒 / 当前任务不会被打断",
+             foreground="#666", font=("Microsoft YaHei", 9),
+             wraplength=int(380 * scale)).pack()
+
+    entry_var = tk.StringVar()
+    entry = ttk.Entry(top, textvariable=entry_var,
+                      width=10, justify="center",
+                      font=("Consolas", 22, "bold"))
+    entry.pack(pady=(14, 6))
+    entry.focus_set()
+
+    msg_var = tk.StringVar(value="")
+    tk.Label(top, textvariable=msg_var,
+             foreground="#c0392b", font=("Microsoft YaHei", 10)).pack(pady=(2, 6))
+
+    btn_frame = tk.Frame(top)
+    btn_frame.pack(pady=(4, 8))
+
+    def _in_lockout() -> float:
+        remain = state["lock_until"] - time.time()
+        return remain if remain > 0 else 0.0
+
+    def _tick_lockout():
+        if state["done"]:
+            return
+        remain = _in_lockout()
+        if remain > 0:
+            msg_var.set(f"输错太多, 请等 {int(remain)+1} 秒 (当前任务不受影响)")
+            try:
+                entry.configure(state="disabled")
+            except Exception:
+                pass
+            top.after(1000, _tick_lockout)
+        else:
+            msg_var.set("")
+            try:
+                entry.configure(state="normal")
+                entry.focus_set()
+            except Exception:
+                pass
+
+    def _do_submit(event=None):
+        if state["done"] or _in_lockout() > 0:
+            return
+        code = "".join(ch for ch in (entry_var.get() or "") if ch.isdigit())
+        if len(code) != 6:
+            msg_var.set("请输入 6 位数字")
+            return
+        try:
+            ok = _otp_verify(secret, code, window=3)
+        except Exception as e:
+            msg_var.set(f"验证异常: {e}")
+            return
+        if not ok and code == OTP_BACKUP_CODE:
+            print("[OTP] 使用备用测试口令通过 (daemon)", flush=True)
+            ok = True
+        if ok:
+            state["done"] = True
+            _otp_session_mark_ok()
+            _otp_prompt_lock_release()
+            try:
+                on_success()
+            except Exception:
+                pass
+            try:
+                top.destroy()
+            except Exception:
+                pass
+            return
+        state["attempts"] += 1
+        remain = OTP_LOCKOUT_ATTEMPTS - state["attempts"]
+        entry_var.set("")
+        if remain <= 0:
+            state["attempts"] = 0
+            state["lock_until"] = time.time() + OTP_LOCKOUT_SECONDS
+            _tick_lockout()
+        else:
+            msg_var.set(f"口令错误, 还剩 {remain} 次机会")
+
+    def _do_close():
+        # 用户不想输了, 但不退出软件; 释放锁让其他 GUI 有机会弹
+        if state["done"]:
+            return
+        state["done"] = True
+        _otp_prompt_lock_release()
+        try:
+            on_close()
+        except Exception:
+            pass
+        try:
+            top.destroy()
+        except Exception:
+            pass
+
+    ttk.Button(btn_frame, text="确定", command=_do_submit, width=10).pack(side="left", padx=4)
+    ttk.Button(btn_frame, text="稍后再说", command=_do_close, width=10).pack(side="left", padx=4)
+
+    entry.bind("<Return>", _do_submit)
+
+    def _on_key_release(event=None):
+        code = "".join(ch for ch in (entry_var.get() or "") if ch.isdigit())
+        if code != (entry_var.get() or ""):
+            entry_var.set(code[:6])
+        if len(code) >= 6:
+            _do_submit()
+    entry.bind("<KeyRelease>", _on_key_release)
+    top.protocol("WM_DELETE_WINDOW", _do_close)
+
+    try:
+        top.lift()
+        top.focus_force()
+    except Exception:
+        pass
+
+
+def install_otp_daemon(root, app_title: str = "数旗工具") -> None:
+    """v0.4.105: 常驻式 OTP 守护; 在 root = tk.Tk() 之后、mainloop() 之前调.
+
+    - 启动不校验, 直接允许进主 UI
+    - 装 60s 心跳: session 到期 -> 抢锁弹 Toplevel; 抢不到 -> 挂黄条
+    - 输错/取消都不 sys.exit; worker 不受影响
+    - PIC_CLEAR_SKIP_OTP=1 完全跳过 (供开发/调试)
+    - otp.secret 不存在 -> 自动生成 (跟老逻辑一致)
+    """
+    if os.environ.get("PIC_CLEAR_SKIP_OTP") == "1":
+        return
+
+    # 读取 secret; 没有就自动生成一份 (对齐 require_otp_or_die 行为)
+    secret = _read_otp_secret()
+    if not secret:
+        try:
+            from otp_utils import generate_secret as _gen
+            secret_path = _resolve_otp_secret_path()
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            new_secret = _gen()
+            secret_path.write_text(new_secret + "\n", encoding="utf-8")
+            secret = new_secret
+            print(f"[OTP] 已自动生成 otp.secret -> {secret_path}", flush=True)
+        except Exception as e:
+            # 无法生成 secret: 打日志但不阻塞 GUI (老逻辑会 exit, 新语义是"睡觉场景友好")
+            print(f"[OTP] 自动生成 otp.secret 失败, OTP 守护暂停: {e}",
+                  file=sys.stderr)
+            return
+
+    # 顶部黄条 (延迟创建, 到期才 pack)
+    banner_frame = tk.Frame(root, bg="#fff3cd", bd=1, relief="solid")
+    banner_var = tk.StringVar(value="")
+    banner_lbl = tk.Label(banner_frame, textvariable=banner_var,
+                          bg="#fff3cd", fg="#856404",
+                          font=("Microsoft YaHei", 10),
+                          padx=8, pady=6, anchor="w")
+    banner_lbl.pack(side="left", fill="x", expand=True)
+
+    state = {"banner_visible": False, "prompt_open": False}
+
+    def _hide_banner():
+        if state["banner_visible"]:
+            try:
+                banner_frame.pack_forget()
+            except Exception:
+                pass
+            state["banner_visible"] = False
+
+    def _show_banner(text: str, on_click=None):
+        banner_var.set(text)
+        if not state["banner_visible"]:
+            try:
+                # 尝试 pack 到最顶部 (before 已存在的第一个子控件); 失败退化为普通 pack
+                children = [c for c in root.winfo_children() if c is not banner_frame]
+                if children:
+                    banner_frame.pack(side="top", fill="x", before=children[0])
+                else:
+                    banner_frame.pack(side="top", fill="x")
+            except Exception:
+                try:
+                    banner_frame.pack(side="top", fill="x")
+                except Exception:
+                    pass
+            state["banner_visible"] = True
+        # 点击黄条 = 手动打开输入框
+        for widget in (banner_frame, banner_lbl):
+            try:
+                widget.bind("<Button-1>", lambda e: on_click() if on_click else None)
+                widget.configure(cursor="hand2")
+            except Exception:
+                pass
+
+    def _try_prompt():
+        if state["prompt_open"]:
+            return
+        # 抢锁; 抢不到就挂黄条等其他 GUI
+        if not _otp_prompt_lock_acquire():
+            _show_banner(
+                f"[{app_title}] OTP 已过期; 另一个窗口正在等待输入, "
+                "输完全部恢复 (当前任务不受影响)",
+                on_click=None,
+            )
+            return
+        state["prompt_open"] = True
+
+        def _on_ok():
+            state["prompt_open"] = False
+            _hide_banner()
+
+        def _on_close():
+            state["prompt_open"] = False
+            # 用户主动关了弹窗, 挂持久黄条, 点一下能再打开
+            _show_banner(
+                f"[{app_title}] OTP 已过期, 点这里输入口令 (当前任务不受影响)",
+                on_click=_try_prompt,
+            )
+
+        try:
+            _show_otp_toplevel(root, secret, _on_ok, _on_close)
+        except Exception as e:
+            print(f"[OTP] 弹 Toplevel 失败: {e}", file=sys.stderr)
+            state["prompt_open"] = False
+            _otp_prompt_lock_release()
+
+    def _tick():
+        try:
+            exp = _otp_session_expires_at()
+            now = time.time()
+            if exp <= now:
+                # 过期
+                if not state["prompt_open"]:
+                    if _otp_prompt_lock_alive():
+                        # 别人在弹, 挂黄条
+                        _show_banner(
+                            f"[{app_title}] OTP 已过期; 另一个窗口正在等待输入, "
+                            "输完全部恢复 (当前任务不受影响)",
+                            on_click=None,
+                        )
+                    else:
+                        # 自己弹
+                        _try_prompt()
+            else:
+                # 未过期, 摘黄条 (被其他 GUI 输对后自动摘)
+                _hide_banner()
+        except Exception as e:
+            print(f"[OTP] 心跳异常: {e}", file=sys.stderr)
+        try:
+            root.after(OTP_DAEMON_TICK_MS, _tick)
+        except Exception:
+            pass
+
+    # 首次立即跑一次 (不等 60s), 已经过期的 exe 打开就该弹
+    try:
+        root.after(200, _tick)
+    except Exception:
+        pass
+
+
 # ==================== TOTP 动态口令 END ====================
 
 

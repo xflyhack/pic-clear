@@ -991,6 +991,13 @@ def main() -> int:
     if "--skip-license" not in sys.argv:
         _check_license_or_die_gui()
     root = Tk()
+    # v0.4.105: 动态口令改成"常驻守护"; 跟另外 3 个数旗 GUI 一致.
+    # classify_gui 之前没接 OTP, 这次一起补上 (行为跟 dedupe / extract 完全一致).
+    try:
+        import pipe_gui as _pg
+        _pg.install_otp_daemon(root, app_title="数旗_图片分类工具")
+    except Exception as _otp_e:
+        print(f"[OTP] install_otp_daemon 失败: {_otp_e}", file=sys.stderr)
     ClassifyApp(root)
     root.mainloop()
     return 0

@@ -1156,15 +1156,17 @@ def main() -> int:
                 print(f"[授权] {license_info.get('msg')}", file=sys.stderr)
             sys.exit(3)
 
-    # ---- 动态口令（TOTP，v0.3.0 新增），未通过 sys.exit(4) ----
-    _pg.require_otp_or_die()
-
+    # v0.4.105: 动态口令改成"常驻守护"; 详见 pipe_gui.install_otp_daemon.
     root = tk.Tk()
     # 先隐藏窗口，等 UI 全部构造完再一次性 deiconify，避免"小窗口闪现→变大"
     root.withdraw()
     try:
         scale = _pg._apply_dpi_scaling(root)
         root.__ui_scale__ = scale
+        try:
+            _pg.install_otp_daemon(root, app_title="数旗_视频抽帧工具")
+        except Exception as _otp_e:
+            print(f"[OTP] install_otp_daemon 失败: {_otp_e}", file=sys.stderr)
         app = ExtractGUI(root)
         app._license_info = license_info
         try:

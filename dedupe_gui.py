@@ -1340,15 +1340,19 @@ def main() -> int:
                 print(f"[授权] {license_info.get('msg')}", file=sys.stderr)
             sys.exit(3)
 
-    # ---- 动态口令（TOTP，v0.3.0 新增），未通过 sys.exit(4) ----
-    _pg.require_otp_or_die()
-
+    # v0.4.105: 动态口令改成"常驻守护": 启动不校验, 24h 过期后运行时弹 Toplevel;
+    # 输错/取消都不 sys.exit; 三个 GUI 抢锁避免多弹. 睡觉场景友好.
     root = tk.Tk()
     # 先隐藏窗口，等 UI 全部构造完再一次性 deiconify，避免"小窗口闪现→变大"
     root.withdraw()
     try:
         scale = _pg._apply_dpi_scaling(root)
         root.__ui_scale__ = scale
+        # OTP 守护: root 必须存在才能挂 after(); 在 UI 构造之前装, 保证黄条能顶部 pack
+        try:
+            _pg.install_otp_daemon(root, app_title="数旗_图片去重工具")
+        except Exception as _otp_e:
+            print(f"[OTP] install_otp_daemon 失败: {_otp_e}", file=sys.stderr)
         app = DedupeGUI(root)
         app._license_info = license_info
         try:
