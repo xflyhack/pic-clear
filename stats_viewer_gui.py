@@ -92,6 +92,10 @@ class StatsViewerApp:
         self.scan_dir_var = tk.StringVar(value=str(default_dir))
         self.range_var = tk.StringVar(value="最近 7 天")
         self.host_var = tk.StringVar(value="全部")
+        # v0.4.89: "最终 / 流水" 视图切换.
+        #   最终 (默认) = 读 *_final 表, 一目标一行 UPSERT, 重复切帧不重复计数.
+        #   流水       = 读 *_stats 老表, 每次任务一条, 用于审计/回放.
+        self.view_mode_var = tk.StringVar(value="最终")
 
         # v0.4.87: 日志改公共模块 GuiLogController (落盘 + preload + queue).
         self._log_ctl = GuiLogController(app_name="stats_viewer_gui")
@@ -160,6 +164,13 @@ class StatsViewerApp:
         )
         self._host_cb.pack(side="left")
 
+        # v0.4.89: 视图切换. 最终=去重复计数 (推荐), 流水=每次任务一条.
+        ttk.Label(bar, text="  视图:").pack(side="left")
+        ttk.Combobox(
+            bar, textvariable=self.view_mode_var, width=8, state="readonly",
+            values=("最终", "流水"),
+        ).pack(side="left")
+
         ttk.Button(bar, text="刷新",
                    command=self.refresh_async).pack(side="left", padx=8)
 
@@ -208,10 +219,12 @@ class StatsViewerApp:
         # 下: 明细表
         bot = ttk.Frame(pw)
         pw.add(bot, weight=3)
-        cols = ("ts", "host", "video_path", "frames", "stage",
-                "elapsed_sec", "fps")
+        cols = ("ts", "host", "machine_fp", "local_ip",
+                "video_path", "frames", "stage",
+                "run_count", "version", "elapsed_sec", "fps")
         tv = _make_table(bot, cols, headers=(
-            "时间", "机器", "视频", "帧数", "结果", "耗时(s)", "fps",
+            "时间", "机器", "指纹", "IP", "视频", "帧数", "结果",
+            "重复次数", "版本", "耗时(s)", "fps",
         ), on_double_click=lambda row:
            self._show_row_detail("抽帧记录", row, "extract"))
         self._extract_tv = tv
@@ -229,11 +242,12 @@ class StatsViewerApp:
 
         bot = ttk.Frame(pw)
         pw.add(bot, weight=3)
-        cols = ("ts", "host", "dir_path", "total", "deleted", "remain",
-                "freed_mb", "elapsed_sec")
+        cols = ("ts", "host", "machine_fp", "local_ip",
+                "dir_path", "total", "deleted", "remain",
+                "freed_mb", "run_count", "version", "elapsed_sec")
         tv = _make_table(bot, cols, headers=(
-            "时间", "机器", "目录", "总数", "删除", "剩余",
-            "释放(MB)", "耗时(s)",
+            "时间", "机器", "指纹", "IP", "目录", "总数", "删除", "剩余",
+            "释放(MB)", "重复次数", "版本", "耗时(s)",
         ), on_double_click=lambda row:
            self._show_row_detail("去重记录", row, "dedupe"))
         self._dedupe_tv = tv
@@ -251,11 +265,12 @@ class StatsViewerApp:
 
         bot = ttk.Frame(pw)
         pw.add(bot, weight=3)
-        cols = ("ts", "host", "camera_dir", "scanned", "copied_bucket",
-                "buckets", "elapsed_sec")
+        cols = ("ts", "host", "machine_fp", "local_ip",
+                "camera_dir", "scanned", "copied_bucket",
+                "buckets", "run_count", "version", "elapsed_sec")
         tv = _make_table(bot, cols, headers=(
-            "时间", "机器", "camera", "扫描", "复制到桶",
-            "桶分布", "耗时(s)",
+            "时间", "机器", "指纹", "IP", "camera", "扫描", "复制到桶",
+            "桶分布", "重复次数", "版本", "耗时(s)",
         ), on_double_click=lambda row:
            self._show_row_detail("分类记录", row, "classify"))
         self._classify_tv = tv
@@ -378,24 +393,46 @@ class StatsViewerApp:
                 Path.home() / ".pic-clear"
             )
             self._db_files = _stats_db.iter_db_files(scan_dir)
-            self._log(f"扫到 {len(self._db_files)} 个 db: {scan_dir}")
+            mode = self.view_mode_var.get() or "最终"
+            self._log(f"扫到 {len(self._db_files)} 个 db: {scan_dir} [视图={mode}]")
 
-            where, params = self._build_time_filter()
-            self._extract_rows = _stats_db.query_all(
-                self._db_files, "extract_stats",
-                where_sql=where, params=params,
-                order_by="ts DESC", limit=5000,
-            )
-            self._dedupe_rows = _stats_db.query_all(
-                self._db_files, "dedupe_stats",
-                where_sql=where, params=params,
-                order_by="ts DESC", limit=5000,
-            )
-            self._classify_rows = _stats_db.query_all(
-                self._db_files, "classify_stats",
-                where_sql=where, params=params,
-                order_by="ts DESC", limit=5000,
-            )
+            if mode == "流水":
+                # 老流水: *_stats 表, 时间字段就是 ts
+                where, params = self._build_time_filter(ts_col="ts")
+                self._extract_rows = _stats_db.query_all(
+                    self._db_files, "extract_stats",
+                    where_sql=where, params=params,
+                    order_by="ts DESC", limit=5000,
+                )
+                self._dedupe_rows = _stats_db.query_all(
+                    self._db_files, "dedupe_stats",
+                    where_sql=where, params=params,
+                    order_by="ts DESC", limit=5000,
+                )
+                self._classify_rows = _stats_db.query_all(
+                    self._db_files, "classify_stats",
+                    where_sql=where, params=params,
+                    order_by="ts DESC", limit=5000,
+                )
+            else:
+                # 最终: *_final 表, 字段名不同 (last_ts / last_version / last_stage ...)
+                # 查询后统一映射成流水字段, 下游渲染代码不用感知差异.
+                where, params = self._build_time_filter(ts_col="last_ts")
+                self._extract_rows = _map_final_rows(
+                    _query_final(self._db_files, "extract_final",
+                                 where, params),
+                    "extract",
+                )
+                self._dedupe_rows = _map_final_rows(
+                    _query_final(self._db_files, "dedupe_final",
+                                 where, params),
+                    "dedupe",
+                )
+                self._classify_rows = _map_final_rows(
+                    _query_final(self._db_files, "classify_final",
+                                 where, params),
+                    "classify",
+                )
 
             # host 下拉
             hosts = sorted({
@@ -431,14 +468,14 @@ class StatsViewerApp:
             f"抽帧 {len(ext)} 条 / 去重 {len(ded)} 条 / 分类 {len(clf)} 条"
         )
 
-    def _build_time_filter(self) -> tuple[str, tuple]:
+    def _build_time_filter(self, ts_col: str = "ts") -> tuple[str, tuple]:
         r = self.range_var.get()
         if r == "全部":
             return "", ()
         days = {"最近 1 天": 1, "最近 7 天": 7, "最近 30 天": 30}.get(r, 7)
         since = (datetime.now() - timedelta(days=days)
                  ).strftime("%Y-%m-%d %H:%M:%S")
-        return "ts >= ?", (since,)
+        return f"{ts_col} >= ?", (since,)
 
     # ---------- 详情弹层 (三个 Tab 双击共用)
 
@@ -464,9 +501,13 @@ class StatsViewerApp:
         _fill_table(self._extract_tv, rows, [
             ("ts", "ts"),
             ("host", "host"),
+            ("machine_fp", lambda r: r.get("machine_fp") or ""),
+            ("local_ip",   lambda r: r.get("local_ip") or ""),
             ("video_path", "video_path"),
             ("frames", "frames"),
             ("stage", "stage"),
+            ("run_count", lambda r: r.get("run_count") or ""),
+            ("version", lambda r: r.get("version") or ""),
             ("elapsed_sec", lambda r: f"{(r.get('elapsed_sec') or 0):.1f}"),
             ("fps", "fps"),
         ])
@@ -485,12 +526,16 @@ class StatsViewerApp:
         _fill_table(self._dedupe_tv, rows, [
             ("ts", "ts"),
             ("host", "host"),
+            ("machine_fp", lambda r: r.get("machine_fp") or ""),
+            ("local_ip",   lambda r: r.get("local_ip") or ""),
             ("dir_path", "dir_path"),
             ("total", "total"),
             ("deleted", "deleted"),
             ("remain", "remain"),
             ("freed_mb",
              lambda r: f"{(r.get('freed_bytes') or 0) / 1024 / 1024:.1f}"),
+            ("run_count", lambda r: r.get("run_count") or ""),
+            ("version", lambda r: r.get("version") or ""),
             ("elapsed_sec",
              lambda r: f"{(r.get('elapsed_sec') or 0):.1f}"),
         ])
@@ -517,10 +562,14 @@ class StatsViewerApp:
         _fill_table(self._classify_tv, rows, [
             ("ts", "ts"),
             ("host", "host"),
+            ("machine_fp", lambda r: r.get("machine_fp") or ""),
+            ("local_ip",   lambda r: r.get("local_ip") or ""),
             ("camera_dir", "camera_dir"),
             ("scanned", "scanned"),
             ("copied_bucket", "copied_bucket"),
             ("buckets", _fmt_buckets),
+            ("run_count", lambda r: r.get("run_count") or ""),
+            ("version", lambda r: r.get("version") or ""),
             ("elapsed_sec",
              lambda r: f"{(r.get('elapsed_sec') or 0):.1f}"),
         ])
@@ -587,6 +636,14 @@ def _make_table(parent, cols: tuple[str, ...],
             w = 380
         elif c in ("buckets",):
             w = 240
+        elif c in ("version",):
+            w = 80
+        elif c in ("run_count",):
+            w = 60
+        elif c in ("machine_fp",):
+            w = 150
+        elif c in ("local_ip",):
+            w = 110
         tv.column(c, width=w, anchor="w", stretch=True)
     sb_y = ttk.Scrollbar(frame, orient="vertical", command=tv.yview)
     sb_x = ttk.Scrollbar(frame, orient="horizontal", command=tv.xview)
@@ -938,6 +995,99 @@ def _open_row_detail_dialog(parent, title, row, task_run, task_type):
                command=top.destroy).pack(side="right", padx=4)
 
 
+
+
+# ---------------------------------------- final 表查询与字段映射 (v0.4.89)
+
+def _query_final(db_files: list, table: str,
+                 where_sql: str, params: tuple) -> list[dict]:
+    """查 *_final 表. 不能直接复用 stats_db.query_all 因为它硬编码了 3 张流水表."""
+    import sqlite3
+    allowed = {"extract_final", "dedupe_final", "classify_final"}
+    if table not in allowed:
+        raise ValueError(f"invalid final table: {table}")
+    rows: list[dict] = []
+    sql = f"SELECT * FROM {table}"
+    if where_sql:
+        sql += " WHERE " + where_sql
+    sql += " ORDER BY last_ts DESC LIMIT 5000"
+    for f in db_files:
+        try:
+            conn = sqlite3.connect(str(f), timeout=5.0)
+            try:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute(sql, params)
+                for r in cur.fetchall():
+                    d = dict(r)
+                    d["_db_file"] = str(f)
+                    rows.append(d)
+            finally:
+                conn.close()
+        except sqlite3.OperationalError as e:
+            # final 表在老 db 上不存在, 首次升级时会命中, 静默跳过
+            if "no such table" not in str(e).lower():
+                print(f"[stats_viewer] WARN query final {f}: {e}",
+                      file=__import__("sys").stderr)
+        except Exception as e:
+            print(f"[stats_viewer] WARN query final {f}: {e}",
+                  file=__import__("sys").stderr)
+    # 多机 db 聚合: 抽帧按 video_md5 合并 (取 last_ts 最新的那条),
+    # 去重/分类的 PK 已经含 host, 无需二次合并.
+    if table == "extract_final":
+        merged: dict[str, dict] = {}
+        for r in rows:
+            k = r.get("video_md5") or ""
+            if not k:
+                # 极少情况: 老库或写库时缺 md5, 用 id + db_file 兜底成唯一
+                k = f"__no_md5__:{r.get('_db_file')}:{r.get('rowid') or id(r)}"
+            prev = merged.get(k)
+            if prev is None or (r.get("last_ts") or "") > (
+                    prev.get("last_ts") or ""):
+                merged[k] = r
+        rows = list(merged.values())
+        rows.sort(key=lambda r: r.get("last_ts") or "", reverse=True)
+    return rows
+
+
+def _map_final_rows(rows: list[dict], kind: str) -> list[dict]:
+    """把 *_final 表的 last_* 字段映射成流水字段名, 下游渲染代码零改动.
+
+    映射规则 (三张 final 表共用):
+      last_ts       -> ts
+      last_host     -> host (只 extract_final 有; 其他表 host 本来就有)
+      last_task_id  -> task_id
+      last_version  -> version
+      last_elapsed_sec -> elapsed_sec
+      last_stage    -> stage      (extract 专属)
+      last_exit_code-> exit_code  (dedupe/classify 专属)
+      last_msg      -> msg
+      run_count / first_ts 保留原名 (新字段).
+    """
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        # 通用
+        if "last_ts" in d:      d.setdefault("ts", d.get("last_ts"))
+        if "last_host" in d:    d.setdefault("host", d.get("last_host"))
+        if "last_task_id" in d: d.setdefault("task_id", d.get("last_task_id"))
+        if "last_version" in d: d.setdefault("version", d.get("last_version"))
+        if "last_machine_fp" in d:
+            d.setdefault("machine_fp", d.get("last_machine_fp"))
+        if "last_local_ip" in d:
+            d.setdefault("local_ip", d.get("last_local_ip"))
+        if "last_elapsed_sec" in d:
+            d.setdefault("elapsed_sec", d.get("last_elapsed_sec"))
+        if "last_msg" in d:     d.setdefault("msg", d.get("last_msg"))
+        # extract 专属
+        if kind == "extract" and "last_stage" in d:
+            d.setdefault("stage", d.get("last_stage"))
+        # dedupe / classify 专属
+        if "last_exit_code" in d:
+            d.setdefault("exit_code", d.get("last_exit_code"))
+        out.append(d)
+    return out
+
+
 def main() -> int:
     root = tk.Tk()
     app = StatsViewerApp(root)
@@ -948,6 +1098,8 @@ def main() -> int:
     app.range_var.trace_add("write", _on_range_or_host_change)
     app.host_var.trace_add("write",
                            lambda *_: app._apply_host_filter_and_render())
+    # v0.4.89: 切换 "最终/流水" 视图直接触发重新查表
+    app.view_mode_var.trace_add("write", _on_range_or_host_change)
 
     root.mainloop()
     return 0
