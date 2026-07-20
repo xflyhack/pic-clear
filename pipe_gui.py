@@ -1393,6 +1393,7 @@ def show_otp_dialog(secret: str) -> bool:
     entry_var = tk.StringVar()
     entry = ttk.Entry(root, textvariable=entry_var,
                       width=10, justify="center",
+                      show="●",
                       font=("Consolas", 22, "bold"))
     entry.pack(pady=(14, 6))
     entry.focus_set()
@@ -1694,6 +1695,7 @@ def _show_otp_toplevel(parent, secret: str, on_success, on_close) -> None:
     entry_var = tk.StringVar()
     entry = ttk.Entry(top, textvariable=entry_var,
                       width=10, justify="center",
+                      show="●",
                       font=("Consolas", 22, "bold"))
     entry.pack(pady=(14, 6))
     entry.focus_set()
