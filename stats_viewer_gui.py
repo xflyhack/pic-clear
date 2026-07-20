@@ -229,6 +229,12 @@ class StatsViewerApp:
            self._show_row_detail("抽帧记录", row, "extract"))
         self._extract_tv = tv
 
+        # v0.4.93: footer 显示当前视图下的汇总: 涉及视频数 / 帧数 / 抽帧总耗时 / 视频总时长.
+        # 数字取决于视图 (最终 vs 流水), _render_extract 里刷新.
+        self._extract_footer_var = tk.StringVar(value="")
+        ttk.Label(bot, textvariable=self._extract_footer_var,
+                  anchor="w", padding=(6, 4)).pack(side="bottom", fill="x")
+
     # ---------- Tab: 去重
 
     def _build_dedupe_tab(self) -> None:
@@ -511,6 +517,31 @@ class StatsViewerApp:
             ("elapsed_sec", lambda r: f"{(r.get('elapsed_sec') or 0):.1f}"),
             ("fps", "fps"),
         ])
+        # v0.4.93: footer 汇总. '涉及视频数' 按 video_md5 去重, 无 md5
+        # 兜底用 video_path (老数据/长路径 fingerprint 失败等场景).
+        # 最终视图: extract_final 本身按 video_md5 去重, len(rows) 就是视频数.
+        # 流水视图: 一个视频可能有多条记录, 需要去重.
+        _mode = self.view_mode_var.get() or "最终"
+        _seen: set = set()
+        _videos = 0
+        _frames = 0
+        _elapsed = 0.0
+        _duration = 0.0
+        for r in rows:
+            _k = r.get("video_md5") or r.get("video_path") or ""
+            if _k and _k not in _seen:
+                _seen.add(_k)
+                _videos += 1
+                # 视频总时长只按'每个视频计一次'算, 别把重复抽的算多次
+                _duration += float(r.get("duration_sec") or 0)
+            _frames += int(r.get("frames") or 0)
+            _elapsed += float(r.get("elapsed_sec") or 0)
+        self._extract_footer_var.set(
+            f"[{_mode}] 统计数据: 一共涉及 {_videos} 个视频, "
+            f"切出帧数 {_frames} 张, "
+            f"总耗时: {_fmt_duration_human(_elapsed)}, "
+            f"视频总时长: {_fmt_duration_human(_duration)}"
+        )
         # 柱状图: 按机器汇总"帧数/耗时"
         _plot_bar(
             self._extract_chart_frame,
@@ -790,6 +821,22 @@ def _plot_line(frame: tk.Widget, title: str,
 
 
 # ------------------------------------------------ 入口
+
+def _fmt_duration_human(sec: float | None) -> str:
+    """秒 -> 'X小时Y分钟Z秒' 人类可读. v0.4.93 footer 用."""
+    if sec is None or sec <= 0:
+        return "0秒"
+    total = int(sec)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    parts: list[str] = []
+    if h:
+        parts.append(f"{h}小时")
+    if m:
+        parts.append(f"{m}分钟")
+    parts.append(f"{s}秒")
+    return "".join(parts)
+
 
 _ROW_FIELD_LABELS: dict[str, str] = {
     "id": "记录 ID",
