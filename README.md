@@ -1,4 +1,4 @@
-# pic-clear
+# pic-clear（数旗_视频抽帧 / 图片去重 / 图片分类 / 数据分析工具套件）
 
 在**离线、无 Python 环境**的 Windows（例如堡垒机里的跳板机）里，扫描目录、找出**接近相同**的图片并删除。默认会用 YOLOv8n 识别图片内容：
 
@@ -6,43 +6,69 @@
 - 含**车 / 电车 / 公交 / 卡车 / 自行车 / 摩托车**的图片 → 只在相邻帧车辆位置发生变化时保护，否则参与去重
 - 可选开启**场景保护**（`--scene-protect`）：把明显的**纯色 / 渐变屏**（传感器遮挡等异常帧）识别出来强制保留
 
+> **命名说明（v0.4.101 起）**：4 个业务 GUI 已经统一改成"数旗_XX工具"品牌，对应 exe
+> 全部改为 `sq*` 前缀（`sqFrameGrabGui.exe` / `sqDedupeGui.exe` / `sqClassifyGui.exe`
+> / `sqStatsViewerGui.exe`），底层 CLI 内核对应 `sqFrameGrab.exe` / `sqDedupe.exe`。
+> **仓库名 `pic-clear`、配置目录 `~/.pic-clear/`、marker 根 `Z:\pic-clear-markers`、
+> 环境变量 `PIC_CLEAR_*`、私钥目录 `~/.dedupe_pic_keys/` 保持不变**（改了会破坏兼容）。
+
 ## 下载 exe（推荐）
 
-**一键拿全套 6 个 exe** —— 打开这一个页面就行：
+**一键拿全套 exe** —— 打开这一个页面就行：
 
 👉 **[https://github.com/xflyhack/pic-clear/releases/latest](https://github.com/xflyhack/pic-clear/releases/latest)**
 
-页面右侧 `Assets` 区域会列出全部 8 个 exe（`extract_frames.exe` / `dedupe_pic.exe` / `pipeline.exe` / `pipe_gui.exe` / `extract_gui.exe` / `dedupe_gui.exe` / `summary_stats_gui.exe` / `gen_license_gui.exe`），点每个 exe 后面的 ⬇ 图标就能下载。
+页面右侧 `Assets` 区域会列出全部 9 个 exe：
+
+- 数旗品牌 GUI（4）：`sqFrameGrabGui.exe` / `sqDedupeGui.exe` / `sqClassifyGui.exe` / `sqStatsViewerGui.exe`
+- CLI 内核（2）：`sqFrameGrab.exe` / `sqDedupe.exe`
+- 老编排层（2，慢慢不用）：`pipeline.exe` / `pipe_gui.exe`
+- 签发工具（1，作者用）：`gen_license_gui.exe`
+
+点每个 exe 后面的 ⬇ 图标就能下载。
 
 私有仓库需要登录 GitHub 账号才能看到 Assets 区域。
 
 > **发版流程**（作者用）：本地打 tag 并推送：
 > ```bash
-> git tag v0.1.3
-> git push origin v0.1.3
+> git tag v0.4.101
+> git push origin v0.4.101
 > ```
-> 6 个编译 workflow 会并行跑，各自把产物挂到同一个 Release page。约 15-30 分钟出全套。
+> 全部编译 workflow 会并行跑，各自把产物挂到同一个 Release page。约 15-30 分钟出全套。
 
 如果 Release 页面还没有你想要的版本、又急着要产物，也可以走**逐个 workflow 下载**的老路：
-仓库 `Actions` 页面 → 选对应 workflow（如 `Build Pipe GUI EXE`）→ 最新一次成功的 run → 底部 `Artifacts` 下载 zip。
+仓库 `Actions` 页面 → 选对应 workflow（如 `Build Dedupe GUI EXE`）→ 最新一次成功的 run → 底部 `Artifacts` 下载 zip。
 
 ## 工具集
 
-本仓库产出 **6 个 Windows exe**，分工不同，各自独立打包：
+本仓库产出 **9 个 Windows exe**，分工不同，各自独立打包：
 
-### 业务 exe（5 个，都需要 `license.lic`）
+### 数旗品牌 GUI（4 个业务主入口，都需要 `license.lic`）
+
+日常操作首选这 4 个：
+
+| exe | 中文名 | 作用 | 体积 |
+|---|---|---|---|
+| **`sqFrameGrabGui.exe`** | 数旗_视频抽帧工具 | 选源目录 + 一级子目录多选 + fps，后台线程实时日志 + 托盘 + `Ctrl+Alt+E`。底层调 `sqFrameGrab.exe` | ~20-30 MB |
+| **`sqDedupeGui.exe`** | 数旗_图片去重工具 | 选目标目录 + 单/一级/递归模式 + threshold/motion + 强制重跑 + 托盘 + `Ctrl+Alt+D`。底层调 `sqDedupe.exe` | ~20-30 MB |
+| **`sqClassifyGui.exe`** | 数旗_图片分类工具 | 抽帧结果的二次过滤 / 分桶，托盘 + `Ctrl+Alt+F` | ~20-30 MB |
+| **`sqStatsViewerGui.exe`** | 数旗_数据分析工具 | 抽帧 / 去重 / 分类流水与最终视图，多维度过滤 + footer 汇总 + 导出 CSV，托盘 + `Ctrl+Alt+S` | ~15-25 MB |
+
+### CLI 内核（2 个，供 GUI 调 + 命令行用户直接跑）
 
 | exe | 作用 | 体积 |
 |---|---|---|
-| **`extract_frames.exe`** | 递归扫描视频目录，把 `.h265` / `.mp4` 按 1 帧/秒抽成 JPEG，输出镜像目录 | ~95 MB（含 ffmpeg）|
-| **`dedupe_pic.exe`** | 对图片目录做近似去重（dHash）+ YOLO 保护（人/车）+ 前后帧车运动保护 | ~57 MB（含 yolov8n）|
+| **`sqFrameGrab.exe`** | 递归扫描视频目录，把 `.h265` / `.mp4` 按 1 帧/秒抽成 JPEG，输出镜像目录 | ~95 MB（含 ffmpeg）|
+| **`sqDedupe.exe`** | 对图片目录做近似去重（dHash）+ YOLO 保护（人/车）+ 前后帧车运动保护 | ~57 MB（含 yolov8n）|
+
+### 老编排层（2 个，慢慢不用；新用户请直接用 4 个数旗 GUI）
+
+| exe | 作用 | 体积 |
+|---|---|---|
 | **`pipeline.exe`** | 编排层：一键跑抽帧 + 去重，后台 detach，可查状态/停/看日志 | ~10-20 MB |
 | **`pipe_gui.exe`** | `pipeline.exe` 的图形前端，双击运行，托盘 + 全局快捷键 + 主窗实时进度 + 日志 tail，不习惯命令行的同事用 | ~15-25 MB |
-| **`extract_gui.exe`** | **抽帧专用 GUI**（只切帧不去重），选源目录 + 一级子目录多选 + fps，后台线程实时日志 + 托盘 + `Ctrl+Alt+E` | ~20-30 MB |
-| **`dedupe_gui.exe`** | **去重专用 GUI**（只去重不切帧），选目标目录 + 单/一级/递归模式 + threshold/motion + 强制重跑 + 托盘 + `Ctrl+Alt+D` | ~20-30 MB |
-| **`summary_stats_gui.exe`** | 图形版统计汇总工具，扫 `machine_id_*.csv`，选磁盘 + 目录树钻取 + 汇总 + 导出 CSV | ~15-25 MB |
 
-7 个业务 exe **共用同一份 `license.lic`**，同一台机器只需申请一次授权。
+以上 8 个业务 exe **共用同一份 `license.lic`**，同一台机器只需申请一次授权。
 
 ### 签发工具（1 个，作者用）
 
@@ -60,10 +86,10 @@
 
 ```
 h265/mp4 视频目录 
-    │  extract_frames.exe
+    │  sqFrameGrab.exe
     ▼
 镜像目录 + 抽好的 JPEG 帧
-    │  dedupe_pic.exe
+    │  sqDedupe.exe
     ▼
 去重后仅保留有价值的关键帧
 ```
@@ -92,7 +118,7 @@ Z:\pic-clear-markers\<src_name>\<sub>\<video_stem>\
 
 ### 抽帧并发
 
-- **单机并发**：`extract_frames.exe --jobs N`（默认 1）。推荐 4-8，机器强+盘快可到 16。
+- **单机并发**：`sqFrameGrab.exe --jobs N`（默认 1）。推荐 4-8，机器强+盘快可到 16。
   GUI 对应『抽帧并发数』
 - **多机互斥**：每个视频抽前在 `markers_root/<rel>/` 原子创建 `_extract.lock`；
   别的机器看到锁就跳过；崩溃/断网留下的锁 `--lock-ttl` 秒后（默认 900 = 15 分钟）
@@ -102,24 +128,25 @@ Z:\pic-clear-markers\<src_name>\<sub>\<video_stem>\
 
 ### 去重并发
 
-- **单机并发**：`dedupe_gui` / `pipe_gui` 里配『去重并发数』（默认 1）。dedupe 内部
+- **单机并发**：`sqDedupeGui` / `pipe_gui` 里配『去重并发数』（默认 1）。dedupe 内部
   YOLO 会用多核，2-3 通常够；太大反而互抢 CPU
 - **多机互斥**：每个视频目录去重前在对应 marker 目录原子创建 `_dedup.lock`；
   完成后写 `_dedup_done.marker`。别的机器看到 done 直接跳过、看到 lock 未过期跳过
 - **断点重删**：中断后重跑，靠 `_dedup_done.marker` 幂等；`_dedup.lock` TTL 过期
-  自动抢占；`dedupe_gui` 里勾『强制重跑』或加 `dedupe_pic --force` 忽略 done marker
+  自动抢占；`sqDedupeGui` 里勾『强制重跑』或加 `sqDedupe --force` 忽略 done marker
 - **日志前缀**：`[目录名] 完成 rc=0`
 
 ## 你想怎么用？
 
 按角色选入口：
 
-- **不会命令行 → `pipe_gui.exe`**：双击打开 GUI，选盘 + 选源目录 + 选子目录 + 点『运行』，主窗直接看每个子目录的抽帧/去重实时进度，点『查看日志』可以像 `tail -f` 一样实时跟 worker 日志。详见 [`docs/pipe_gui_exe.md`](docs/pipe_gui_exe.md)。
-- **会命令行 → `pipeline.exe`**：CLI 提交任务，`pipeline.exe status/logs/stop` 查看和管理。详见 [`docs/pipeline_exe.md`](docs/pipeline_exe.md)。
+- **抽帧 → `sqFrameGrabGui.exe`（数旗_视频抽帧工具）**：双击打开 GUI，选源目录 + 一级子目录多选 + fps，后台线程实时日志 + 托盘 + `Ctrl+Alt+E`。底层调 `sqFrameGrab.exe`。
+- **去重 → `sqDedupeGui.exe`（数旗_图片去重工具）**：双击打开 GUI，选目标目录 + 单/一级/递归模式 + threshold/motion + 强制重跑 + 托盘 + `Ctrl+Alt+D`。底层调 `sqDedupe.exe`。
+- **二次分类 → `sqClassifyGui.exe`（数旗_图片分类工具）**：抽帧结果做二次过滤 / 分桶，托盘 + `Ctrl+Alt+F`。
+- **看统计 / 看每台机器删了多少张 → `sqStatsViewerGui.exe`（数旗_数据分析工具）**：双击打开 GUI，抽帧 / 去重 / 分类流水与最终视图，多维度过滤 + footer 汇总 + 导出 CSV，托盘 + `Ctrl+Alt+S`。
 - **想极简（老派）→ `scripts_bat/*.bat`**：把 exe 放到 `C:\Windows\System32`，双击 bat 一键跑。详见 [`scripts_bat/README.md`](scripts_bat/README.md)。
-- **想单独抽帧 / 单独去重（GUI）**：新增 `extract_gui.exe`（只切帧）和 `dedupe_gui.exe`（只去重）双击就能用，界面里选目录 + 参数 + 点『开始』。两者与 `pipe_gui.exe` 完全独立，共用同一份 `license.lic`。
-- **想单独抽帧 / 单独去重（命令行）**：直接调 `extract_frames.exe` / `dedupe_pic.exe`，见下面的分节说明。
-- **想看统计 / 看每台机器删了多少张 → `summary_stats_gui.exe`**：双击打开 GUI，选磁盘 + 目录树钻取到 `data_source` 或某天的目录，点『开始汇总』看当前剩余 / 累计删除 / 按机器分。也能导出 CSV 给老板看。
+- **想单独抽帧 / 单独去重（命令行）**：直接调 `sqFrameGrab.exe` / `sqDedupe.exe`，见下面的分节说明。
+- **老编排层（慢慢不用，保留兼容）**：`pipeline.exe`（CLI，见 [`docs/pipeline_exe.md`](docs/pipeline_exe.md)）/ `pipe_gui.exe`（GUI，见 [`docs/pipe_gui_exe.md`](docs/pipe_gui_exe.md)），一键跑抽帧 + 去重。新用户请直接用上面 4 个数旗 GUI。
 - **作者要签发 license.lic**：命令行版 `python gen_license.py`（见"作者签发流程"章节），或图形版 `gen_license_gui.exe`（见 [`docs/gen_license_gui.md`](docs/gen_license_gui.md)）。
 
 ## 场景
@@ -133,7 +160,7 @@ Z:\pic-clear-markers\<src_name>\<sub>\<video_stem>\
 
 1. Python 脚本 `dedupe_pic.py`（去重）+ `detector.py`（YOLOv8n 目标检测）
 2. GitHub Actions 的 Windows runner 打包成**单文件 exe**（Python 运行时 + Pillow + onnxruntime + `yolov8n.onnx` 全部内嵌）
-3. 从 Actions 下载 `dedupe_pic.exe` → 上传到 Win 机 → 命令行运行
+3. 从 Actions 下载 `sqDedupe.exe` → 上传到 Win 机 → 命令行运行
 
 ## 算法
 
@@ -222,19 +249,19 @@ exe **必须搭配 license.lic 才能运行**。授权采用 **RSA-2048 签名 +
 
 ### 首次使用流程
 
-1. **拿到 exe**，双击运行任意命令（如 `dedupe_pic.exe --fingerprint`）
+1. **拿到 exe**，双击运行任意命令（如 `sqDedupe.exe --fingerprint`）
 2. 程序输出**本机指纹**，形如：
    ```
    [授权] 本机指纹: A1B2-C3D4-E5F6-7890
    ```
 3. **把这行指纹发给作者**（微信/邮件均可）
 4. 作者用私钥签发 `license.lic`，回给你
-5. 把 `license.lic` 放到 `dedupe_pic.exe` **同目录**，重新运行即可
+5. 把 `license.lic` 放到 `sqDedupe.exe` **同目录**，重新运行即可
 
 ### 单独查看指纹
 
 ```cmd
-dedupe_pic.exe --fingerprint
+sqDedupe.exe --fingerprint
 ```
 只打印 16 位指纹后立刻退出，不会尝试跑任何业务逻辑，不需要 license。
 
@@ -297,7 +324,7 @@ dedupe_pic.exe --fingerprint
 
 ---
 
-## `extract_frames.exe` 使用（视频抽帧）
+## `sqFrameGrab.exe` 使用（视频抽帧）
 
 递归扫描一个视频目录，把每个 `.h265` 视频按 fps 抽成 JPEG，**输出目录结构完全镜像输入目录**，视频文件本身变成一个"同名子目录"存放抽出的帧。
 
@@ -318,7 +345,7 @@ D:\videos\
 
 运行：
 ```cmd
-extract_frames.exe D:\videos D:\frames --fps 1
+sqFrameGrab.exe D:\videos D:\frames --fps 1
 ```
 
 得到：
@@ -334,7 +361,7 @@ D:\frames\
 ### 常用参数
 
 ```
-extract_frames.exe <SRC_ROOT> <DST_ROOT> [选项]
+sqFrameGrab.exe <SRC_ROOT> <DST_ROOT> [选项]
 
   --fps FLOAT              每秒抽多少帧，默认 1.0
   --ext EXT                扫描扩展名（逗号分隔），默认 h265
@@ -364,23 +391,23 @@ extract_frames.exe <SRC_ROOT> <DST_ROOT> [选项]
 
 ```cmd
 :: 新规则、4 位补零
-extract_frames.exe D:\videos D:\frames --name-style parent --name-digits 4 ...
+sqFrameGrab.exe D:\videos D:\frames --name-style parent --name-digits 4 ...
 
 :: 自定义
-extract_frames.exe D:\videos D:\frames ^
+sqFrameGrab.exe D:\videos D:\frames ^
     --name-template "{parent}_snap_{seq}" --name-digits 5 ...
 ```
 
 > 切换命名规则不影响 `_done.marker`，但同一视频若已经用旧规则抽过、又想用新规则重抽，需要加 `--no-skip-existing`（GUI 里就是"强制重切"）。
 
-### 跟 dedupe_pic.exe 串起来
+### 跟 sqDedupe.exe 串起来
 
 ```cmd
 :: 1) 抽帧
-extract_frames.exe D:\videos D:\frames --fps 1
+sqFrameGrab.exe D:\videos D:\frames --fps 1
 
 :: 2) 去重（每个视频子目录独立聚类，跨视频也会全局去重）
-dedupe_pic.exe D:\frames --threshold 3
+sqDedupe.exe D:\frames --threshold 3
 ```
 
 ---
@@ -395,19 +422,19 @@ dedupe_pic.exe D:\frames --threshold 3
 git push
 ```
 
-打开仓库 Actions → 最新一次 `Build Windows EXE` 运行 → 底部 **Artifacts** → 下 `dedupe_pic-windows-exe.zip` → 解压得到 `dedupe_pic.exe`。
+打开仓库 Actions → 最新一次 `Build Windows EXE` 运行 → 底部 **Artifacts** → 下 `sqDedupe-windows-exe.zip` → 解压得到 `sqDedupe.exe`。
 
 体积预计 100–250 MB（因为内嵌了 onnxruntime 和 yolov8n.onnx）。
 
 ### 2. 上传到堡垒机 Win 机
 
-通过堡垒机的"文件上传"把 `dedupe_pic.exe` 传到 `D:\tools\`。**模型已经内嵌，不需要单独传 `.onnx` 文件。**
+通过堡垒机的"文件上传"把 `sqDedupe.exe` 传到 `D:\tools\`。**模型已经内嵌，不需要单独传 `.onnx` 文件。**
 
 ### 3. 先 dry-run（不删任何东西，只出报告）
 
 ```cmd
 cd /d D:\tools
-dedupe_pic.exe D:\pic-clear\actions\runs\29158386313 --threshold 3
+sqDedupe.exe D:\pic-clear\actions\runs\29158386313 --threshold 3
 ```
 
 在当前目录产出 `dedupe_report.csv`，字段：
@@ -432,22 +459,22 @@ dedupe_pic.exe D:\pic-clear\actions\runs\29158386313 --threshold 3
 
 ```cmd
 :: 软删除：把重复文件移到 D:\_dedupe_trash\，可回滚
-dedupe_pic.exe D:\pic-clear\actions\runs\29158386313 --threshold 3 --apply --trash-dir D:\_dedupe_trash
+sqDedupe.exe D:\pic-clear\actions\runs\29158386313 --threshold 3 --apply --trash-dir D:\_dedupe_trash
 
 :: 或直接永久删除
-dedupe_pic.exe D:\pic-clear\actions\runs\29158386313 --threshold 3 --apply --hard-delete
+sqDedupe.exe D:\pic-clear\actions\runs\29158386313 --threshold 3 --apply --hard-delete
 ```
 
 ### 5. 关掉检测让速度飞起（不推荐，除非你确认没有需要保护的图）
 
 ```cmd
-dedupe_pic.exe D:\pics --no-protect --threshold 3
+sqDedupe.exe D:\pics --no-protect --threshold 3
 ```
 
 ## 所有参数
 
 ```
-dedupe_pic.exe <根目录> [选项]
+sqDedupe.exe <根目录> [选项]
 
 必填：
   <根目录>                  要扫描的目录，递归处理，如 D:\pics
