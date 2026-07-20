@@ -1,11 +1,12 @@
 name: Build Pipe GUI EXE
 
 on:
-  push:
-    branches: [main, master]
-    tags: ['v*']
+  # v0.4.89: 该 exe 慢慢弃用, 关闭 push/tag 自动触发, 只保留手动跑.
+  # 未来恢复: 把下面的 push 块去掉注释即可.
+  # push:
+  #   branches: [main, master]
+  #   tags: ['v*']
   workflow_dispatch:
-
 
 permissions:
   contents: write   # softprops/action-gh-release 需要写权限来创建/更新 Release
