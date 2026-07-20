@@ -248,25 +248,57 @@ def probe_video_duration(ffprobe: Path | None, video_path: Path) -> float | None
 
     v0.4.83: 日志里 '视频总时长' 用. 每个视频多一次 ffprobe 调用 (~100-300ms),
     在 SMB 深路径上更慢, 但对'抽帧多久 / 视频多长'一目了然值得.
+
+    v0.4.95: 长路径下 ffprobe 拿不到时长的排查:
+    - 之前只喂 \\?\ 长路径, 但堡垒机上一些 ffprobe.exe 编译版本不吃这个前缀
+      -> 空 stdout / returncode 非 0, 又被静默 `except: pass` 吞掉,
+      现象就是 stats_viewer footer 视频总时长永远是 0 秒.
+    - 修法:
+      1) 两级尝试: 先喂原始路径 (Windows 短路径能直接过),
+         挂了再喂 \\?\ 长路径兜底.
+      2) 所有失败分支明确 [ERROR] 到 stderr (对齐血泪 #14 规范),
+         不再无声无息.
+      3) 检查 returncode; 非 0 打完整 stderr 供排查.
     """
     if ffprobe is None:
         return None
-    src_arg = _to_long_path(str(video_path))
-    try:
-        result = subprocess.run(
-            [str(ffprobe), "-v", "error",
-             "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1",
-             src_arg],
-            capture_output=True, text=True, timeout=15,
-            encoding="utf-8", errors="replace",
-        )
+    src_str = str(video_path)
+    long_arg = _to_long_path(src_str)
+    # 两级尝试: (标签, 传给 ffprobe 的 -i 参数)
+    attempts = [("raw", src_str)]
+    if long_arg != src_str:
+        attempts.append(("long", long_arg))
+
+    last_err = ""
+    for label, arg in attempts:
+        try:
+            result = subprocess.run(
+                [str(ffprobe), "-v", "error",
+                 "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1",
+                 arg],
+                capture_output=True, text=True, timeout=15,
+                encoding="utf-8", errors="replace",
+            )
+        except Exception as e:
+            last_err = f"[{label}] subprocess 异常: {type(e).__name__}: {e}"
+            _log_err(f"probe_video_duration {last_err} path={src_str}")
+            continue
         s = (result.stdout or "").strip()
-        if not s:
-            return None
-        return float(s)
-    except Exception:
-        return None
+        if result.returncode == 0 and s:
+            try:
+                return float(s)
+            except ValueError as e:
+                last_err = f"[{label}] parse 失败 stdout={s!r}"
+                _log_err(f"probe_video_duration {last_err} path={src_str} -> {e}")
+                continue
+        # returncode 非 0 或 stdout 空: 记录, 继续下一级
+        last_err = (f"[{label}] rc={result.returncode} "
+                    f"stdout={s!r} stderr={(result.stderr or '').strip()!r}")
+        _log_err(f"probe_video_duration {last_err} path={src_str}")
+
+    # 所有尝试都挂
+    return None
 
 
 # ------------------------------ 目录扫描 ------------------------------------
