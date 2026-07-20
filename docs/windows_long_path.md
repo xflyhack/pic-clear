@@ -867,3 +867,63 @@ for s, expect in [
 | v0.4.82 | `--version` 输出被 `[授权]` 行污染 (三重修法) |
 | v0.4.83 | 抽帧日志改 3 行树状 + 加视频总时长 (ffprobe) |
 | v0.4.84 | 跳过/失败原因单独抽一行 |
+
+---
+
+## 第 15 条：`marker_dir` / `trash_dir` / `lock_path.parent` 也是 `pathlib.mkdir` 热点（v0.4.106）
+
+**现象（堡垒机）**
+
+```
+FileNotFoundError: [WinError 206] 文件名或扩展名太长。:
+'\\filestor01.cloud-prod.seres.cn\kj-e68-datamark-100\节点\sjbz_20260717\...\camera14'
+  File "dedupe_pic.py", line 931, in main
+  File "pathlib.py", line 1121, in mkdir
+```
+
+156+ 张图的深叶子，marker 根路径本身就 >260，`marker_dir.mkdir(parents=True)`
+直接抛。同一逻辑在 141/704 也存在（`_acquire_dedup_lock` 建 lock 目录、
+删除阶段建 `trash_dir`）。
+
+**根因**
+
+第 14 条修完 PIL / `Path.stat` / `Path.unlink` / `Path.exists` / `Path.is_file` /
+`shutil.move` 6 个入口后，唯独漏了 **`Path.mkdir`**。同期 v0.4.64 在
+`winpath_util.py` 加了 `safe_mkdir`（带 SMB `\\?\UNC\` 中间层 `FileExistsError`
+静默吞异常修复 + 建后 `safe_isdir` 显式验证），但 `dedupe_pic.py` 里 3 处裸
+`pathlib.Path.mkdir(parents=True, exist_ok=True)` 一直没换过来。
+
+**修法（v0.4.106）**
+
+1. `dedupe_pic.py` 3 处 `mkdir` → `_safe_mkdir(...)`：
+   - `_acquire_dedup_lock` 里 `lock_path.parent.mkdir(...)`
+   - 删除阶段 `trash_dir.mkdir(...)`
+   - `main` 里 `marker_dir.mkdir(...)` ← 本次报错点
+2. 顺带把 `_acquire_dedup_lock` / `_release_dedup_lock` / `_dedup_lock_is_stale`
+   里其它裸 IO 一并换成长路径安全版：
+   - `os.open(str(lock_path), O_CREAT|O_EXCL, ...)` → `_safe_os_open(lock_path, ...)`
+   - `lock_path.unlink()` → `_safe_unlink(lock_path)`
+   - `lock_path.read_text(...)` → `_safe_read_text(lock_path, ...)`
+3. `_release_dedup_lock` 里 `except Exception: pass` 改成 `[ERROR]` stderr 日志。
+   对齐第 14 条铁律：marker/lock/状态持久化的静默吞异常一律改成明确日志。
+
+**教训 / 硬规则再强调一次**
+
+上长路径修复不能只盯 PIL 或 stat/unlink；`pathlib.Path` 上所有 IO 方法都要过
+一遍。**当前必须走 `_safe_*` 的方法清单**：
+
+| pathlib 方法 | 替换成 |
+|---|---|
+| `.stat()` | `_safe_stat(p)` |
+| `.exists()` | `_safe_exists(p)` |
+| `.is_file()` | `_safe_is_file(p)` |
+| `.unlink()` | `_safe_unlink(p)` |
+| `.mkdir(parents=True, exist_ok=True)` | `_safe_mkdir(p, parents=True, exist_ok=True)` ← **v0.4.106 新增** |
+| `.read_text(...)` | `_safe_read_text(p, ...)` |
+| `.write_text(...)` | `_safe_write_text(p, ...)` |
+| `.glob(...)` | `_safe_glob(dir, pattern)` |
+| `shutil.move(a, b)` | `_safe_move(a, b)` |
+| `os.open(str(p), ...)` | `_safe_os_open(p, ...)` |
+
+新增热点先跑一遍 `grep -nE '\.(mkdir|stat|exists|is_file|unlink|read_text|write_text|glob)\(' xxx.py`
+自检。

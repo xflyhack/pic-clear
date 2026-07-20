@@ -122,7 +122,7 @@ def _dedup_lock_payload() -> str:
 
 def _dedup_lock_is_stale(lock_path: Path, ttl_seconds: float) -> bool:
     try:
-        content = lock_path.read_text(encoding="utf-8", errors="replace").strip()
+        content = _safe_read_text(lock_path, encoding="utf-8", errors="replace").strip()
     except Exception:
         return True
     parts = content.split("|")
@@ -137,26 +137,30 @@ def _dedup_lock_is_stale(lock_path: Path, ttl_seconds: float) -> bool:
 
 def _acquire_dedup_lock(lock_path: Path, ttl_seconds: float) -> bool:
     """原子抢占去重锁。返回 True=抢到、False=别人占用且未过期。"""
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # v0.4.106: 走 safe_mkdir / safe_os_open / safe_unlink, 兼容 \\?\ 长路径.
+    _safe_mkdir(lock_path.parent, parents=True, exist_ok=True)
     payload = _dedup_lock_payload().encode("utf-8")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     try:
-        fd = os.open(str(lock_path), flags, 0o644)
+        fd = _safe_os_open(lock_path, flags, 0o644)
     except FileExistsError:
         if _dedup_lock_is_stale(lock_path, ttl_seconds):
             try:
-                lock_path.unlink()
+                _safe_unlink(lock_path)
             except FileNotFoundError:
                 pass
-            except Exception:
+            except Exception as e:
+                sys.stderr.write(f"[ERROR] 清理过期 lock 失败: {lock_path} -> {type(e).__name__}: {e}\n")
                 return False
             try:
-                fd = os.open(str(lock_path), flags, 0o644)
-            except Exception:
+                fd = _safe_os_open(lock_path, flags, 0o644)
+            except Exception as e:
+                sys.stderr.write(f"[ERROR] 二次抢锁失败: {lock_path} -> {type(e).__name__}: {e}\n")
                 return False
         else:
             return False
-    except Exception:
+    except Exception as e:
+        sys.stderr.write(f"[ERROR] 抢锁失败: {lock_path} -> {type(e).__name__}: {e}\n")
         return False
     try:
         os.write(fd, payload)
@@ -169,12 +173,13 @@ def _acquire_dedup_lock(lock_path: Path, ttl_seconds: float) -> bool:
 
 
 def _release_dedup_lock(lock_path: Path) -> None:
+    # v0.4.106: safe_unlink + 明确日志, 别再静默 pass 埋 marker/lock 状态坑.
     try:
-        lock_path.unlink()
+        _safe_unlink(lock_path)
     except FileNotFoundError:
         pass
-    except Exception:
-        pass
+    except Exception as e:
+        sys.stderr.write(f"[ERROR] 释放 lock 失败: {lock_path} -> {type(e).__name__}: {e}\n")
 
 
 # ----------------------------- 长路径兼容 -----------------------------------
@@ -191,6 +196,9 @@ from winpath_util import (
     safe_exists as _safe_exists,
     safe_is_file as _safe_is_file,
     safe_move as _safe_move,
+    safe_mkdir as _safe_mkdir,
+    safe_os_open as _safe_os_open,
+    safe_read_text as _safe_read_text,
 )
 
 
@@ -701,7 +709,7 @@ def do_delete(
                 else:
                     rel = item.path.name
                     target = trash_dir / f"{int(time.time() * 1000)}_{rel}"
-                    trash_dir.mkdir(parents=True, exist_ok=True)
+                    _safe_mkdir(trash_dir, parents=True, exist_ok=True)
                     _safe_move(item.path, target)
                 # v0.4.38 sanity check: 确认文件真的没了, 否则计入 errors 不算成功.
                 # 防止 _safe_unlink / _safe_move 静默失败 (老版本 42 张删除计数 +1
@@ -928,7 +936,7 @@ def main() -> int:
     lock_path: Path | None = None
     done_marker: Path | None = None
     if marker_dir is not None:
-        marker_dir.mkdir(parents=True, exist_ok=True)
+        _safe_mkdir(marker_dir, parents=True, exist_ok=True)
         lock_path = marker_dir / _DEDUP_LOCK_NAME
         done_marker = marker_dir / _DEDUP_DONE_NAME
 
