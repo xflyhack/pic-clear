@@ -220,14 +220,14 @@ def _find_dedupe_targets(root: Path, mode: str,
                 pass
 
     if not root.is_dir():
-        _log(f"[扫描] target 不是目录: {root}")
+        _log(f"● 扫描: target 不是目录: {root}")
         return []
     if mode == "single":
-        _log(f"[扫描] single 模式, 直接用 target: {root}")
+        _log(f"● 扫描: single 模式, 直接用 target={root}")
         return [root]
     if mode == "subdirs":
         subs = sorted([p for p in root.iterdir() if p.is_dir()])
-        _log(f"[扫描] subdirs 模式, 一级子目录 {len(subs)} 个")
+        _log(f"● 扫描: subdirs 模式, 一级子目录 {len(subs)} 个")
         return subs
 
     # recursive: os.walk + 长路径兼容
@@ -259,9 +259,9 @@ def _find_dedupe_targets(root: Path, mode: str,
         if has_image:
             out.add(normal_dirpath)
 
-    _log(f"[扫描] recursive: 遍历完成, 共 {total_images} 张图片 "
-         f"(其中 {long_path_hits} 张 >=200 字符长路径)")
-    _log(f"[扫描] 归纳出 {len(out)} 个候选目录")
+    _log(f"● 扫描: recursive 遍历完成, 共 {total_images} 张图片 "
+         f"({long_path_hits} 张 >=200 字符长路径)")
+    _log(f"● 扫描: 归纳出 {len(out)} 个候选目录")
     return sorted(Path(s) for s in out)
 
 
@@ -381,7 +381,7 @@ class DedupeGUI:
                 probe_and_log(self._log, probe_paths=pp)
             self.root.after(100, _run_env_probe)
         except Exception as _e:
-            self._log(f"[ENV] probe_and_log 失败: {type(_e).__name__}: {_e}")
+            self._log(f"● ENV: probe_and_log 失败: {type(_e).__name__}: {_e}")
 
         # v0.4.76: 启动即打印**子 exe 版本**, 避免 "GUI 是新版但 dedupe_pic.exe
         # 还是老版" 这种坑.
@@ -396,7 +396,7 @@ class DedupeGUI:
                 )
             self.root.after(200, _run_core_probe)
         except Exception as _e:
-            self._log(f"[CORE] 探测失败: {type(_e).__name__}: {_e}")
+            self._log(f"● CORE: 探测失败: {type(_e).__name__}: {_e}")
 
     # ---------- UI ----------
 
@@ -852,7 +852,7 @@ class DedupeGUI:
             self._stat_done_dirs = 0
             self._stat_deleted_images = 0
         self._update_status("启动中…")
-        self._log("[启动] 常驻模式：不点停止会一直循环扫描 + 处理")
+        self._log("● 启动: 常驻模式, 不点停止会一直循环扫描 + 处理")
 
         # 生成本次任务 task_id, 落 task_runs 快照, 通过 env 传给 dedupe_pic.exe
         task_id = uuid.uuid4().hex[:16]
@@ -879,7 +879,7 @@ class DedupeGUI:
             return
         self._loop_stop_event.set()
         self._worker_stop_flag.set()
-        self._log("[停止] 已请求停止，等当前目录跑完就退出")
+        self._log("● 停止: 已请求停止, 等当前目录跑完就退出")
         self._update_status("停止中，等当前目录跑完…")
 
     # ---------- v0.4.42 常驻主循环 ----------
@@ -892,7 +892,7 @@ class DedupeGUI:
         try:
             dirs = _find_dedupe_targets(target_p, mode, logger=self._log)
         except Exception as e:
-            self._log(f"[扫描异常] {type(e).__name__}: {e}")
+            self._log(f"● 扫描异常: {type(e).__name__}: {e}")
             return []
         if not dirs:
             return []
@@ -925,7 +925,7 @@ class DedupeGUI:
             pairs = [(d, md) for d, md in pairs
                      if not _is_regular_file(str(md / DEDUP_DONE_MARKER))]
             if skipped_n:
-                self._log(f"[跳过] {skipped_n} 个目录已有 {DEDUP_DONE_MARKER}")
+                self._log(f"● 跳过: {skipped_n} 个目录已有 {DEDUP_DONE_MARKER}")
         return pairs
 
     def _loop_run(self, exe: str, target_p: Path,
@@ -942,11 +942,11 @@ class DedupeGUI:
                 self._update_status(f"第 {round_no} 轮：扫描中…")
                 pairs = self._build_pairs_once(target_p, markers_root)
             except Exception as e:
-                self._log(f"[扫描异常] {type(e).__name__}: {e}")
+                self._log(f"● 扫描异常: {type(e).__name__}: {e}")
                 pairs = []
 
             if pairs:
-                self._log(f"[启动] 本轮 {len(pairs)} 个目录待去重，"
+                self._log(f"● 本轮开始: {len(pairs)} 个目录, "
                           f"并发={int(self._dedupe_jobs_var.get())}")
                 self._total_dirs = len(pairs)
                 self._done_dirs = 0
@@ -954,7 +954,7 @@ class DedupeGUI:
                 try:
                     self._worker_run(exe, pairs)
                 except Exception as e:
-                    self._log(f"[执行异常] {type(e).__name__}: {e}")
+                    self._log(f"● 执行异常: {type(e).__name__}: {e}")
                 if self._loop_stop_event.is_set():
                     break
                 # 处理完立刻回头再扫, 不睡
@@ -962,7 +962,7 @@ class DedupeGUI:
 
             # 没活儿: 空转睡, 每秒刷新一次状态栏倒计时
             interval = max(2, int(self._scan_interval_var.get()))
-            self._log(f"[空转] 未发现待处理目录，{interval}s 后重试")
+            self._log(f"● 空转: 未发现待处理目录, {interval}s 后重试")
             for i in range(interval, 0, -1):
                 if self._loop_stop_event.is_set():
                     break
@@ -970,7 +970,7 @@ class DedupeGUI:
                 if self._loop_stop_event.wait(1.0):
                     break
 
-        self._log("[结束] 主循环已退出")
+        self._log("● 结束: 主循环已退出")
         self._update_status("已停止")
         self.root.after(0, self._on_worker_finished)
 
@@ -990,6 +990,7 @@ class DedupeGUI:
         dedupe_pic.exe 靠 --marker-dir 抢 _dedup.lock、写 _dedup_done.marker。
         """
         from concurrent.futures import ThreadPoolExecutor
+        import time as _time
         jobs = max(1, int(self._dedupe_jobs_var.get()))
         lock_ttl = int(self._lock_ttl_var.get())
         force = bool(self._force_rerun_var.get())
@@ -997,12 +998,49 @@ class DedupeGUI:
         # 完成一个记一个的锁（tk 主线程 after 也够，用 python threading.Lock）
         done_lock = threading.Lock()
 
-        def _run_one(pair: tuple[Path, Path]) -> tuple[Path, int]:
+        # v0.4.83: 日志改树状结构 (● / ├─ / │ / └─).
+        # 给每个目录发一个短 id (#01 / #02 / ...), 彻底解决叶子名撞车问题
+        # (并发跑 camera05 / camera06 的同名子目录时, 老逻辑 tag = d.name
+        #  两个 job 前缀完全一样, 混着看根本分不清).
+        id_width = max(2, len(str(len(pairs))))
+
+        def _short_leaf(name: str, keep_head: int = 15,
+                        keep_tail: int = 12) -> str:
+            if len(name) <= keep_head + keep_tail + 2:
+                return name
+            return f"{name[:keep_head]}..{name[-keep_tail:]}"
+
+        def _camera_of(target: Path) -> str:
+            """从 target 全路径里抠 cameraNN, 抠不到 fallback 到 parent.name."""
+            m = re.search(r"camera\d+", str(target))
+            if m:
+                return m.group(0)
+            try:
+                return target.parent.name
+            except Exception:
+                return ""
+
+        def _run_one(job_id: int,
+                     pair: tuple[Path, Path]) -> tuple[Path, int]:
             d, marker_dir = pair
+            jid = f"#{job_id:0{id_width}d}"
+            # 子进程每行 stdout 的树状外壳: "│   #01 │ <正文>"
+            wrap = f"\u2502   {jid} \u2502 "
             if self._worker_stop_flag.is_set():
                 return d, -1
-            tag = d.name
-            self._log(f"[{tag}] 开始（marker={marker_dir}）")
+
+            leaf_full = d.name
+            leaf_short = _short_leaf(leaf_full)
+            cam = _camera_of(d)
+            head_bits = [f"\u251c\u2500 {jid} 开始"]
+            if cam:
+                head_bits.append(f"camera={cam}")
+            head_bits.append(f"叶子={leaf_short}")
+            self._log("  ".join(head_bits))
+            # target / marker 全路径缩进到 job 前缀下面, 便于对上真实位置
+            self._log(f"\u2502        target={d}")
+            self._log(f"\u2502        marker={marker_dir}")
+
             cmd = [exe, str(d),
                    "--threshold", str(int(self._threshold_var.get())),
                    "--motion-threshold", str(float(self._motion_var.get())),
@@ -1027,14 +1065,20 @@ class DedupeGUI:
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace")
             except FileNotFoundError:
-                self._log(f"[{tag}] [错误] 找不到 exe：{exe}")
+                self._log(f"\u2514\u2500 {jid} 完成  rc=127  错误: 找不到 exe {exe}")
                 return d, 127
 
+            t_start = _time.time()
+            per_job_deleted = 0
             for line in proc.stdout:  # type: ignore[union-attr]
                 line = line.rstrip()
-                if line:
-                    self._log(f"[{tag}] {line}")
-                    # v0.4.42 抠 "[删除完成] 成功 N 个" 累加到状态栏
+                # dedupe_pic 每个 job 启动 / 参数横幅前后会打 "=" * 60 分隔线,
+                # 并发多 job 时就是一堆全 = 行满屏, 没信息量, 直接吞掉;
+                # 顺带把空行也吞了, 树状缩进下更整齐.
+                if line and line.strip("= ") != "":
+                    self._log(f"{wrap}{line}")
+                    # v0.4.42 抠 "[删除完成] 成功 N 个" 累加到状态栏.
+                    # v0.4.83 顺带累到本 job, 用于 └─ 完成行汇总.
                     m = _DELETED_LINE_RE.search(line)
                     if m:
                         try:
@@ -1042,9 +1086,11 @@ class DedupeGUI:
                         except ValueError:
                             n = 0
                         if n > 0:
+                            per_job_deleted += n
                             with self._stat_lock:
                                 self._stat_deleted_images += n
-                            self._update_status(f"正在处理：{tag}")
+                            self._update_status(
+                                f"正在处理：{jid} {leaf_short}")
                 if self._worker_stop_flag.is_set() or self._loop_stop_event.is_set():
                     try:
                         proc.terminate()
@@ -1052,31 +1098,36 @@ class DedupeGUI:
                         pass
                     break
             rc = proc.wait()
-            self._log(f"[{tag}] 完成 rc={rc}")
+            elapsed = _time.time() - t_start
+            self._log(
+                f"\u2514\u2500 {jid} 完成  rc={rc}  "
+                f"耗时 {elapsed:.1f}s  已删 {per_job_deleted} 张"
+            )
             with done_lock:
                 self._done_dirs += 1
             with self._stat_lock:
                 self._stat_done_dirs += 1
             self._push_progress()
-            self._update_status(f"完成一个目录：{tag}")
+            self._update_status(f"完成一个目录：{jid} {leaf_short}")
             return d, rc
 
         try:
             with ThreadPoolExecutor(max_workers=jobs,
                                     thread_name_prefix="dedupe") as ex:
-                futures = [ex.submit(_run_one, p) for p in pairs]
+                futures = [ex.submit(_run_one, i, pair)
+                           for i, pair in enumerate(pairs, 1)]
                 for fut in futures:
                     try:
                         fut.result()
                     except Exception as e:
-                        self._log(f"[异常] {type(e).__name__}: {e}")
+                        self._log(f"● 异常: {type(e).__name__}: {e}")
                     if self._worker_stop_flag.is_set() or self._loop_stop_event.is_set():
                         for f in futures:
                             f.cancel()
             if not (self._worker_stop_flag.is_set() or self._loop_stop_event.is_set()):
-                self._log(f"[本轮完成] 共处理 {len(pairs)} 个目录，回头继续扫描")
+                self._log(f"● 本轮完成: 共处理 {len(pairs)} 个目录, 回头继续扫描")
         except Exception as e:
-            self._log(f"[异常] {type(e).__name__}: {e}")
+            self._log(f"● 异常: {type(e).__name__}: {e}")
         # v0.4.42: 常驻模式下由 _loop_run 控制按钮状态, 这里不再触发 _on_worker_finished
 
     def _on_worker_finished(self):
@@ -1094,7 +1145,8 @@ class DedupeGUI:
     # ---------- 日志 ----------
 
     def _log(self, msg: str):
-        ts = datetime.now().strftime("%H:%M:%S")
+        # v0.4.83: 时间戳加上年月日, 树状层级前缀由调用方自己拼 (● / ├─ / │ / └─)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._log_queue.put(f"[{ts}] {msg}\n")
 
     def _drain_log_queue(self):
@@ -1166,7 +1218,7 @@ class DedupeGUI:
                 cmdline=None,
                 version=APP_VERSION,
             )
-            self._log(f"[stats] task_id={task_id}")
+            self._log(f"● stats: task_id={task_id}")
         except Exception as e:
             print(f"[record_run_snapshot] {type(e).__name__}: {e}",
                   file=sys.stderr)
