@@ -660,3 +660,210 @@ findstr /c:"[MARKER_MISS]" C:\path\to\extract_gui_*.log > marker_miss.txt
 **任何 marker / 长路径可疑现象，先跑一次 `diag_pic.exe` 单条深度诊断**，10 秒能定位到
 底是哪一层 API 挂了。比出 exe 迭代猜快 O(10min)。这条从 v0.4.33 就写在文档里，但
 v0.4.65-v0.4.68 我自己还是走了迭代猜的弯路，**贴出来自省**。
+
+---
+
+## v0.4.75 → v0.4.84 追加踩坑（2026-07-20）
+
+以下 10 个 tag 都在解决"用户觉得日志刷屏 / 看不懂 / 关于页显示错版本"这一类
+体验问题, 记录在这里, 避免以后新增 GUI / CLI 时再翻车.
+
+### 1. 首次跑视频不该打 `[MARKER_MISS] [ERROR]`（v0.4.77 → v0.4.81）
+
+**症状**: 用户看到日志刷屏 `[ERROR] [MARKER_MISS] marker 应存在但 safe_is_file=False`,
+下一行紧跟着 `[N/M] ✓ ... OK` 抽帧成功, 一头雾水.
+
+**根因**: `extract_frames._extract_one_impl` 里 marker 判定为 False + `long_isfile=False`
+就无脑打 `[ERROR]`, 但**首次跑**的视频天然满足这个条件 (marker 本来就没写、目录也是
+空的), 被误报成 SMB 假 miss.
+
+**v0.4.77 第一版修法**: 增加两条护栏, 只在**有历史产物**时才打 ERROR:
+
+1. `parent_listdir` 里有其它文件 (半成品) → 半成品残留, 值得排查
+2. `out_dir` 里有历史 jpg → SMB 假 miss (marker 真丢了)
+3. 首次跑 (parent 0 项 + 无 jpg) → 静默继续, 不再刷屏
+
+**v0.4.81 第二版补丁**: 用户实测 v0.4.77 后仍有误报, 因为 `parent_listdir` 显示
+`parent 有 1 项, 不含目标` —— 那 1 项其实是 `_extract.lock`（我们自己刚创建的锁,
+不算历史产物, 不能作为"真丢"的证据）.
+
+**最终修法**: 真 listdir 一次, 过滤掉这些"临时/元数据"文件后再数:
+
+```python
+_ignore = {_LOCK_NAME, ".DS_Store", "Thumbs.db"}
+_parent_meaningful_names = [
+    n for n in _names
+    if n not in _ignore and not n.endswith(".tmp") and not n.startswith("~")
+]
+_parent_has_stuff = len(_parent_meaningful_names) > 0
+```
+
+**教训**:
+
+- 报 `[ERROR]` 的判定要**只覆盖真异常**, 不然用户对 ERROR 麻木, 真出问题时看不出来
+- 不要靠**字符串匹配**判断"parent 有 N 项"—— 那是 diag 信息, 不能反推语义; 要真调
+  一次 API 拿到项名再判定
+- **临时/元数据文件白名单**要预先想好: `_extract.lock`, `.DS_Store`, `Thumbs.db`,
+  `.tmp`, `~xxx` —— 以后加新工具, 白名单要同步扩
+
+### 2. 抽帧日志格式改造史（v0.4.78, v0.4.80, v0.4.83, v0.4.84）
+
+**为什么反复改**: 用户对日志的要求是一次一层揭示的:
+
+| 版本 | 用户抱怨 | 改动 |
+|---|---|---|
+| v0.4.78 前 | `[123/543] ✓ path 帧=127 耗时=27s (已用 1.2m, 剩余 ~1.7m) OK` | (老格式) |
+| v0.4.78 | "`[123/543]` 是啥看不懂 / 缩写读不动" | 加图例 + 改中文标签: `[第 123 个/共 543 个]`, `已抽帧数=`, `已运行/预计剩余` |
+| v0.4.80 | "path 只有相对路径, 前面 UNC 头缺失 / 目录名带空格不敢复制" | 打完整 `src_path`, 外面套双引号, 引号内**不做任何转义** |
+| v0.4.83 | "一行太长, 长路径场景阅读困难; 想看视频总时长" | 改 3 行树状: `[第 N 个/共 M 个] ✓` / `源视频: "..."   视频总时长=X.Xs` / `结果  : ...` + 新增 ffprobe 拿 duration |
+| v0.4.84 | "`跳过（其他机器/进程正在抽…）` 挤在结果行末尾, 应该单独一行" | msg 以'跳过'开头 → 抽 `跳过原因: xxx` 单独一行; failed 抽 `失败原因: xxx` |
+
+**教训与硬规则**:
+
+- **日志给"运维/客户"看**, 不是给作者看. 中文标签 / 明确单位 (张 / 秒 / MB) / 完整
+  路径 / 直接可复制 —— 每一项都是"能被非技术用户读懂"的门槛.
+- **路径打印硬规则** (v0.4.80 起):
+    - 打**完整绝对路径** (含 UNC 头 `\\filestor01...`), 别只打 `rel_path`
+    - 外面**必须套双引号**, 内部**保持原样不转义** (Windows 路径原生就是反斜杠 +
+      空格; 套引号后能选中复制粘贴到资源管理器直接打开)
+    - 目录名里带空格**是上游给的**, 我们不去动 (改了会导致所有 marker 对不上),
+      靠"引号"消除视觉歧义
+- **多行 vs 单行**: 一行超过 200 字符肉眼扫读困难 → 拆成 3 行树状, 一层缩进 4 空格.
+- **GUI 侧进度正则**每次改文案前都要重新看一眼, 别把 GUI 剩余时间估算搞挂. 已在
+  `extract_gui._EXTRACT_DONE_RE` 加了新老两个格式匹配, 向后兼容.
+- **每加一个字段, 想清楚是否要跑额外 IO**: 视频总时长要跑一次 `ffprobe`, 500 视频
+  多花 1-2 分钟. 值不值? 用户拍板要就加, 别自作主张.
+
+### 3. 子 exe 版本没同步升级的坑（v0.4.76）
+
+**症状**: 用户升级 `extract_gui.exe` 到 v0.4.75 (含 Samba retry / FindFirstFileW 兜底),
+但**忘了同步升级** `extract_frames.exe`, 老 exe 还是 v0.4.60 系列, 跑切帧还在打
+`[MARKER_MISS] parent listdir=0 项`, 反复以为 GUI 侧修复没生效.
+
+**根因**: 3 个 GUI (`extract_gui` / `dedupe_gui` / `classify_gui`) 中, 前 2 个是
+GUI + 子 exe **独立打包**模式, 只升级 GUI 不升级子 exe 时**肉眼看不出来** (只能点
+"关于"tab 才知道, 但用户不常点).
+
+**修法**: 新增 `child_exe_ver.py`, 3 个 GUI 启动即打 `[CORE]` 段到日志开头:
+
+```
+[CORE] extract_frames.exe 版本探测
+[CORE]   路径: D:\qzgj\extract_frames.exe
+[CORE]   版本: extract_frames v0.4.76
+[CORE]   一致性: ✓ (跟 GUI v0.4.76 一致)
+```
+
+子 exe 落后时打 `⚠ 子 exe 落后, 请更新!` 高亮告警.
+
+**硬规则** (详见 `docs/child_exe_ver.md`):
+
+- 只要 GUI 是"启动后 fork 出子 exe"模式 → **必须**接入 `child_exe_ver`
+- classify_gui 是 `import classify_pic` (子模块内嵌), 不需要
+- `child_exe_ver.py` 明文, **不进 pyarmor gen** (跟 `env_probe.py` 同规格)
+- 新 GUI workflow **必须**加 `copy child_exe_ver.py` + `--hidden-import child_exe_ver`
+
+### 4. `--version` 输出被 `[授权]` 行污染（v0.4.82）—— **重大硬规则**
+
+**症状**: 用户截图"关于"tab 显示 `内核版本 = [授权] 授权有效（发放给: user）`,
+而不是 `extract_frames v0.4.80`.
+
+**根因**: `main()` 的顺序是
+
+```python
+def main():
+    if "--fingerprint" in sys.argv:  # 早期短路
+        ...
+    _check_license_or_die()          # 会打 [授权] xxx 到 stdout
+    args = parse_args()               # 遇到 --version 才打真版本
+```
+
+`--version` 的输出实际是 **2 行**:
+
+```
+[授权] 授权有效 (发放给: user)     ← 授权检查先跑, 先打这行
+extract_frames v0.4.80             ← --version 打的真版本, 被挡住
+```
+
+GUI 那边 `splitlines()[0]` 抓了第 1 行, 显示成 `[授权] ...`.
+
+**三重修法** (任一层都能救):
+
+1. **子 exe main() 硬规则**: `--version` / `-V` **必须**走"早期短路", 跟
+   `--fingerprint` 一样在授权检查前就打完版本 + `return 0`:
+   ```python
+   def main():
+       if "--fingerprint" in sys.argv:
+           ...
+       # v0.4.82: --version 也走早期短路, 别让 [授权] 污染 stdout 第 1 行
+       if any(a in ("--version", "-V") for a in sys.argv[1:]):
+           print(f"extract_frames {_read_version()}")
+           return 0
+       _check_license_or_die()
+       ...
+   ```
+2. **GUI 侧兜底 1** (`child_exe_ver.probe_child_exe`): 扫全部行找**含 `vX.Y.Z` 的行**,
+   挑不到才退回第 1 行
+3. **GUI 侧兜底 2** (`pipe_gui.render_core_version_frame`, "关于"tab): 同样改扫版本行
+
+**硬规则**: **任何有 `_check_license_or_die()` 的子 exe, `--version` 必须早期短路**.
+以后新增 CLI 工具, 抄这段模板:
+
+```python
+def main():
+    if "--fingerprint" in sys.argv:
+        print(get_fingerprint()); return 0
+    if any(a in ("--version", "-V") for a in sys.argv[1:]):
+        print(f"tool_name {_read_version()}"); return 0
+    _check_license_or_die()
+    ...
+```
+
+**教训**:
+
+- **stdout 的顺序敏感**. 任何"探测型子命令" (--version / --fingerprint / --help)
+  都不能被授权检查污染
+- 三重防御是标配: 子 exe 自己修 + GUI 端 2 层兜底. 只改一层永远会有新 exe 忘记加,
+  改多层新旧兼容成本反而更低
+
+### 5. 日志新增字段不能挤在一行 —— 多行树状硬规则
+
+**症状**: v0.4.80 加完 "完整路径 + 双引号" 后, 一行就 300+ 字符, 用户抱怨读不动.
+v0.4.83 拆 3 行后好读多了, 但又要防止 GUI 进度正则被拆行搞挂.
+
+**硬规则**:
+
+- 一行超过 120 字符 → 强制拆行, 一级缩进 4 空格
+- 拆行结构:
+    ```
+    [顶级标签]  ← 第 1 行只放"进度 / stage tag / 简短标识符"
+        字段名: 值   附加字段=值    ← 第 2 行开始每行 1 组"字段名: 值"
+        ...
+    ```
+- **GUI 侧正则必须只匹配第 1 行**, 不能跨行 (拆行后进度条会重复计数)
+- 每次改文案, 跑单元测试验证新老格式:
+
+```python
+p = re.compile(_EXTRACT_DONE_RE_pattern)
+for s, expect in [
+    ("[第 123 个/共 543 个] ✓", True),
+    ("    源视频: ...", False),
+    ("    结果  : ...", False),
+    ("[3/61] ✓ path", True),   # 老格式
+]:
+    assert bool(p.search(s)) == expect
+```
+
+### 6. 版本速查（v0.4.75 → v0.4.84）
+
+| tag | 内容 |
+|---|---|
+| v0.4.75 | 修 workflow winpath_util 依赖 + GetDiskFreeSpaceExW 参数顺序 |
+| v0.4.76 | 新增 child_exe_ver, GUI 启动打 `[CORE]` 子 exe 版本 |
+| v0.4.77 | `[MARKER_MISS]` 首次跑不再刷屏 (加 has_history_jpg 判定) |
+| v0.4.78 | 抽帧日志改中文标签 + 图例 (`[第 N 个/共 M 个]`, `已抽帧数=`) |
+| v0.4.79 | dedupe_pic 日志跟 extract 风格对齐 |
+| v0.4.80 | 进度行打完整 src_path + 双引号包裹, 可直接复制 |
+| v0.4.81 | `[MARKER_MISS]` 判定过滤 `_extract.lock` (v0.4.77 的补丁) |
+| v0.4.82 | `--version` 输出被 `[授权]` 行污染 (三重修法) |
+| v0.4.83 | 抽帧日志改 3 行树状 + 加视频总时长 (ffprobe) |
+| v0.4.84 | 跳过/失败原因单独抽一行 |
