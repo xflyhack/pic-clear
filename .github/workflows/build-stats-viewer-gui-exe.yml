@@ -43,6 +43,7 @@ jobs:
           copy stats_db.py         build_stats_viewer\
           copy _version.py         build_stats_viewer\
           copy gui_log_util.py     build_stats_viewer\
+          copy tray_util.py         build_stats_viewer\
           copy env_probe.py        build_stats_viewer\
           copy winpath_util.py     build_stats_viewer\
         shell: cmd
@@ -66,6 +67,7 @@ jobs:
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
             --hidden-import _version ^
             --hidden-import gui_log_util ^
+            --hidden-import tray_util ^
             --hidden-import env_probe ^
             --hidden-import winpath_util ^
             --hidden-import stats_db ^
