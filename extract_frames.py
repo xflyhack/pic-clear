@@ -23,6 +23,7 @@ extract_frames.py — 递归遍历一个视频根目录，把每个 .h265 文件
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import os
 import re
@@ -83,6 +84,40 @@ _STATS_CTX: dict = {
     "seq_digits": None,
     "version": None,
 }
+
+
+def _video_fingerprint(video_path: str) -> tuple[str | None, int | None]:
+    """算视频"快速指纹" (file_size + head/mid/tail 各 1MB 的 sha1).
+
+    足够区分同视频/不同视频, 避免全量读大文件. 出错返回 (None, None),
+    主流程静默继续 (只是 final 表少一条 UPSERT, 流水表照常).
+
+    返回: (fingerprint_hex, file_size)
+    """
+    try:
+        st = os.stat(video_path)
+        size = int(st.st_size)
+        h = hashlib.sha1()
+        h.update(str(size).encode("ascii"))
+        chunk = 1024 * 1024  # 1MB
+        with open(video_path, "rb") as f:
+            # head
+            h.update(f.read(chunk))
+            if size > chunk * 3:
+                # mid
+                f.seek(size // 2 - chunk // 2)
+                h.update(f.read(chunk))
+                # tail
+                f.seek(max(0, size - chunk))
+                h.update(f.read(chunk))
+            elif size > chunk:
+                # 小文件: 只补一个尾部就够, 别越界
+                f.seek(max(0, size - chunk))
+                h.update(f.read(chunk))
+        return h.hexdigest(), size
+    except Exception:
+        return None, None
+
 
 
 # ---------------------- UTF-8 stdio（同 dedupe_pic 逻辑）---------------------
@@ -466,6 +501,7 @@ def extract_one(
     # 落库 (静默失败, 出问题不影响抽帧主流程)
     if _stats_db is not None:
         try:
+            _md5, _fsize = _video_fingerprint(str(task.src_path))
             _stats_db.record_extract(
                 video_path=str(task.src_path),
                 output_dir=str(task.out_dir),
@@ -483,6 +519,8 @@ def extract_one(
                 dst_root=_STATS_CTX.get("dst_root"),
                 task_id=_STATS_CTX.get("task_id"),
                 version=_STATS_CTX.get("version"),
+                video_md5=_md5,
+                file_size=_fsize,
             )
         except Exception:
             pass

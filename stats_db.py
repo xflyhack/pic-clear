@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _HOST_SAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
 
@@ -40,6 +40,66 @@ def _safe_hostname() -> str:
     except Exception:
         host = "unknown"
     return _HOST_SAFE_RE.sub("_", host)[:64] or "unknown"
+
+
+# --------------------------- 机器指纹 / 本地 IP (带缓存) ------------------
+# 目的: 多机同一份 db 时快速分辨到底哪台机器. 一定要两个字段, 防止 IP 侧翻车
+# (换网卡 / VPN / DHCP), 硬件指纹兜底.
+
+_MACHINE_FP_CACHE: str | None = None
+_LOCAL_IP_CACHE: tuple[float, str] | None = None
+_LOCAL_IP_TTL_SEC = 30.0
+
+
+def _machine_fp() -> str:
+    """licensing.get_fingerprint() 结果, 形如 'F260-BD4F-30EA-C616'.
+
+    进程内永久缓存 (硬件指纹在一个进程生命周期内不会变).
+    licensing 缺失或指纹计算异常 -> 返回 ''; 主流程绝不受影响.
+    """
+    global _MACHINE_FP_CACHE
+    if _MACHINE_FP_CACHE is not None:
+        return _MACHINE_FP_CACHE
+    fp = ""
+    try:
+        import licensing  # type: ignore
+        fp = licensing.get_fingerprint() or ""
+    except Exception:
+        # subprocess 挂 / licensing 未打包 / 权限异常 -> 静默
+        fp = ""
+    _MACHINE_FP_CACHE = fp
+    return fp
+
+
+def _local_ip() -> str:
+    """本机默认路由出口 IP (IPv4). 30 秒 TTL.
+
+    - UDP connect 到 8.8.8.8:80 拿 getsockname 里的本地地址, 不发实际数据包
+    - 断网 / 无路由: 落到 gethostbyname(hostname); 还挂就返回 ''
+    """
+    global _LOCAL_IP_CACHE
+    now = time.time()
+    if _LOCAL_IP_CACHE is not None:
+        _t, _ip = _LOCAL_IP_CACHE
+        if now - _t < _LOCAL_IP_TTL_SEC:
+            return _ip
+    ip = ""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.settimeout(0.5)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0] or ""
+        finally:
+            try: s.close()
+            except Exception: pass
+    except Exception:
+        try:
+            ip = socket.gethostbyname(socket.gethostname()) or ""
+        except Exception:
+            ip = ""
+    _LOCAL_IP_CACHE = (now, ip)
+    return ip
 
 
 def default_db_path() -> Path:
@@ -58,7 +118,9 @@ _DDL_EXTRACT = """
 CREATE TABLE IF NOT EXISTS extract_stats (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     ts            TEXT    NOT NULL,        -- 记录时间 YYYY-MM-DD HH:MM:SS
-    host          TEXT    NOT NULL,        -- 机器名
+    host          TEXT    NOT NULL,        -- 机器名 (socket.gethostname)
+    machine_fp    TEXT,                    -- 机器指纹 (licensing get_fingerprint)
+    local_ip      TEXT,                    -- 本地 IP (默认路由出口)
     task_id       TEXT,                    -- 一次 GUI 任务的 uuid, 便于聚合
     version       TEXT,                    -- 程序版本 (extract_frames --version)
     src_root      TEXT,                    -- 视频源根
@@ -87,6 +149,8 @@ CREATE TABLE IF NOT EXISTS dedupe_stats (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     ts             TEXT    NOT NULL,       -- 记录时间
     host           TEXT    NOT NULL,       -- 机器名
+    machine_fp     TEXT,                   -- 机器指纹
+    local_ip       TEXT,                   -- 本地 IP
     task_id        TEXT,                   -- 任务 uuid
     version        TEXT,                   -- 程序版本
     source_root    TEXT,                   -- 图片源根 (GUI 传入)
@@ -114,6 +178,8 @@ CREATE TABLE IF NOT EXISTS classify_stats (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     ts            TEXT    NOT NULL,       -- 记录时间
     host          TEXT    NOT NULL,       -- 机器名
+    machine_fp    TEXT,                   -- 机器指纹
+    local_ip      TEXT,                   -- 本地 IP
     task_id       TEXT,                   -- 任务 uuid
     version       TEXT,                   -- 程序版本
     in_root       TEXT,                   -- 分类输入根
@@ -133,11 +199,106 @@ CREATE INDEX IF NOT EXISTS idx_classify_task   ON classify_stats(task_id);
 CREATE INDEX IF NOT EXISTS idx_classify_camera ON classify_stats(camera_dir);
 """
 
+
+# ---------------- 最终表 (每目标一行, UPSERT). 与流水表一一对应, 用于跨天/跨机
+# 汇总时避免同一视频/目录/camera 被重复计数. 流水表 (extract_stats /
+# dedupe_stats / classify_stats) 全量保留, 供审计与回放.
+
+_DDL_EXTRACT_FINAL = """
+CREATE TABLE IF NOT EXISTS extract_final (
+    video_md5     TEXT PRIMARY KEY,          -- 视频快速指纹 (size + head/mid/tail)
+    file_size     INTEGER,                   -- 视频字节数
+    video_path    TEXT NOT NULL,             -- 最新一次抽帧时的绝对路径
+    src_root      TEXT,
+    dst_root      TEXT,
+    output_dir    TEXT,
+    rel_path      TEXT,
+    frames        INTEGER NOT NULL DEFAULT 0,-- 最新一次抽出的帧数
+    duration_sec  REAL,
+    fps           REAL,
+    quality       INTEGER,
+    naming_style  TEXT,
+    seq_digits    INTEGER,
+    last_ts       TEXT NOT NULL,             -- 最后一次落库时间
+    last_host     TEXT NOT NULL,             -- 最后一次是哪台机器 (hostname)
+    last_machine_fp TEXT,                    -- 最后一次机器指纹
+    last_local_ip TEXT,                      -- 最后一次本地 IP
+    last_task_id  TEXT,                      -- 最后一次的任务 uuid
+    last_version  TEXT,                      -- 最后一次的程序版本 tag
+    last_stage    TEXT,                      -- ok / empty / failed / locked
+    last_elapsed_sec REAL,                   -- 最后一次耗时
+    last_msg      TEXT,
+    first_ts      TEXT NOT NULL,             -- 首次落库时间
+    run_count     INTEGER NOT NULL DEFAULT 1 -- 累计抽帧次数 (>1 = 被重复切过)
+);
+CREATE INDEX IF NOT EXISTS idx_ex_final_last_ts  ON extract_final(last_ts);
+CREATE INDEX IF NOT EXISTS idx_ex_final_video    ON extract_final(video_path);
+CREATE INDEX IF NOT EXISTS idx_ex_final_host     ON extract_final(last_host);
+"""
+
+_DDL_DEDUPE_FINAL = """
+CREATE TABLE IF NOT EXISTS dedupe_final (
+    dir_path       TEXT NOT NULL,            -- 去重目录 (与 host 组合唯一)
+    host           TEXT NOT NULL,            -- 机器名 (PK 一部分)
+    last_machine_fp TEXT,                    -- 最后一次机器指纹
+    last_local_ip  TEXT,                     -- 最后一次本地 IP
+    source_root    TEXT,
+    total          INTEGER NOT NULL DEFAULT 0,
+    deleted        INTEGER NOT NULL DEFAULT 0,
+    remain         INTEGER NOT NULL DEFAULT 0,
+    freed_bytes    INTEGER NOT NULL DEFAULT 0,
+    threshold      INTEGER,
+    protect_count  INTEGER DEFAULT 0,
+    scene_count    INTEGER DEFAULT 0,
+    apply          INTEGER DEFAULT 0,
+    report_csv     TEXT,
+    last_ts        TEXT NOT NULL,
+    last_task_id   TEXT,
+    last_version   TEXT,                     -- 最后一次的程序版本 tag
+    last_elapsed_sec REAL,
+    last_exit_code INTEGER,
+    last_msg       TEXT,
+    first_ts       TEXT NOT NULL,
+    run_count      INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (dir_path, host)
+);
+CREATE INDEX IF NOT EXISTS idx_de_final_last_ts ON dedupe_final(last_ts);
+CREATE INDEX IF NOT EXISTS idx_de_final_dir     ON dedupe_final(dir_path);
+"""
+
+_DDL_CLASSIFY_FINAL = """
+CREATE TABLE IF NOT EXISTS classify_final (
+    camera_dir    TEXT NOT NULL,             -- camera 目录 (与 host 组合唯一)
+    host          TEXT NOT NULL,             -- 机器名 (PK 一部分)
+    last_machine_fp TEXT,                    -- 最后一次机器指纹
+    last_local_ip TEXT,                      -- 最后一次本地 IP
+    in_root       TEXT,
+    out_root      TEXT,
+    scanned       INTEGER NOT NULL DEFAULT 0,
+    copied_bucket INTEGER NOT NULL DEFAULT 0,
+    bucket_json   TEXT,
+    errors        INTEGER NOT NULL DEFAULT 0,
+    last_ts       TEXT NOT NULL,
+    last_task_id  TEXT,
+    last_version  TEXT,                      -- 最后一次的程序版本 tag
+    last_elapsed_sec REAL,
+    last_exit_code INTEGER,
+    last_msg      TEXT,
+    first_ts      TEXT NOT NULL,
+    run_count     INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (camera_dir, host)
+);
+CREATE INDEX IF NOT EXISTS idx_cl_final_last_ts ON classify_final(last_ts);
+CREATE INDEX IF NOT EXISTS idx_cl_final_camera  ON classify_final(camera_dir);
+"""
+
 _DDL_TASK_RUNS = """
 CREATE TABLE IF NOT EXISTS task_runs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     ts           TEXT    NOT NULL,       -- 记录时间
     host         TEXT    NOT NULL,       -- 机器名
+    machine_fp   TEXT,                   -- 机器指纹
+    local_ip     TEXT,                   -- 本地 IP
     task_id      TEXT    NOT NULL,       -- 任务 uuid (16 位十六进制)
     task_type    TEXT    NOT NULL,       -- extract / dedupe / classify
     version      TEXT,                   -- GUI 版本号
@@ -157,12 +318,53 @@ CREATE TABLE IF NOT EXISTS schema_version (
 """
 
 
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """给已存在的老 db 补齐新增列, 幂等. SQLite 的 ALTER TABLE ADD COLUMN
+    不支持 IF NOT EXISTS, 所以先 PRAGMA table_info 探测再加."""
+    plan = {
+        "extract_stats":   [("machine_fp", "TEXT"), ("local_ip", "TEXT")],
+        "dedupe_stats":    [("machine_fp", "TEXT"), ("local_ip", "TEXT")],
+        "classify_stats":  [("machine_fp", "TEXT"), ("local_ip", "TEXT")],
+        "extract_final":   [("last_machine_fp", "TEXT"),
+                            ("last_local_ip", "TEXT")],
+        "dedupe_final":    [("last_machine_fp", "TEXT"),
+                            ("last_local_ip", "TEXT")],
+        "classify_final":  [("last_machine_fp", "TEXT"),
+                            ("last_local_ip", "TEXT")],
+        "task_runs":       [("machine_fp", "TEXT"), ("local_ip", "TEXT")],
+    }
+    for tbl, cols in plan.items():
+        try:
+            cur = conn.execute(f"PRAGMA table_info({tbl})")
+            existing = {row[1] for row in cur.fetchall()}
+            if not existing:
+                continue  # 表不存在, 由 CREATE IF NOT EXISTS 建
+            for col, typ in cols:
+                if col not in existing:
+                    try:
+                        conn.execute(
+                            f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")
+                    except sqlite3.OperationalError as e:
+                        # 并发迁移下另一进程已加 -> "duplicate column"
+                        if "duplicate column" not in str(e).lower():
+                            print(f"[stats_db] WARN ALTER {tbl}.{col}: {e}",
+                                  file=sys.stderr)
+        except Exception as e:
+            print(f"[stats_db] WARN ensure_columns {tbl}: {e}",
+                  file=sys.stderr)
+
+
 def _init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL_SCHEMA)
     conn.executescript(_DDL_EXTRACT)
     conn.executescript(_DDL_DEDUPE)
     conn.executescript(_DDL_CLASSIFY)
+    conn.executescript(_DDL_EXTRACT_FINAL)
+    conn.executescript(_DDL_DEDUPE_FINAL)
+    conn.executescript(_DDL_CLASSIFY_FINAL)
     conn.executescript(_DDL_TASK_RUNS)
+    # 老 db 补列 (ALTER TABLE ADD COLUMN, 幂等)
+    _ensure_columns(conn)
     cur = conn.execute("SELECT COUNT(1) FROM schema_version")
     if cur.fetchone()[0] == 0:
         conn.execute(
@@ -185,6 +387,13 @@ def _open(db_path: Path) -> sqlite3.Connection:
     except Exception:
         pass
     return conn
+
+
+def _upsert_with_retry(
+    db_path: Path, sql: str, params: tuple,
+) -> None:
+    """与 _insert_with_retry 语义一致, 供 UPSERT (INSERT ... ON CONFLICT) 复用."""
+    _insert_with_retry(db_path, sql, params)
 
 
 def _insert_with_retry(
@@ -256,29 +465,90 @@ def record_extract(
     rel_path: str | None = None,
     task_id: str | None = None,
     version: str | None = None,
+    video_md5: str | None = None,
+    file_size: int | None = None,
     db_path: str | os.PathLike | None = None,
 ) -> None:
-    """记录一次抽帧结果 (一个视频一条). 静默失败."""
+    """记录一次抽帧结果.
+
+    - 写流水: extract_stats 一次一条, 全量保留.
+    - 写最终: extract_final 以 video_md5 为主键 UPSERT; 无 md5 时跳过 final.
+      重复切帧时: 流水累加, 最终表覆盖 (run_count+1).
+
+    静默失败, 不影响主流程.
+    """
     try:
         target = Path(db_path) if db_path else default_db_path()
+        ts_now = _now_str()
+        host = _safe_hostname()
+        m_fp = _machine_fp()
+        l_ip = _local_ip()
         _insert_with_retry(
             target,
             """
             INSERT INTO extract_stats(
-                ts, host, task_id, version, src_root, dst_root,
-                video_path, output_dir, rel_path, frames,
-                duration_sec, fps, quality, naming_style, seq_digits,
-                elapsed_sec, stage, exit_code, msg
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ts, host, machine_fp, local_ip, task_id, version,
+                src_root, dst_root, video_path, output_dir, rel_path,
+                frames, duration_sec, fps, quality, naming_style,
+                seq_digits, elapsed_sec, stage, exit_code, msg
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                _now_str(), _safe_hostname(), task_id, version,
+                ts_now, host, m_fp, l_ip, task_id, version,
                 src_root, dst_root, video_path, output_dir, rel_path,
                 int(frames or 0),
                 duration_sec, fps, quality, naming_style, seq_digits,
                 elapsed_sec, stage, int(exit_code or 0), msg,
             ),
         )
+        # UPSERT 到 extract_final; 无 md5 时不写 (无法唯一标识视频)
+        if video_md5:
+            _upsert_with_retry(
+                target,
+                """
+                INSERT INTO extract_final(
+                    video_md5, file_size, video_path, src_root, dst_root,
+                    output_dir, rel_path, frames, duration_sec, fps,
+                    quality, naming_style, seq_digits,
+                    last_ts, last_host, last_machine_fp, last_local_ip,
+                    last_task_id, last_version,
+                    last_stage, last_elapsed_sec, last_msg,
+                    first_ts, run_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(video_md5) DO UPDATE SET
+                    file_size    = excluded.file_size,
+                    video_path   = excluded.video_path,
+                    src_root     = excluded.src_root,
+                    dst_root     = excluded.dst_root,
+                    output_dir   = excluded.output_dir,
+                    rel_path     = excluded.rel_path,
+                    frames       = excluded.frames,
+                    duration_sec = excluded.duration_sec,
+                    fps          = excluded.fps,
+                    quality      = excluded.quality,
+                    naming_style = excluded.naming_style,
+                    seq_digits   = excluded.seq_digits,
+                    last_ts      = excluded.last_ts,
+                    last_host    = excluded.last_host,
+                    last_machine_fp = excluded.last_machine_fp,
+                    last_local_ip   = excluded.last_local_ip,
+                    last_task_id = excluded.last_task_id,
+                    last_version = excluded.last_version,
+                    last_stage   = excluded.last_stage,
+                    last_elapsed_sec = excluded.last_elapsed_sec,
+                    last_msg     = excluded.last_msg,
+                    run_count    = extract_final.run_count + 1
+                """,
+                (
+                    video_md5, file_size, video_path, src_root, dst_root,
+                    output_dir, rel_path, int(frames or 0), duration_sec, fps,
+                    quality, naming_style, seq_digits,
+                    ts_now, host, m_fp, l_ip, task_id, version,
+                    stage, elapsed_sec, msg,
+                    ts_now,
+                ),
+            )
     except Exception as e:
         _log_silent("record_extract", e)
 
@@ -303,28 +573,81 @@ def record_dedupe(
     version: str | None = None,
     db_path: str | os.PathLike | None = None,
 ) -> None:
-    """记录一次去重结果 (一个目录一条). 静默失败."""
+    """记录一次去重结果.
+
+    - 写流水: dedupe_stats 一次一条.
+    - 写最终: dedupe_final 以 (dir_path, host) 为主键 UPSERT.
+    静默失败.
+    """
     try:
         if remain is None:
             remain = max(0, int(total or 0) - int(deleted or 0))
         target = Path(db_path) if db_path else default_db_path()
+        ts_now = _now_str()
+        host = _safe_hostname()
+        m_fp = _machine_fp()
+        l_ip = _local_ip()
         _insert_with_retry(
             target,
             """
             INSERT INTO dedupe_stats(
-                ts, host, task_id, version, source_root,
+                ts, host, machine_fp, local_ip, task_id, version, source_root,
                 dir_path, total, deleted, remain, freed_bytes,
                 threshold, protect_count, scene_count, apply,
                 report_csv, elapsed_sec, exit_code, msg
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                _now_str(), _safe_hostname(), task_id, version, source_root,
+                ts_now, host, m_fp, l_ip, task_id, version, source_root,
                 dir_path, int(total or 0), int(deleted or 0), int(remain or 0),
                 int(freed_bytes or 0),
                 threshold, int(protect_count or 0), int(scene_count or 0),
                 1 if apply else 0,
                 report_csv, elapsed_sec, int(exit_code or 0), msg,
+            ),
+        )
+        _upsert_with_retry(
+            target,
+            """
+            INSERT INTO dedupe_final(
+                dir_path, host, last_machine_fp, last_local_ip,
+                source_root, total, deleted, remain,
+                freed_bytes, threshold, protect_count, scene_count,
+                apply, report_csv, last_ts, last_task_id, last_version,
+                last_elapsed_sec, last_exit_code, last_msg,
+                first_ts, run_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, 1)
+            ON CONFLICT(dir_path, host) DO UPDATE SET
+                last_machine_fp = excluded.last_machine_fp,
+                last_local_ip   = excluded.last_local_ip,
+                source_root   = excluded.source_root,
+                total         = excluded.total,
+                deleted       = excluded.deleted,
+                remain        = excluded.remain,
+                freed_bytes   = excluded.freed_bytes,
+                threshold     = excluded.threshold,
+                protect_count = excluded.protect_count,
+                scene_count   = excluded.scene_count,
+                apply         = excluded.apply,
+                report_csv    = excluded.report_csv,
+                last_ts       = excluded.last_ts,
+                last_task_id  = excluded.last_task_id,
+                last_version  = excluded.last_version,
+                last_elapsed_sec = excluded.last_elapsed_sec,
+                last_exit_code   = excluded.last_exit_code,
+                last_msg      = excluded.last_msg,
+                run_count     = dedupe_final.run_count + 1
+            """,
+            (
+                dir_path, host, m_fp, l_ip,
+                source_root, int(total or 0),
+                int(deleted or 0), int(remain or 0), int(freed_bytes or 0),
+                threshold, int(protect_count or 0), int(scene_count or 0),
+                1 if apply else 0, report_csv,
+                ts_now, task_id, version,
+                elapsed_sec, int(exit_code or 0), msg,
+                ts_now,
             ),
         )
     except Exception as e:
@@ -347,24 +670,72 @@ def record_classify(
     version: str | None = None,
     db_path: str | os.PathLike | None = None,
 ) -> None:
-    """记录一次分类结果 (一个 camera 目录一条). 静默失败."""
+    """记录一次分类结果.
+
+    - 写流水: classify_stats 一次一条.
+    - 写最终: classify_final 以 (camera_dir, host) 为主键 UPSERT.
+    静默失败.
+    """
     try:
         bucket_json = json.dumps(bucket_counts or {}, ensure_ascii=False)
         target = Path(db_path) if db_path else default_db_path()
+        ts_now = _now_str()
+        host = _safe_hostname()
+        m_fp = _machine_fp()
+        l_ip = _local_ip()
         _insert_with_retry(
             target,
             """
             INSERT INTO classify_stats(
-                ts, host, task_id, version, in_root, out_root,
+                ts, host, machine_fp, local_ip, task_id, version,
+                in_root, out_root,
                 camera_dir, scanned, copied_bucket, bucket_json,
                 errors, elapsed_sec, exit_code, msg
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                _now_str(), _safe_hostname(), task_id, version,
+                ts_now, host, m_fp, l_ip, task_id, version,
                 in_root, out_root, camera_dir,
                 int(scanned or 0), int(copied_bucket or 0), bucket_json,
                 int(errors or 0), elapsed_sec, int(exit_code or 0), msg,
+            ),
+        )
+        _upsert_with_retry(
+            target,
+            """
+            INSERT INTO classify_final(
+                camera_dir, host, last_machine_fp, last_local_ip,
+                in_root, out_root,
+                scanned, copied_bucket, bucket_json, errors,
+                last_ts, last_task_id, last_version,
+                last_elapsed_sec, last_exit_code, last_msg,
+                first_ts, run_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(camera_dir, host) DO UPDATE SET
+                last_machine_fp = excluded.last_machine_fp,
+                last_local_ip   = excluded.last_local_ip,
+                in_root       = excluded.in_root,
+                out_root      = excluded.out_root,
+                scanned       = excluded.scanned,
+                copied_bucket = excluded.copied_bucket,
+                bucket_json   = excluded.bucket_json,
+                errors        = excluded.errors,
+                last_ts       = excluded.last_ts,
+                last_task_id  = excluded.last_task_id,
+                last_version  = excluded.last_version,
+                last_elapsed_sec = excluded.last_elapsed_sec,
+                last_exit_code   = excluded.last_exit_code,
+                last_msg      = excluded.last_msg,
+                run_count     = classify_final.run_count + 1
+            """,
+            (
+                camera_dir, host, m_fp, l_ip,
+                in_root, out_root,
+                int(scanned or 0), int(copied_bucket or 0), bucket_json,
+                int(errors or 0),
+                ts_now, task_id, version,
+                elapsed_sec, int(exit_code or 0), msg,
+                ts_now,
             ),
         )
     except Exception as e:
@@ -393,11 +764,13 @@ def record_task_run(
             target,
             """
             INSERT INTO task_runs(
-                ts, host, task_id, task_type, version, cmdline, config_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ts, host, machine_fp, local_ip,
+                task_id, task_type, version, cmdline, config_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                _now_str(), _safe_hostname(), task_id, task_type,
+                _now_str(), _safe_hostname(), _machine_fp(), _local_ip(),
+                task_id, task_type,
                 version, cmdline, cfg_json,
             ),
         )

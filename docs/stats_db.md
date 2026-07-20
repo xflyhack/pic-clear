@@ -480,3 +480,156 @@ def sum_by_day(kind: str, ...) -> list[tuple[str, int]]: ...  # (date, count)
 ---
 
 **审阅确认**：这份文档 OK 就开工 Phase 1。有想改的告诉我。
+
+---
+
+## §12 最终表 vs 流水表（v0.4.89 新增）
+
+### 背景
+
+测试阶段经常对**同一批视频/目录反复切帧/去重/分类**（调参、验证修复、回归）。
+如果统计工具直接按 `extract_stats` 汇总，同一视频会被算 N 次，
+"总帧数 / 总删除数" 全部虚高。
+
+### 方案：一份流水 + 一份最终
+
+每种任务同时维护两张表：
+
+| 用途 | 流水表 | 最终表 |
+|---|---|---|
+| 抽帧 | `extract_stats` | `extract_final` |
+| 去重 | `dedupe_stats`  | `dedupe_final`  |
+| 分类 | `classify_stats`| `classify_final`|
+
+- **流水表**：每次任务一条 `INSERT`，不去重。审计 / 回放 / 追问「上周三那次跑了啥」用
+- **最终表**：一目标一行 `INSERT ... ON CONFLICT DO UPDATE`，最新一次覆盖旧值。统计汇总用
+
+### 主键 & 唯一性
+
+- `extract_final.video_md5` —— **视频内容快速指纹**，见下方
+- `dedupe_final(dir_path, host)` —— 同一目录在不同机器上算不同记录，因为多台机器可能各自处理不同批次
+- `classify_final(camera_dir, host)` —— 同上
+
+### 抽帧快速指纹 (`extract_frames._video_fingerprint`)
+
+- `sha1( str(size) + head(1MB) + mid(1MB) + tail(1MB) )`
+  - 文件 <1MB：只 hash size + 全文件
+  - 文件 <3MB：hash size + head + tail
+  - 文件 ≥3MB：hash size + head + mid + tail
+- 目的：几毫秒完成，避免大视频算全量 md5
+- 权衡：理论上有极小概率误判两不同视频为同一 md5，实测场景（不同录制片段）冲突可忽略
+- 失败静默返回 `(None, None)` → 该视频只写流水表、不进最终表，主流程不受影响
+
+### 版本字段
+
+**流水表和最终表都有 `version` 列**（最终表叫 `last_version`），
+CI 会在打 tag 时把 git tag 写进 `_version.py`，再由三个工具透传到 record_*。
+
+- 流水表：每条都有 version → 排查"哪个 tag 出的问题"
+- 最终表：`last_version` = 最近一次跑那个 tag，`first_ts` / `last_ts` 可以看时间跨度
+
+### UPSERT 会更新哪些字段？
+
+以 `extract_final` 为例，重复切同一视频时：
+
+- **覆盖**：`video_path` / `frames` / `fps` / `quality` / `last_ts` / `last_host` /
+  `last_task_id` / `last_version` / `last_stage` / `last_elapsed_sec` / `last_msg`
+- **累加**：`run_count = run_count + 1`
+- **保留**：`first_ts`（首次落库时间，永不变）
+
+去重 / 分类 final 表规则对称。
+
+### 查询端 (`stats_viewer_gui`) 行为
+
+- 顶部工具条新增「视图」下拉，`最终 / 流水` 二选一，默认「最终」
+- 「最终」模式：
+  - 抽帧/去重/分类三个 Tab 直接查 `*_final`
+  - 表格新增两列「重复次数」`run_count` 和「版本」`version`
+  - 多机聚合：抽帧按 `video_md5` 合并（取 `last_ts` 最新的那条），
+    去重/分类主键含 `host` 天然分开
+- 「流水」模式：回退到查 `*_stats`，跟老行为一致
+- 老 db（升级前的）没有 `*_final` 表 → 静默跳过、不报错
+
+### 兼容性
+
+- **老流水表**（`extract_stats` / `dedupe_stats` / `classify_stats`）**结构不动**，历史数据继续可用
+- **新增字段全在新表**，不改老 schema，`SCHEMA_VERSION` 从 1 升到 2
+- 新表首次访问时自动 `CREATE TABLE IF NOT EXISTS`，无需迁移脚本
+- 主流程（抽帧/去重/分类）静默失败原则保留：final 表写失败不影响流水表，两者都失败不影响任务本身
+
+### 血泪教训归档
+
+以前 `stats_viewer_gui` 表格里"总帧数"会随着重复切帧线性膨胀，
+测试阶段甚至看到一个 100 帧的视频显示 5000 帧（切了 50 次），
+用户在群里问"这机器怎么这么牛"—— 从此有了最终表。
+
+---
+
+## §13 机器识别字段：`machine_fp` + `local_ip`（v0.4.89 追加）
+
+### 背景
+
+多台机器共同处理任务（本地 Mac / 堡垒机 Win / 用户 Win 测试机 / 追签机器），
+只靠 `host = socket.gethostname()` 很难分辨：
+
+- hostname 可能重名（`DESKTOP-XXXX` 太随机、有时全一样）
+- 机器换网卡 / VPN / 迁盘时无法追溯
+- 授权侧已有指纹，但流水表里没落库 → 出问题查授权 vs 查任务对不上
+
+### 落库字段（6 张表 + task_runs 都加）
+
+| 字段 | 类型 | 含义 | 示例 |
+|---|---|---|---|
+| `machine_fp` | TEXT | licensing 指纹（`板号 + 盘号 + hostname` 的 sha256 前 16 位） | `F260-BD4F-30EA-C616` |
+| `local_ip`   | TEXT | 本机默认路由出口 IPv4 | `192.168.1.23` |
+
+在 final 表里叫 `last_machine_fp` / `last_local_ip`（跟 `last_ts` / `last_version` 对称）。
+
+### 为什么两个都要留
+
+- 指纹是**硬件级**唯一标识（板号 + 盘号），换网络不变
+- IP 反映**当次运行的网络位置**，方便群里同事快速指认："那台 192.168.1.23 的机器"
+- 有时候硬件指纹在虚拟机 / 云主机上会变（板号不稳），IP 兜底
+- 反过来，指纹稳定但没 IP 不好口头交流，两个互补
+
+### 取值逻辑（`stats_db._machine_fp` / `_local_ip`）
+
+**指纹**：进程内**永久缓存**（硬件指纹在一个进程生命周期内不会变）：
+
+- 调 `licensing.get_fingerprint()`
+- 首次 ~18ms（走 `wmic` / `system_profiler` subprocess），之后走缓存 <1μs
+- licensing 未打包 / subprocess 挂掉 → 返回 `""`，主流程不受影响
+
+**IP**：**30 秒 TTL** 缓存（防止 wifi 切换 / 拔插网线时长时间跑不更新）：
+
+- 经典 UDP `connect("8.8.8.8", 80)` + `getsockname()` 拿默认路由出口 IP
+- **不发实际数据包**（UDP connect 只走内核路由决策）
+- 断网 fallback 到 `gethostbyname(hostname)`
+- 都挂 → 返回 `""`
+
+### 老库自动升级（`_ensure_columns`）
+
+SQLite 的 `ALTER TABLE ADD COLUMN` **不支持** `IF NOT EXISTS`，
+所以先 `PRAGMA table_info(<table>)` 拿现有列名，缺哪列补哪列，幂等安全。
+
+覆盖表：`extract_stats` / `dedupe_stats` / `classify_stats` /
+`extract_final` / `dedupe_final` / `classify_final` / `task_runs`。
+
+**老数据不回填**：v0.4.89 之前写的行，`machine_fp` / `local_ip` 就是 `NULL`（历史无法补）。
+
+### 查看器展示
+
+`stats_viewer_gui` 三个 Tab 表格都新增两列：
+
+- 「指纹」：显示 `machine_fp`（16 字符带连字符），列宽 150
+- 「IP」：显示 `local_ip`（IPv4），列宽 110
+
+流水视图直接读 `machine_fp` / `local_ip`；
+最终视图从 `last_machine_fp` / `last_local_ip` 映射（下游 render 代码零改动）。
+
+### 已知陷阱
+
+1. **licensing 未随打包一起 hidden-import** → `_machine_fp()` 静默返回空。三个 exe workflow 已经带 licensing，理论上不会踩，但记住这条 fallback
+2. **虚拟机 / Docker** 板号可能全一样 → 指纹碰撞。这时候 IP 是唯一区分手段（IP 一般不会撞）
+3. **VPN / 代理**：`local_ip` 可能是 VPN 网段的 IP（10.x / 100.x），不是物理 LAN IP。语义上仍是"这个进程出口 IP"，符合预期
+4. **`_local_ip` 首次 500ms 超时**：设了 `s.settimeout(0.5)`，极端情况（防火墙拦截 UDP）也不会卡住主流程
