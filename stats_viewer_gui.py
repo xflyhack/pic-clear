@@ -91,6 +91,11 @@ class StatsViewerApp:
         default_dir = Path.home() / ".pic-clear"
         self.scan_dir_var = tk.StringVar(value=str(default_dir))
         self.range_var = tk.StringVar(value="最近 7 天")
+        # v0.4.94: 自定义时间段. range_var == "自定义…" 时启用.
+        # 值格式 (start_str, end_str), YYYY-MM-DD HH:MM:SS 字符串, sqlite 直接比较.
+        self._custom_time_range: tuple[str, str] | None = None
+        # 只读 Entry 上显示的摘要, 方便用户看清当前生效的自定义区间
+        self._custom_time_display_var = tk.StringVar(value="")
         self.host_var = tk.StringVar(value="全部")
         # v0.4.89: "最终 / 流水" 视图切换.
         #   最终 (默认) = 读 *_final 表, 一目标一行 UPSERT, 重复切帧不重复计数.
@@ -152,10 +157,25 @@ class StatsViewerApp:
                    command=self._on_pick_dir).pack(side="left")
 
         ttk.Label(bar, text="  时间:").pack(side="left")
+        # v0.4.94: 预设扩容 + 自定义时间段.
+        # - 最近 5/30 分钟 / 1/6 小时 更细粒度
+        # - 今天 / 昨天 从 0 点起算 (跟 last N 分钟不同)
+        # - 自定义… 弹对话框, 选完写回 _custom_time_range
         ttk.Combobox(
-            bar, textvariable=self.range_var, width=10, state="readonly",
-            values=("最近 1 天", "最近 7 天", "最近 30 天", "全部"),
+            bar, textvariable=self.range_var, width=12, state="readonly",
+            values=(
+                "最近 5 分钟", "最近 30 分钟",
+                "最近 1 小时", "最近 6 小时",
+                "今天", "昨天",
+                "最近 1 天", "最近 7 天", "最近 30 天",
+                "全部", "自定义…",
+            ),
         ).pack(side="left")
+        # 只读小 Entry 展示自定义区间摘要 (自定义模式下才有内容)
+        ttk.Entry(
+            bar, textvariable=self._custom_time_display_var,
+            width=32, state="readonly",
+        ).pack(side="left", padx=(4, 0))
 
         ttk.Label(bar, text="  机器:").pack(side="left")
         self._host_cb = ttk.Combobox(
@@ -474,12 +494,207 @@ class StatsViewerApp:
             f"抽帧 {len(ext)} 条 / 去重 {len(ded)} 条 / 分类 {len(clf)} 条"
         )
 
+    # ---------- v0.4.94: 时间过滤 (预设 + 自定义时间段)
+
+    def _on_range_var_change(self, *_a) -> None:
+        """range_var 改变时的分发. 拦截 "自定义…" 弹对话框.
+
+        - 选 "自定义…": 弹层, 用户确定后写 _custom_time_range + refresh;
+          取消则回退到上一次生效的 range (保存在 self._prev_range).
+        - 其他预设: 清空 _custom_time_range 并 refresh.
+        """
+        r = self.range_var.get()
+        if r == "自定义…":
+            ok = self._open_custom_time_dialog()
+            if not ok:
+                # 用户取消, 回退. 用 after 避免 trace 递归 (set 会再触发一次 trace,
+                # 但届时值等于 _prev_range, 不是"自定义…", 走 else 分支正常 refresh)
+                prev = getattr(self, "_prev_range", None) or "最近 7 天"
+                self.root.after(0, lambda: self.range_var.set(prev))
+                return
+            # 确定后 _custom_time_range 已就绪, 记录并刷新
+            self._prev_range = r
+            self.refresh_async()
+        else:
+            self._custom_time_range = None
+            self._custom_time_display_var.set("")
+            self._prev_range = r
+            self.refresh_async()
+
+    def _open_custom_time_dialog(self) -> bool:
+        """弹自定义时间段对话框. 用户点"确定"返回 True, "取消" / 关闭返回 False.
+
+        对话框里:
+        - 起始 / 结束 各一个 Entry (YYYY-MM-DD HH:MM:SS)
+        - 一排快捷: 此刻 / 今天0点 / 昨天0点 / 1小时前 / 1天前
+        - 确定时校验格式 + 起 <= 止
+        """
+        top = tk.Toplevel(self.root)
+        top.title("自定义时间段")
+        top.transient(self.root)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        top.resizable(False, False)
+
+        # 默认值: 起始 = 上次自定义 or 1 天前; 结束 = 此刻
+        now = datetime.now()
+        if self._custom_time_range is not None:
+            s_default, e_default = self._custom_time_range
+        else:
+            s_default = (now - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+            e_default = now.strftime("%Y-%m-%d %H:%M:%S")
+
+        start_var = tk.StringVar(value=s_default)
+        end_var = tk.StringVar(value=e_default)
+
+        frm = ttk.Frame(top, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="起始:").grid(row=0, column=0, sticky="e",
+                                          padx=(0, 6), pady=4)
+        ttk.Entry(frm, textvariable=start_var, width=22).grid(
+            row=0, column=1, sticky="w", pady=4)
+        ttk.Label(frm, text="结束:").grid(row=1, column=0, sticky="e",
+                                          padx=(0, 6), pady=4)
+        ttk.Entry(frm, textvariable=end_var, width=22).grid(
+            row=1, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="格式: YYYY-MM-DD HH:MM:SS, 例 2026-07-20 14:30:00",
+                  foreground="#888").grid(
+                      row=2, column=0, columnspan=2, sticky="w",
+                      padx=(0, 0), pady=(0, 8))
+
+        # 快捷按钮
+        quick_frm = ttk.LabelFrame(frm, text="快捷填入")
+        quick_frm.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+
+        def _fmt(dt: datetime) -> str:
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        def _set_range(s: datetime, e: datetime) -> None:
+            start_var.set(_fmt(s))
+            end_var.set(_fmt(e))
+
+        today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        yest0 = today0 - timedelta(days=1)
+
+        quick_specs = [
+            ("最近 1 小时", now - timedelta(hours=1), now),
+            ("最近 6 小时", now - timedelta(hours=6), now),
+            ("今天",       today0, now),
+            ("昨天",       yest0, today0),
+            ("最近 1 天",  now - timedelta(days=1), now),
+            ("最近 7 天",  now - timedelta(days=7), now),
+        ]
+        for i, (label, s, e) in enumerate(quick_specs):
+            ttk.Button(
+                quick_frm, text=label, width=10,
+                command=lambda s=s, e=e: _set_range(s, e),
+            ).grid(row=i // 3, column=i % 3, padx=4, pady=3)
+
+        # 确定 / 取消
+        result = {"ok": False}
+        err_var = tk.StringVar(value="")
+        ttk.Label(frm, textvariable=err_var, foreground="#c0392b").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
+        def _try_parse(s: str) -> datetime | None:
+            s = (s or "").strip()
+            # 允许省略秒 / 时分秒, 分别兜底
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(s, fmt)
+                except ValueError:
+                    continue
+            return None
+
+        def _on_ok() -> None:
+            s_dt = _try_parse(start_var.get())
+            e_dt = _try_parse(end_var.get())
+            if s_dt is None:
+                err_var.set("起始时间格式非法")
+                return
+            if e_dt is None:
+                err_var.set("结束时间格式非法")
+                return
+            if s_dt > e_dt:
+                err_var.set("起始时间必须 <= 结束时间")
+                return
+            self._custom_time_range = (_fmt(s_dt), _fmt(e_dt))
+            self._custom_time_display_var.set(
+                f"{_fmt(s_dt)}  →  {_fmt(e_dt)}"
+            )
+            result["ok"] = True
+            top.destroy()
+
+        def _on_cancel() -> None:
+            top.destroy()
+
+        btn_frm = ttk.Frame(frm)
+        btn_frm.grid(row=5, column=0, columnspan=2, sticky="e", pady=(4, 0))
+        ttk.Button(btn_frm, text="取消", width=8,
+                   command=_on_cancel).pack(side="right", padx=(6, 0))
+        ttk.Button(btn_frm, text="确定", width=8,
+                   command=_on_ok).pack(side="right")
+
+        top.protocol("WM_DELETE_WINDOW", _on_cancel)
+        # 阻塞等对话框关闭
+        self.root.wait_window(top)
+        return result["ok"]
+
     def _build_time_filter(self, ts_col: str = "ts") -> tuple[str, tuple]:
+        """根据 range_var / _custom_time_range 生成 WHERE 片段 + 参数.
+
+        v0.4.94: 支持更多预设 + 自定义 BETWEEN.
+        - 全部: 空条件
+        - 自定义…: BETWEEN start AND end (含首尾秒)
+        - 分钟/小时/天: ts >= now - delta
+        - 今天 / 昨天: 按 0 点分界
+        """
         r = self.range_var.get()
         if r == "全部":
             return "", ()
+        if r == "自定义…":
+            if self._custom_time_range is None:
+                # 用户点了"自定义…"但还没确认, 兜底不加条件
+                return "", ()
+            s, e = self._custom_time_range
+            return f"{ts_col} BETWEEN ? AND ?", (s, e)
+
+        now = datetime.now()
+        # 分钟级
+        minutes = {
+            "最近 5 分钟": 5, "最近 30 分钟": 30,
+        }.get(r)
+        if minutes is not None:
+            since = (now - timedelta(minutes=minutes)
+                     ).strftime("%Y-%m-%d %H:%M:%S")
+            return f"{ts_col} >= ?", (since,)
+        # 小时级
+        hours = {
+            "最近 1 小时": 1, "最近 6 小时": 6,
+        }.get(r)
+        if hours is not None:
+            since = (now - timedelta(hours=hours)
+                     ).strftime("%Y-%m-%d %H:%M:%S")
+            return f"{ts_col} >= ?", (since,)
+        # 今天 / 昨天 (按自然日切)
+        if r == "今天":
+            since = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            return f"{ts_col} >= ?", (since.strftime("%Y-%m-%d %H:%M:%S"),)
+        if r == "昨天":
+            today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            yest0 = today0 - timedelta(days=1)
+            return (
+                f"{ts_col} >= ? AND {ts_col} < ?",
+                (yest0.strftime("%Y-%m-%d %H:%M:%S"),
+                 today0.strftime("%Y-%m-%d %H:%M:%S")),
+            )
+        # 天级 (兼容老选项)
         days = {"最近 1 天": 1, "最近 7 天": 7, "最近 30 天": 30}.get(r, 7)
-        since = (datetime.now() - timedelta(days=days)
+        since = (now - timedelta(days=days)
                  ).strftime("%Y-%m-%d %H:%M:%S")
         return f"{ts_col} >= ?", (since,)
 
@@ -1145,14 +1360,12 @@ def main() -> int:
     root = tk.Tk()
     app = StatsViewerApp(root)
 
-    def _on_range_or_host_change(*_a):
-        app.refresh_async()
-
-    app.range_var.trace_add("write", _on_range_or_host_change)
+    # v0.4.94: range 变更走 App 方法 (要拦截 "自定义…" 弹对话框)
+    app.range_var.trace_add("write", app._on_range_var_change)
     app.host_var.trace_add("write",
                            lambda *_: app._apply_host_filter_and_render())
     # v0.4.89: 切换 "最终/流水" 视图直接触发重新查表
-    app.view_mode_var.trace_add("write", _on_range_or_host_change)
+    app.view_mode_var.trace_add("write", lambda *_: app.refresh_async())
 
     root.mainloop()
     return 0
