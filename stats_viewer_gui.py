@@ -278,6 +278,11 @@ class StatsViewerApp:
            self._show_row_detail("去重记录", row, "dedupe"))
         self._dedupe_tv = tv
 
+        # v0.4.97: 去重 footer 汇总, 跟抽帧 footer 一致的位置和样式.
+        self._dedupe_footer_var = tk.StringVar(value="")
+        ttk.Label(bot, textvariable=self._dedupe_footer_var,
+                  anchor="w", padding=(6, 4)).pack(side="bottom", fill="x")
+
     # ---------- Tab: 分类
 
     def _build_classify_tab(self) -> None:
@@ -785,6 +790,31 @@ class StatsViewerApp:
             ("elapsed_sec",
              lambda r: f"{(r.get('elapsed_sec') or 0):.1f}"),
         ])
+        # v0.4.97: footer 汇总. dedupe_final PK=(dir_path, host), 天然按目录去重,
+        # len(rows) 就是涉及目录数. 流水视图一个目录可能多条, 但 total/deleted/remain
+        # 累加口径跟抽帧一致 (rows 直接累加, 用户看视图切换的实际数字).
+        _mode = self.view_mode_var.get() or "最终"
+        _dirs = len(rows)
+        _total = 0
+        _deleted = 0
+        _remain = 0
+        _freed = 0
+        _elapsed = 0.0
+        for r in rows:
+            _total += int(r.get("total") or 0)
+            _deleted += int(r.get("deleted") or 0)
+            _remain += int(r.get("remain") or 0)
+            _freed += int(r.get("freed_bytes") or 0)
+            _elapsed += float(r.get("elapsed_sec") or 0)
+        _freed_mb = _freed / 1024 / 1024
+        self._dedupe_footer_var.set(
+            f"[{_mode}] 统计数据: 涉及 {_dirs} 个目录, "
+            f"总张数: {_total} 张, "
+            f"总删除: {_deleted} 张, "
+            f"总剩余: {_remain} 张, "
+            f"总释放: {_freed_mb:.1f}MB, "
+            f"总耗时: {_fmt_duration_human(_elapsed)}"
+        )
         _plot_bar(
             self._dedupe_chart_frame,
             title="去重汇总 (按机器)",
