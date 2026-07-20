@@ -985,6 +985,215 @@ def collect_env_report() -> str:
     return "\n".join(lines)
 
 
+# ---------------- 视频时长 (ffprobe) 诊断 (v0.4.96 新增) ----------------
+
+def _run_ffprobe_once(ffprobe: str, arg: str, timeout: float = 15.0) -> dict:
+    """跑一次 ffprobe, 返回 {rc, stdout, stderr, exc}. 不抛异常."""
+    cmd = [ffprobe, "-v", "error",
+           "-show_entries", "format=duration",
+           "-of", "default=noprint_wrappers=1:nokey=1",
+           arg]
+    out = {"cmd": cmd, "rc": None, "stdout": "", "stderr": "", "exc": ""}
+    try:
+        r = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=timeout, encoding="utf-8", errors="replace",
+        )
+        out["rc"] = r.returncode
+        out["stdout"] = (r.stdout or "").strip()
+        out["stderr"] = (r.stderr or "").strip()
+    except Exception as e:
+        out["exc"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+def _resolve_ffprobe_for_diag(user_hint: str) -> tuple[str, str]:
+    r"""定位 ffprobe.exe. 返回 (path_or_empty, 说明).
+
+    优先级:
+      1. 用户在 UI 手填的
+      2. 环境变量 FFPROBE / PATH 里的 ffprobe / ffprobe.exe
+      3. exe 同目录 / PyInstaller _MEIPASS 目录
+    """
+    import shutil
+    from pathlib import Path
+    hint = (user_hint or "").strip().strip('"').strip("'")
+    if hint:
+        p = Path(hint)
+        if p.is_file():
+            return str(p), f"用 UI 手填: {p}"
+        return "", f"UI 手填路径不存在: {p}"
+
+    env_p = os.environ.get("FFPROBE")
+    if env_p:
+        p = Path(env_p)
+        if p.is_file():
+            return str(p), f"从环境变量 FFPROBE 找到: {p}"
+
+    which = shutil.which("ffprobe") or shutil.which("ffprobe.exe")
+    if which:
+        return which, f"从 PATH 找到: {which}"
+
+    # exe 同目录
+    exe_dir = Path(sys.executable).resolve().parent
+    for name in ("ffprobe.exe", "ffprobe"):
+        cand = exe_dir / name
+        if cand.is_file():
+            return str(cand), f"在 exe 同目录找到: {cand}"
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        for name in ("ffprobe.exe", "ffprobe"):
+            cand = Path(meipass) / name
+            if cand.is_file():
+                return str(cand), f"在 PyInstaller _MEIPASS 找到: {cand}"
+
+    return "", "PATH / 环境变量 / exe 同目录 / _MEIPASS 都没找到"
+
+
+def run_video_duration_diagnostics(video_path: str, ffprobe_hint: str = "") -> str:
+    r"""跑视频时长 (ffprobe) 全套诊断. v0.4.96 新增.
+
+    覆盖场景: stats_viewer 详情面板'视频时长(s)'一直空 / footer'视频总时长'一直 0 秒.
+    分三级排查:
+      1) ffprobe 能不能找到
+      2) 视频文件本身可读吗 (safe_stat 两级)
+      3) ffprobe 喂原始短路径 / \\?\ 长路径 / UNC 三种参数, 打完整 rc/stdout/stderr
+    """
+    from pathlib import Path
+    lines: list[str] = []
+    def w(s: str = "") -> None:
+        lines.append(s)
+
+    w("=" * 60)
+    w("pic-clear 视频时长 (ffprobe) 诊断报告")
+    w(f"生成时间 : {datetime.now().isoformat(timespec='seconds')}")
+    w(f"Python   : {sys.version.split()[0]}")
+    w(f"平台     : {platform.system()} {platform.release()}")
+    w("=" * 60)
+
+    # ----- 1) 定位 ffprobe -----
+    ffprobe, hint_msg = _resolve_ffprobe_for_diag(ffprobe_hint)
+    w("")
+    w("[1] 定位 ffprobe")
+    w(f"    {hint_msg}")
+    if not ffprobe:
+        w("")
+        w("!! 结论: 找不到 ffprobe.exe. 装 ffmpeg 或把 ffprobe.exe 放到 exe 同目录.")
+        w("   (extract_frames.exe 也吃 --ffmpeg 参数, ffprobe 会在同目录找)")
+        return "\n".join(lines)
+
+    # ffprobe 版本自检
+    try:
+        r = subprocess.run(
+            [ffprobe, "-version"], capture_output=True, text=True,
+            timeout=5, encoding="utf-8", errors="replace",
+        )
+        first_line = (r.stdout or "").splitlines()[0] if r.stdout else ""
+        w(f"    版本自检 : rc={r.returncode}  {first_line}")
+    except Exception as e:
+        w(f"    版本自检 : 异常 {type(e).__name__}: {e}")
+
+    # ----- 2) 视频文件属性 -----
+    w("")
+    w("[2] 视频文件属性")
+    raw = video_path
+    norm = _normalize_windows_path(raw)
+    long_p = _to_long_path(norm)
+    w(f"    原始路径 : {raw}")
+    w(f"    归一化   : {norm}  (len={len(norm)})")
+    w(f"    长路径   : {long_p}  (len={len(long_p)})")
+
+    # 两级 stat
+    for label, tgt in (("短路径", norm), ("长路径", long_p)):
+        try:
+            st = os.stat(tgt)
+            w(f"    {label} os.stat : OK  size={st.st_size}  "
+              f"mtime={datetime.fromtimestamp(st.st_mtime).isoformat(timespec='seconds')}")
+        except Exception as e:
+            w(f"    {label} os.stat : ERR  {type(e).__name__}: {e}")
+
+    # ----- 3) 三种参数喂 ffprobe -----
+    w("")
+    w("[3] 三种路径参数喂 ffprobe -show_entries=format=duration")
+
+    attempts = [("原始短路径", norm), ("长路径 \\?\\ 前缀", long_p)]
+    # 如果 Z: 之类映射盘且能 resolve 出 UNC, 也试一下
+    try:
+        if len(norm) >= 2 and norm[1] == ":" and norm[0].isalpha():
+            rc, unc = _resolve_mapped_drive_to_unc(norm[0])
+            if unc:
+                unc_full = _to_unc_full(norm, unc)
+                attempts.append(("UNC \\?\\UNC", unc_full))
+                w(f"    (检测到映射盘 {norm[0]}: -> {unc}, 追加 UNC 尝试)")
+    except Exception as e:
+        w(f"    (映射盘解析异常, 跳过 UNC 尝试: {type(e).__name__}: {e})")
+
+    got_duration: float | None = None
+    for label, arg in attempts:
+        w("")
+        w(f"    --- 尝试: {label} ---")
+        w(f"    参数     : {arg}")
+        r = _run_ffprobe_once(ffprobe, arg)
+        if r["exc"]:
+            w(f"    subprocess 异常: {r['exc']}")
+            continue
+        w(f"    rc       : {r['rc']}")
+        stdout = r["stdout"]
+        stderr = r["stderr"]
+        w(f"    stdout   : {stdout!r}")
+        if stderr:
+            w(f"    stderr   : {stderr[:500]!r}"
+              f"{' ...(截断)' if len(stderr) > 500 else ''}")
+        if r["rc"] == 0 and stdout:
+            try:
+                d = float(stdout)
+                w(f"    -> 解析成功 duration={d:.3f} 秒 = {int(d)//60}分{int(d)%60}秒")
+                if got_duration is None:
+                    got_duration = d
+            except ValueError as e:
+                w(f"    -> stdout 解析失败: {e}")
+
+    # ----- 4) 若全挂, 加跑一次 show_streams 看 codec 元信息 -----
+    if got_duration is None:
+        w("")
+        w("[4] 3 种都拿不到 duration, 加跑 -show_streams 看能否读到视频头")
+        cmd = [ffprobe, "-v", "error",
+               "-show_streams", "-of", "default=noprint_wrappers=1", norm]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=15, encoding="utf-8", errors="replace")
+            w(f"    rc={r.returncode}")
+            out = (r.stdout or "").strip()
+            if out:
+                for line in out.splitlines()[:20]:
+                    w(f"      {line}")
+            else:
+                w("      (stdout 空)")
+            err = (r.stderr or "").strip()
+            if err:
+                w(f"    stderr: {err[:400]!r}"
+                  f"{' ...(截断)' if len(err) > 400 else ''}")
+        except Exception as e:
+            w(f"    异常: {type(e).__name__}: {e}")
+
+    # ----- 结论 -----
+    w("")
+    w("=" * 60)
+    if got_duration is not None:
+        w(f"结论: 至少一级能拿到时长 = {got_duration:.3f} 秒.")
+        w("      extract_frames.exe 会用相同两级 (原始短路径 / 长路径) 尝试,")
+        w("      正常情况下 stats_viewer 里就会有值 (需要新版切帧 exe 重新抽一次).")
+    else:
+        w("结论: 3 种参数都拿不到时长. 把本报告全文贴给作者, 我看 stderr 定位.")
+        w("      常见原因:")
+        w("        - 视频编码/容器 ffprobe 不支持 (h265 裸流常见, 需要更完整的 ffprobe build)")
+        w("        - 视频头损坏 / 文件被截断")
+        w("        - 网络盘 IO 超时")
+    w("=" * 60)
+    return "\n".join(lines)
+
+
 class DiagApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -1013,6 +1222,12 @@ class DiagApp:
         env_tab = ttk.Frame(nb)
         nb.add(env_tab, text="环境体检")
         self._build_env_tab(env_tab)
+
+        # Tab 5: 视频时长 (ffprobe) 诊断 (v0.4.96 新增)
+        vd_tab = ttk.Frame(nb)
+        nb.add(vd_tab, text="视频时长诊断")
+        self._build_videodur_tab(vd_tab)
+
         # 挪到首位显示 (用户开 diag_pic 先看环境)
         nb.select(env_tab)
         # 启动自动跑一次
@@ -1404,6 +1619,128 @@ class DiagApp:
             self.on_env_run()
         except Exception as e:
             self._env_append(f"\n[自动体检失败] {type(e).__name__}: {e}\n")
+
+    # ---------- Tab 5: 视频时长诊断 (v0.4.96) ----------
+
+    def _build_videodur_tab(self, parent):
+        top = ttk.Frame(parent, padding=8)
+        top.pack(fill=tk.X)
+
+        ttk.Label(top, text="视频路径:").pack(side=tk.LEFT)
+        self.vd_path_var = tk.StringVar()
+        ttk.Entry(top, textvariable=self.vd_path_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        ttk.Button(top, text="浏览...",
+                   command=self.on_vd_browse_video).pack(side=tk.LEFT, padx=2)
+
+        top2 = ttk.Frame(parent, padding=(8, 0))
+        top2.pack(fill=tk.X)
+        ttk.Label(top2, text="ffprobe (可空自动找):").pack(side=tk.LEFT)
+        self.vd_ffprobe_var = tk.StringVar()
+        ttk.Entry(top2, textvariable=self.vd_ffprobe_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        ttk.Button(top2, text="浏览...",
+                   command=self.on_vd_browse_ffprobe).pack(side=tk.LEFT, padx=2)
+
+        btns = ttk.Frame(parent, padding=(8, 4))
+        btns.pack(fill=tk.X)
+        ttk.Button(btns, text="开始诊断",
+                   command=self.on_vd_run).pack(side=tk.LEFT)
+        ttk.Button(btns, text="清空日志",
+                   command=self.on_vd_clear).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="复制全部日志",
+                   command=self.on_vd_copy).pack(side=tk.LEFT)
+        ttk.Label(btns, text="  用于排查 stats_viewer '视频时长'为空",
+                  foreground="#888").pack(side=tk.RIGHT)
+
+        body = ttk.Frame(parent, padding=8)
+        body.pack(fill=tk.BOTH, expand=True)
+        self.vd_txt = tk.Text(body, wrap=tk.NONE, font=("Consolas", 10))
+        yscroll = ttk.Scrollbar(body, orient=tk.VERTICAL,
+                                command=self.vd_txt.yview)
+        xscroll = ttk.Scrollbar(body, orient=tk.HORIZONTAL,
+                                command=self.vd_txt.xview)
+        self.vd_txt.configure(yscrollcommand=yscroll.set,
+                              xscrollcommand=xscroll.set)
+        self.vd_txt.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+
+        self.vd_txt.bind("<Control-a>", self._select_all_vd)
+        self.vd_txt.bind("<Control-A>", self._select_all_vd)
+
+        self._vd_append(
+            "用于排查 stats_viewer '视频时长(s)' 空 / footer '视频总时长' 0 秒.\n"
+            "使用步骤:\n"
+            "  1) [浏览...] 选一个 stats_viewer 里 duration 为空的视频文件\n"
+            "  2) ffprobe 路径通常空着即可, 自动找 (env FFPROBE / PATH / exe 同目录)\n"
+            "  3) [开始诊断], 结果会分 3-4 步打印\n"
+            "  4) [复制全部日志] 贴给作者定位到底哪级失败\n\n"
+        )
+
+    def _select_all_vd(self, _event=None):
+        self.vd_txt.tag_add("sel", "1.0", "end")
+        return "break"
+
+    def _vd_append(self, s: str) -> None:
+        self.vd_txt.insert(tk.END, s)
+        self.vd_txt.see(tk.END)
+
+    def on_vd_browse_video(self):
+        p = filedialog.askopenfilename(
+            title="选一个视频做诊断",
+            filetypes=[
+                ("视频文件", "*.mp4 *.mov *.mkv *.avi *.wmv *.flv "
+                              "*.webm *.h264 *.h265 *.hevc *.ts *.m2ts"),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if p:
+            self.vd_path_var.set(p)
+
+    def on_vd_browse_ffprobe(self):
+        p = filedialog.askopenfilename(
+            title="选 ffprobe.exe",
+            filetypes=[("ffprobe", "ffprobe*.exe ffprobe"),
+                       ("所有文件", "*.*")],
+        )
+        if p:
+            self.vd_ffprobe_var.set(p)
+
+    def on_vd_clear(self):
+        self.vd_txt.delete("1.0", tk.END)
+
+    def on_vd_copy(self):
+        try:
+            content = self.vd_txt.get("1.0", tk.END)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self.root.update()
+            messagebox.showinfo(
+                "已复制",
+                "全部日志已复制到剪贴板, 直接粘贴给作者即可",
+            )
+        except Exception as e:
+            messagebox.showerror("复制失败", str(e))
+
+    def on_vd_run(self):
+        vp = self.vd_path_var.get().strip().strip(chr(34)).strip("'")
+        if not vp:
+            messagebox.showwarning(
+                "请选视频",
+                "请先点 [浏览...] 选一个 stats_viewer 里 duration 为空的视频",
+            )
+            return
+        self._vd_append(f"\n>>> 开始诊断: {vp}\n\n")
+        self.root.update()
+        try:
+            report = run_video_duration_diagnostics(
+                vp, self.vd_ffprobe_var.get())
+        except Exception:
+            report = "诊断脚本自身抛异常:\n" + traceback.format_exc()
+        self._vd_append(report + "\n")
 
 
 def main():
