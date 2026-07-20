@@ -355,7 +355,7 @@ class ClassifyApp:
         self.start_btn.pack(side="left", padx=4)
         self.stop_btn = ttk.Button(btn, text="停止", command=self._stop, state=DISABLED)
         self.stop_btn.pack(side="left", padx=4)
-        ttk.Button(btn, text="清空日志", command=self._clear_log).pack(side="left", padx=4)
+        ttk.Button(btn, text="清空日志", command=self._log_ctl.clear_tab).pack(side="left", padx=4)
 
         # 分类页底部：一段小提示
         hint = ttk.Label(
