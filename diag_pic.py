@@ -1456,7 +1456,7 @@ def run_dedup_replay(target_dir: str,
     else:
         w(f"  ✓ 模型: {model_path}")
         try:
-            detector = _detector_mod.Yolov8OnnxDetector(
+            detector = _detector_mod.YoloDetector(
                 model_path=model_path, conf_thres=conf)
             w("  ✓ 模型加载成功")
         except Exception as e:
