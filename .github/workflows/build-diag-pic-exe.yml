@@ -21,10 +21,11 @@ jobs:
           python-version: "3.11"
 
       - name: Install runtime deps
+        # 对齐 requirements.txt 里锁的版本 (onnxruntime==1.19.2, numpy<2),
+        # 保证跟 sqDedupe.exe 用的 runtime 完全一致, 避免堡垒机 VC++ Runtime 冲突.
         run: |
           python -m pip install --upgrade pip
-          pip install Pillow
-          pip install numpy onnxruntime
+          pip install -r requirements.txt
           pip install pyinstaller
 
       - name: Write _version.py from git ref
@@ -36,6 +37,20 @@ jobs:
           )
           type _version.py
         shell: cmd
+
+      - name: Install export-only deps (for yolov8n.onnx)
+        # 只在 CI 里为了导出模型临时装 ultralytics/onnx/onnxslim,
+        # 打包完就丢, 不会随 exe 分发 (打包只依赖 onnxruntime).
+        run: |
+          pip install ultralytics onnx onnxslim
+
+      - name: Export yolov8n.onnx
+        # 跟 build-windows-exe.yml 的 sqDedupe 打包步骤完全一致, 保证 diag_pic
+        # 里跑 YOLO 复现的模型跟生产 sqDedupe.exe 用的是同一个.
+        run: |
+          curl -L -o yolov8n.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt
+          python -c "from ultralytics import YOLO; YOLO('yolov8n.pt').export(format='onnx', imgsz=640, opset=12, simplify=True, dynamic=False)"
+          dir yolov8n.onnx
 
       - name: Download ffmpeg + ffprobe (static build for Windows)
         # v0.4.100: diag_pic '视频时长诊断' tab 需要 ffprobe.exe.
