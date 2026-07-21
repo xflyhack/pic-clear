@@ -714,7 +714,11 @@ def do_delete(
                 # v0.4.38 sanity check: 确认文件真的没了, 否则计入 errors 不算成功.
                 # 防止 _safe_unlink / _safe_move 静默失败 (老版本 42 张删除计数 +1
                 # 但实际一张都没删的坑就在这).
-                if _safe_is_file(item.path):
+                # v0.4.115: 加 skip_samba_retry=True. 老版本每张删掉的图都会走
+                # samba retry sleep 11 秒 (因为文件真没了导致 isfile miss, 触发
+                # 假 miss 兜底), 表现为"几秒少一张、日志卡住"—— 完全反了,
+                # 文件被删应该 miss, 不需要重试.
+                if _safe_is_file(item.path, skip_samba_retry=True):
                     errors.append(f"{item.path}: 删除后文件仍存在, 疑似静默失败")
                     continue
                 deleted += 1

@@ -272,8 +272,14 @@ def safe_exists(p) -> bool:
         return False
 
 
-def safe_is_file(p) -> bool:
-    return _safe_is_file_impl(p)[0]
+def safe_is_file(p, skip_samba_retry: bool = False) -> bool:
+    r"""长路径安全的 isfile 判定.
+
+    skip_samba_retry=True 用于 "删除后确认文件真没了" 这种场景:
+    不需要 sleep 11 秒等 SMB 缓存 (文件本来就该 miss).
+    默认 False 保留原行为.
+    """
+    return _safe_is_file_impl(p, skip_samba_retry=skip_samba_retry)[0]
 
 
 
@@ -344,7 +350,7 @@ def _find_first_file_w(long_path: str) -> tuple[str, str]:
         return ("SKIP", f"exc:{e!r}")
 
 
-def _safe_is_file_impl(p) -> tuple[bool, dict]:
+def _safe_is_file_impl(p, skip_samba_retry: bool = False) -> tuple[bool, dict]:
     r"""safe_is_file 内部实现, 顺带把短路径 / 长路径 / stat 三条查询的原始
     结果收集起来. 上层判 False 时可以把 diag 打日志, 免得再回来加断点.
 
@@ -408,6 +414,11 @@ def _safe_is_file_impl(p) -> tuple[bool, dict]:
     diag["find_first"] = f"{status} {detail}"
     if status == "HIT":
         return True, diag
+
+    if skip_samba_retry:
+        # v0.4.115: 调用方明确不需要 samba retry (比如 do_delete 确认文件已删)
+        # 不 sleep, 直接返回 miss 结论.
+        return False, diag
 
     # v0.4.72: Samba + Windows SMB Client 缓存假 miss 兜底.
     # 现象: Samba 服务端不发 SMB Change Notify, Windows 客户端只能靠
