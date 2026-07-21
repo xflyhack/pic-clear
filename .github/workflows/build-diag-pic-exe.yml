@@ -24,6 +24,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install Pillow
+          pip install numpy onnxruntime
           pip install pyinstaller
 
       - name: Write _version.py from git ref
@@ -57,6 +58,9 @@ jobs:
           copy diag_pic.py build_diag_pic\
           copy winpath_util.py build_diag_pic\
           copy env_probe.py build_diag_pic\
+          copy dedupe_pic.py build_diag_pic\
+          copy detector.py build_diag_pic\
+          copy yolov8n.onnx build_diag_pic\
           copy _version.py build_diag_pic\
         shell: cmd
 
@@ -68,7 +72,12 @@ jobs:
             --add-data "..\icon.ico;." ^
             --add-binary "..\ffmpeg.exe;." ^
             --add-binary "..\ffprobe.exe;." ^
+            --add-data "..\yolov8n.onnx;." ^
             --hidden-import _version ^
+            --hidden-import dedupe_pic ^
+            --hidden-import detector ^
+            --hidden-import numpy ^
+            --hidden-import onnxruntime ^
             --hidden-import winpath_util ^
             --hidden-import env_probe ^
             --hidden-import tkinter ^

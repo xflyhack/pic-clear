@@ -1200,6 +1200,7 @@ def _scan_processes() -> list[str]:
             ["tasklist", "/v", "/fo", "csv", "/nh"],
             capture_output=True, text=True, timeout=10,
             encoding="mbcs", errors="replace",
+            creationflags=_CREATE_NO_WINDOW,
         )
     except Exception as e:
         return [f"  [ERR] tasklist 调用失败: {type(e).__name__}: {e}"]
@@ -1395,6 +1396,261 @@ def run_deepdir_diagnostics(target_dir: str) -> str:
     return "\n".join(lines)
 
 
+
+# ---------------- 深路径去重决策复现 (v0.4.111 新增) ----------------
+
+def run_dedup_replay(target_dir: str,
+                     threshold: int = 3,
+                     motion_threshold: float = 0.12,
+                     protect_arg: str = "person,bicycle,car,motorcycle,bus,train,truck",
+                     conf: float = 0.35,
+                     enable_scene: bool = False,
+                     max_files: int = 500) -> str:
+    r"""在选定目录上跑一遍 dedupe_pic 完整决策链路 (build_index + motion + cluster + decide),
+    但不真删, 只打印每一步的数字, 用来定位'深路径下判定为 0 张删'的根因.
+
+    要求 diag_pic 同目录能找到 yolov8n.onnx (跟 sqDedupe.exe 一起放的模型).
+    找不到就退化到"跳过 YOLO"模式, 只跑 dhash + cluster.
+    """
+    lines: list[str] = []
+    def w(s: str = "") -> None:
+        lines.append(s)
+
+    w("=" * 68)
+    w("深路径去重决策复现  (v0.4.111+)")
+    w(f"生成时间 : {datetime.now().isoformat(timespec='seconds')}")
+    w(f"目标目录 : {target_dir!r}")
+    w(f"参数     : threshold={threshold}  motion={motion_threshold}  "
+      f"conf={conf}  scene={enable_scene}  max_files={max_files}")
+    w("=" * 68)
+    w("")
+
+    # ---- 导入 dedupe_pic / detector 里的实际函数, 保证跟生产完全一致 ----
+    try:
+        import dedupe_pic
+        from dedupe_pic import (
+            build_index, mark_motion_changes, cluster,
+            decide_actions, write_report, count_files,
+        )
+    except Exception as e:
+        w(f"[FATAL] 导入 dedupe_pic 失败: {type(e).__name__}: {e}")
+        for l in traceback.format_exc().splitlines():
+            w("  " + l)
+        return "\n".join(lines)
+
+    try:
+        import detector as _detector_mod
+    except Exception as e:
+        w(f"[FATAL] 导入 detector 失败: {type(e).__name__}: {e}")
+        return "\n".join(lines)
+
+    from pathlib import Path as _Path
+
+    # ---- 找模型 ----
+    w("--- §1 定位 YOLO 模型 ---")
+    model_path = _detector_mod.resolve_model_path(None)
+    if model_path is None:
+        w("  ⚠ 未找到 yolov8n.onnx (查过: --model / exe同目录 / _MEIPASS / cwd)")
+        w("  → 本次不跑 YOLO, 只跑 dhash + cluster (motion 保护会全部失效)")
+        detector = None
+    else:
+        w(f"  ✓ 模型: {model_path}")
+        try:
+            detector = _detector_mod.Yolov8OnnxDetector(
+                model_path=model_path, conf_thres=conf)
+            w("  ✓ 模型加载成功")
+        except Exception as e:
+            w(f"  ⚠ 模型加载失败: {type(e).__name__}: {e}")
+            detector = None
+    w("")
+
+    protect_classes = set(x.strip() for x in protect_arg.split(",") if x.strip())
+    w(f"  保护类别 : {sorted(protect_classes)}")
+    w("")
+
+    # ---- 预扫总数, 跟 dedupe_pic 生产一致 ----
+    w("--- §2 预扫 / build_index ---")
+    exts = {"jpg", "jpeg", "png", "bmp", "webp"}
+    root = _Path(target_dir)
+    try:
+        total = count_files(root, exts)
+    except Exception as e:
+        w(f"  ⚠ count_files 挂: {type(e).__name__}: {e}")
+        total = 0
+    w(f"  预扫总数 : {total}")
+
+    if total > max_files:
+        w(f"  ⚠ 超过 max_files={max_files}, 会截断到前 {max_files} 张")
+        w(f"    (调大 max_files 参数可以跑完整目录, 大目录会慢)")
+    w("")
+
+    # ---- 手动跑 build_index 的核心, 但每张图都记录判定明细 ----
+    w("--- §3 逐张扫描明细 (最多前 20 条 + 汇总) ---")
+    import time as _t
+    t0 = _t.time()
+    from dedupe_pic import iter_files, dhash, Item
+    from winpath_util import safe_stat as _s_stat
+
+    items = []
+    stat_fail = 0
+    hash_fail = 0
+    is_prot_count = 0
+    has_vehicle_count = 0
+    per_row_shown = 0
+    scanned = 0
+
+    for p in iter_files(root, exts):
+        if scanned >= max_files:
+            break
+        scanned += 1
+        row_bits = [f"  [{scanned:04d}]", f"len={len(str(p))}"]
+        try:
+            st = _s_stat(p)
+        except OSError as e:
+            stat_fail += 1
+            if per_row_shown < 20:
+                per_row_shown += 1
+                row_bits.append(f"STAT_FAIL {type(e).__name__}: {e}")
+                w("  ".join(row_bits))
+            continue
+        h = dhash(p)
+        if h is None:
+            hash_fail += 1
+            if per_row_shown < 20:
+                per_row_shown += 1
+                row_bits.append("DHASH_FAIL (_pil_open 返回 None)")
+                w("  ".join(row_bits))
+            continue
+        row_bits.append(f"dhash=0x{h:016x}")
+
+        it = Item(p, st.st_size, st.st_mtime, h)
+        if detector is not None:
+            try:
+                protected, hits, vehicles, size = detector.detect_full(p, protect_classes)
+            except Exception as e:
+                protected, hits, vehicles, size = False, [], [], None
+                row_bits.append(f"DETECT_EXC {type(e).__name__}")
+            has_person = any(d.class_name == "person" for d in hits)
+            classes_hit = sorted({d.class_name for d in hits})
+            if has_person:
+                it.is_protected = True
+                is_prot_count += 1
+                row_bits.append(f"PROTECT(person) classes={classes_hit}")
+            elif hits:
+                row_bits.append(f"车类命中 classes={classes_hit}")
+            else:
+                row_bits.append("无 YOLO 命中")
+            it.detected_classes = tuple(classes_hit)
+            it.vehicle_boxes = tuple(d.box_xyxy for d in vehicles)
+            it.image_size = size
+            if vehicles:
+                has_vehicle_count += 1
+            row_bits.append(f"veh={len(vehicles)}")
+            row_bits.append(f"size={size}")
+        else:
+            row_bits.append("(未跑 YOLO)")
+
+        items.append(it)
+        if per_row_shown < 20:
+            per_row_shown += 1
+            w("  ".join(row_bits))
+
+    scan_elapsed = _t.time() - t0
+    w("")
+    w(f"  扫描完成 : 有效 {len(items)} 张, stat_fail={stat_fail}, hash_fail={hash_fail}")
+    w(f"  YOLO 汇总 : is_protected(person)={is_prot_count}, "
+      f"有车辆帧数={has_vehicle_count}")
+    w(f"  耗时      : {scan_elapsed:.1f} 秒")
+    w("")
+    if len(items) < 2:
+        w("[STOP] 有效图片 < 2, 无法进行相邻帧 / 聚类判定")
+        return "\n".join(lines)
+
+    # ---- motion 阶段 ----
+    w("--- §4 相邻帧 motion 判定 ---")
+    if detector is None:
+        w("  ⚠ 未加载 YOLO, 跳过 motion 保护 (生产上此时也是 0 张 motion_protected)")
+        motion_marked = 0
+    else:
+        # 先复制 items 的 motion_protected 状态用于对比
+        motion_marked = mark_motion_changes(
+            items, motion_threshold=motion_threshold)
+    w(f"  motion_protected 标记数 : {motion_marked}")
+    w("")
+
+    # ---- cluster + decide ----
+    w("--- §5 聚类 + 决策 ---")
+    t0 = _t.time()
+    groups = cluster(items, threshold)
+    w(f"  聚类完成 : {len(groups)} 组近似重复, 耗时 {(_t.time()-t0):.2f}s")
+    w("")
+
+    total_delete = 0
+    total_keep = 0
+    total_protected_group = 0  # 组内全部被保护导致 0 张 DELETE
+    for gi, grp in enumerate(groups, 1):
+        actions = decide_actions(grp, "shortest-path")
+        deletes = sum(1 for x in grp if actions.get(id(x), "KEEP") == "DELETE")
+        keeps = len(grp) - deletes
+        total_delete += deletes
+        total_keep += keeps
+        # 组内全 protected 的组是"0 张 DELETE"的直接来源, 单独统计
+        n_prot = sum(1 for x in grp
+                     if x.is_protected or x.motion_protected or x.scene_protected)
+        n_unprot = len(grp) - n_prot
+        if deletes == 0:
+            total_protected_group += 1
+
+        if gi <= 15:
+            w(f"  组#{gi:02d}  大小={len(grp)}  KEEP={keeps}  DELETE={deletes}  "
+              f"protected(硬+motion+scene)={n_prot}  unprotected={n_unprot}")
+            for x in grp[:5]:
+                marks = []
+                if x.is_protected: marks.append("硬")
+                if x.motion_protected: marks.append(f"motion({x.motion_reason})")
+                if x.scene_protected: marks.append("scene")
+                a = actions.get(id(x), "KEEP")
+                w(f"    - [{a}] {x.path.name}  保护={','.join(marks) or '无'}")
+            if len(grp) > 5:
+                w(f"    ... 共 {len(grp)} 张, 仅显示前 5 张")
+
+    if len(groups) > 15:
+        w(f"  (仅显示前 15 组, 共 {len(groups)} 组)")
+    w("")
+
+    # ---- 最终结论 ----
+    w("=" * 68)
+    w("[最终结论]  ⚠ 请把整段贴给作者")
+    w("=" * 68)
+    w(f"  总扫描      : {scanned} 张  (预扫总数 {total})")
+    w(f"  有效图      : {len(items)} 张  (读取失败 stat={stat_fail}, hash={hash_fail})")
+    w(f"  is_protected(person 硬保护) : {is_prot_count} 张")
+    w(f"  motion_protected 标记       : {motion_marked} 张")
+    w(f"  相似组数    : {len(groups)}")
+    w(f"  【会删除】  : {total_delete} 张  (dry-run, 未真删)")
+    w(f"  【保留】    : {total_keep} 张")
+    w(f"  组内全 protected 导致 DELETE=0 的组数 : {total_protected_group}")
+    w("")
+
+    # 特征提示
+    w("[判读提示]")
+    if len(items) == 0:
+        w("  → 有效图 0, 说明连图都没读进来, 检查 stat_fail / hash_fail")
+    elif is_prot_count == len(items):
+        w("  → 所有图都被 YOLO 判为含 person -> 全硬保护 -> 0 张删除.")
+        w("    问题可能是 YOLO 在深路径下'胡乱识别' (BytesIO 兜底喂进去后 letterbox 值不同?)")
+    elif motion_marked >= len(items) * 0.9:
+        w("  → motion_protected 覆盖 >90%, 相邻帧几乎全部被判'有变化' -> 保留.")
+        w("    问题可能是 vehicle_boxes 在深路径下坐标偏移, 相邻帧 IoU 匹配不上")
+    elif total_delete == 0 and len(groups) > 0:
+        w("  → 有聚类组但一张都没删 -> 组内全部触发某种保护.")
+        w("    上面各组明细里看每张的'保护='字段是啥, 就是根因.")
+    elif total_delete > 0:
+        w(f"  → 会删 {total_delete} 张. 如果生产日志显示 0, 那两次运行差异不在决策层,")
+        w("    可能是 --apply / --force 参数没传, 或 marker 已存在整个目录被跳过.")
+    return "\n".join(lines)
+
+
 # ---------------- 视频时长 (ffprobe) 诊断 (v0.4.96 新增) ----------------
 
 def _run_ffprobe_once(ffprobe: str, arg: str, timeout: float = 15.0) -> dict:
@@ -1408,6 +1664,7 @@ def _run_ffprobe_once(ffprobe: str, arg: str, timeout: float = 15.0) -> dict:
         r = subprocess.run(
             cmd, capture_output=True, text=True,
             timeout=timeout, encoding="utf-8", errors="replace",
+            creationflags=_CREATE_NO_WINDOW,
         )
         out["rc"] = r.returncode
         out["stdout"] = (r.stdout or "").strip()
@@ -1498,6 +1755,7 @@ def run_video_duration_diagnostics(video_path: str, ffprobe_hint: str = "") -> s
         r = subprocess.run(
             [ffprobe, "-version"], capture_output=True, text=True,
             timeout=5, encoding="utf-8", errors="replace",
+            creationflags=_CREATE_NO_WINDOW,
         )
         first_line = (r.stdout or "").splitlines()[0] if r.stdout else ""
         w(f"    版本自检 : rc={r.returncode}  {first_line}")
@@ -1572,7 +1830,8 @@ def run_video_duration_diagnostics(video_path: str, ffprobe_hint: str = "") -> s
                "-show_streams", "-of", "default=noprint_wrappers=1", norm]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=15, encoding="utf-8", errors="replace")
+                               timeout=15, encoding="utf-8", errors="replace",
+                               creationflags=_CREATE_NO_WINDOW)
             w(f"    rc={r.returncode}")
             out = (r.stdout or "").strip()
             if out:
@@ -1642,6 +1901,11 @@ class DiagApp:
         dd_tab = ttk.Frame(nb)
         nb.add(dd_tab, text="深路径去重诊断")
         self._build_deepdir_tab(dd_tab)
+
+        # Tab 7: 深路径去重决策复现 (v0.4.111 新增)
+        dr_tab = ttk.Frame(nb)
+        nb.add(dr_tab, text="去重决策复现")
+        self._build_replay_tab(dr_tab)
 
         # 挪到首位显示 (用户开 diag_pic 先看环境)
         nb.select(env_tab)
@@ -2247,6 +2511,90 @@ class DiagApp:
         except Exception:
             report = "诊断脚本自身抛异常:\n" + traceback.format_exc()
         self._dd_append(report + "\n")
+
+
+    # ---------- Tab 7: 深路径去重决策复现 (v0.4.111) ----------
+
+    def _build_replay_tab(self, parent):
+        top = ttk.Frame(parent, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="深路径去重决策复现",
+                  font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+
+        btns = ttk.Frame(parent, padding=(8, 4))
+        btns.pack(fill=tk.X)
+        ttk.Button(btns, text="选一个 camera 目录 (200 张图那种) 开始复现",
+                   command=self.on_dr_pick_and_run).pack(side=tk.LEFT)
+        ttk.Button(btns, text="清空日志",
+                   command=self.on_dr_clear).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="复制全部日志",
+                   command=self.on_dr_copy).pack(side=tk.LEFT)
+
+        body = ttk.Frame(parent, padding=8)
+        body.pack(fill=tk.BOTH, expand=True)
+        self.dr_txt = tk.Text(body, wrap=tk.NONE, font=("Consolas", 10))
+        yscroll = ttk.Scrollbar(body, orient=tk.VERTICAL,
+                                command=self.dr_txt.yview)
+        xscroll = ttk.Scrollbar(body, orient=tk.HORIZONTAL,
+                                command=self.dr_txt.xview)
+        self.dr_txt.configure(yscrollcommand=yscroll.set,
+                              xscrollcommand=xscroll.set)
+        self.dr_txt.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+        self.dr_txt.bind("<Control-a>", self._select_all_dr)
+        self.dr_txt.bind("<Control-A>", self._select_all_dr)
+
+        self._dr_append("深路径去重决策复现  (v0.4.111+)\n\n")
+        self._dr_append("用途: 直接在深路径目录上跑一遍 dedupe_pic 完整判定逻辑,\n")
+        self._dr_append("      不真删, 只报告'如果 apply 会删几张', 定位为啥深路径下总说 0 张.\n\n")
+        self._dr_append("要求: diag_pic.exe 同目录能找到 yolov8n.onnx (跟 sqDedupe.exe 一起放的).\n")
+        self._dr_append("      找不到就自动跳过 YOLO, 只跑 dhash+cluster (会失去 motion 保护).\n\n")
+        self._dr_append("怎么用:\n")
+        self._dr_append("  1) 点 [选一个 camera 目录] 按钮\n")
+        self._dr_append("  2) 在弹出的目录选择框里选一个 200 张图那种叶子目录\n")
+        self._dr_append("     (例如 \\\\filestor01...\\...\\camera02)\n")
+        self._dr_append("  3) diag_pic 自己跑完扫描+YOLO+motion+聚类, 大概 30-90 秒\n")
+        self._dr_append("  4) 用 [复制全部日志] 贴给作者\n\n")
+
+    def _select_all_dr(self, _event=None):
+        self.dr_txt.tag_add("sel", "1.0", "end")
+        return "break"
+
+    def _dr_append(self, s: str) -> None:
+        self.dr_txt.insert(tk.END, s)
+        self.dr_txt.see(tk.END)
+
+    def on_dr_clear(self):
+        self.dr_txt.delete("1.0", tk.END)
+
+    def on_dr_copy(self):
+        try:
+            content = self.dr_txt.get("1.0", tk.END)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self.root.update()
+            messagebox.showinfo("已复制", "决策复现报告已复制到剪贴板")
+        except Exception as e:
+            messagebox.showerror("复制失败", str(e))
+
+    def on_dr_pick_and_run(self):
+        d = filedialog.askdirectory(
+            title="选一个 200 张图的 camera 目录",
+            mustexist=True,
+        )
+        if not d:
+            return
+        self._dr_append(f"\n>>> 开始复现: {d}\n")
+        self._dr_append("    (读图 + YOLO + motion + 聚类, 大概 30-90 秒, 请稍候...)\n\n")
+        self.root.update()
+        try:
+            report = run_dedup_replay(d)
+        except Exception:
+            report = "复现脚本自身抛异常:\n" + traceback.format_exc()
+        self._dr_append(report + "\n")
 
 
 def main():
