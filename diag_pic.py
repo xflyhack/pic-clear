@@ -985,6 +985,416 @@ def collect_env_report() -> str:
     return "\n".join(lines)
 
 
+# 该文件即将被拼进 diag_pic.py, 位置: collect_env_report() 之后, ffprobe 诊断之前
+# 独立函数 + 探针实现. 依赖 winpath_util / dedupe_gui._find_dedupe_targets (若可导入).
+
+# ---------------- 深路径去重诊断 (v0.4.110 新增) ----------------
+
+def _classify_path(p: str) -> str:
+    r"""一眼看清用户选的路径是什么类型."""
+    if os.name != "nt":
+        return "non-Windows"
+    s = str(p)
+    if s.startswith("//?/") or s.startswith("\\\\?\\"):
+        if "UNC" in s[:8].upper():
+            return "长路径 UNC (\\\\?\\UNC\\...)"
+        return "长路径 (\\\\?\\X:\\...)"
+    if s.startswith("//") or s.startswith("\\\\"):
+        return "UNC 直连 (\\\\server\\share\\...)"
+    if len(s) >= 2 and s[1] == ":":
+        # 简单猜: 大写 A-Z + 盘符
+        return f"盘符路径 ({s[:2]})  —— 可能本地 / 也可能映射盘"
+    if s.startswith("\\") or s.startswith("/"):
+        return "单斜杠开头 —— 危险! 畸形 UNC 或'当前盘根'路径"
+    return "其他 / 相对路径"
+
+
+def _mangle_unc_single_slash(long_p: str) -> str:
+    r"""复现 dedupe_gui._find_dedupe_targets 那处 bug 会产出的畸形 UNC.
+
+    - 输入: \\?\UNC\filestor01...\share\...\camera07
+    - 输出: \filestor01...\share\...\camera07   (只剥一根 \, 丢了一根)
+    真实 bug 就是那一行 "\\" + normal_dirpath[len("\\\\?\\UNC\\"):]
+    """
+    prefix = "\\\\?\\UNC\\"
+    if long_p.startswith(prefix):
+        return "\\" + long_p[len(prefix):]
+    return long_p
+
+
+def _mangle_tkinter_style(p: str) -> str:
+    r"""tkinter filedialog 在长路径下返回 //?/UNC/filestor.../... 混斜杠."""
+    if os.name != "nt":
+        return p
+    s = p.replace("\\", "/")
+    if s.startswith("//") and not s.startswith("//?/"):
+        # UNC 直连转 tkinter 长路径混斜杠
+        return "//?/UNC/" + s.lstrip("/")
+    return s
+
+
+def _probe_one_variant(label: str, p: str) -> list[str]:
+    r"""对同一个字符串路径跑 exists / isfile / stat / open('rb')[:16] 四发, 原样返回结果."""
+    out: list[str] = []
+    out.append(f"  ── 变体: {label}")
+    out.append(f"     path = {p!r}")
+    out.append(f"     len  = {len(p)}")
+    # os.path.exists
+    try:
+        r = os.path.exists(p)
+        out.append(f"     os.path.exists      = {r}")
+    except OSError as e:
+        out.append(f"     os.path.exists      ERR {type(e).__name__}: {e}")
+    # os.path.isfile
+    try:
+        r = os.path.isfile(p)
+        out.append(f"     os.path.isfile      = {r}")
+    except OSError as e:
+        out.append(f"     os.path.isfile      ERR {type(e).__name__}: {e}")
+    # os.stat
+    try:
+        st = os.stat(p)
+        out.append(f"     os.stat             OK size={st.st_size}")
+    except OSError as e:
+        out.append(f"     os.stat             ERR "
+                   f"[WinError {getattr(e, 'winerror', '?')}] "
+                   f"{type(e).__name__}: {e}")
+    # open('rb') 读 16 字节
+    try:
+        with open(p, "rb") as f:
+            head = f.read(16)
+        out.append(f"     open('rb').read(16) OK bytes={head[:8].hex()}...")
+    except OSError as e:
+        out.append(f"     open('rb')          ERR "
+                   f"[WinError {getattr(e, 'winerror', '?')}] "
+                   f"{type(e).__name__}: {e}")
+    # Win32 FindFirstFileW 直调 (winpath_util 里的 _find_first_file_w)
+    try:
+        status, detail = _find_first_file_w(p)
+        out.append(f"     FindFirstFileW      {status} {detail}")
+    except Exception as e:
+        out.append(f"     FindFirstFileW      EXC {type(e).__name__}: {e}")
+    return out
+
+
+def _find_deepest_and_longest(root_str: str,
+                              max_walk_seconds: float = 30.0
+                              ) -> tuple[str | None, str | None, dict]:
+    r"""os.walk 递归找 (最深图片路径, 最长字符串图片路径).
+
+    - 只认 .jpg/.jpeg/.png/.bmp/.webp
+    - walk_root 走 to_long_path, 兼容深路径
+    - 结果里的路径**剥回**原始形式 (双反斜杠 UNC 或 X:\\), 跟 dedupe 拿到的一致
+    - max_walk_seconds 保护: 大目录别把 GUI 卡死
+    """
+    import time as _t
+    stats = {
+        "walked_dirs": 0,
+        "total_images": 0,
+        "max_depth": -1,
+        "max_len": -1,
+        "timeout": False,
+        "walk_root": "",
+    }
+    exts = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+    walk_root = _to_long_path(root_str)
+    stats["walk_root"] = walk_root
+    deepest_p: str | None = None
+    longest_p: str | None = None
+    t0 = _t.time()
+
+    def _strip_prefix(dp: str) -> str:
+        if dp.startswith("\\\\?\\UNC\\"):
+            return "\\\\" + dp[len("\\\\?\\UNC\\"):]  # 正确剥法: 恢复两根 \
+        if dp.startswith("\\\\?\\"):
+            return dp[len("\\\\?\\"):]
+        return dp
+
+    try:
+        for dirpath, _dirnames, filenames in os.walk(walk_root):
+            stats["walked_dirs"] += 1
+            if _t.time() - t0 > max_walk_seconds:
+                stats["timeout"] = True
+                break
+            normal_dirpath = _strip_prefix(dirpath)
+            # depth: 从 root_str 起算
+            try:
+                rel = os.path.relpath(normal_dirpath, root_str)
+                depth = 0 if rel in (".", "") else rel.count(os.sep) + 1
+            except Exception:
+                depth = normal_dirpath.count(os.sep)
+            for name in filenames:
+                lower = name.lower()
+                if not any(lower.endswith(e) for e in exts):
+                    continue
+                full = os.path.join(normal_dirpath, name)
+                stats["total_images"] += 1
+                if depth > stats["max_depth"]:
+                    stats["max_depth"] = depth
+                    deepest_p = full
+                if len(full) > stats["max_len"]:
+                    stats["max_len"] = len(full)
+                    longest_p = full
+    except Exception as e:
+        stats["walk_exc"] = f"{type(e).__name__}: {e}"
+    stats["elapsed_sec"] = round(_t.time() - t0, 2)
+    return deepest_p, longest_p, stats
+
+
+def _try_import_find_dedupe_targets():
+    r"""尽量复用 dedupe_gui._find_dedupe_targets 原函数, 保证跟 GUI 行为完全一致.
+
+    如果 diag_pic.exe 是独立打包的 (没跟 dedupe_gui 打一起), 就 fallback 到
+    我们在这里内联的 verbatim 实现.
+    """
+    try:
+        from dedupe_gui import _find_dedupe_targets as _fn
+        return _fn, "dedupe_gui._find_dedupe_targets"
+    except Exception:
+        pass
+    # verbatim 版本, 跟 dedupe_gui.py 那份**逐字**复制, 只把 _to_long_path 换成本模块
+    def _fn(root, mode: str, logger=None):
+        from pathlib import Path as _Path
+        def _log(msg):
+            if logger:
+                try: logger(msg)
+                except Exception: pass
+        root = _Path(root)
+        if not root.is_dir():
+            _log(f"● 扫描: target 不是目录: {root}")
+            return []
+        if mode == "single":
+            return [root]
+        if mode == "subdirs":
+            return sorted([p for p in root.iterdir() if p.is_dir()])
+        exts = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+        out = set()
+        walk_root = _to_long_path(str(root))
+        for dirpath, _dirnames, filenames in os.walk(walk_root):
+            normal_dirpath = dirpath
+            if normal_dirpath.startswith("\\\\?\\UNC\\"):
+                normal_dirpath = "\\" + normal_dirpath[len("\\\\?\\UNC\\"):]
+            elif normal_dirpath.startswith("\\\\?\\"):
+                normal_dirpath = normal_dirpath[len("\\\\?\\"):]
+            has = False
+            for name in filenames:
+                l = name.lower()
+                for ext in exts:
+                    if l.endswith(ext):
+                        has = True
+                        break
+                if has:
+                    break
+            if has:
+                out.add(normal_dirpath)
+        return sorted(_Path(s) for s in out)
+    return _fn, "diag_pic 内联 verbatim 版 (dedupe_gui 不可导入)"
+
+
+def _scan_processes() -> list[str]:
+    r"""tasklist 过 sqDedupe / dedupe_pic / pipeline / sqDedupeGui."""
+    if os.name != "nt":
+        return ["  [SKIP] 非 Windows"]
+    try:
+        r = subprocess.run(
+            ["tasklist", "/v", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=10,
+            encoding="mbcs", errors="replace",
+        )
+    except Exception as e:
+        return [f"  [ERR] tasklist 调用失败: {type(e).__name__}: {e}"]
+    if r.returncode != 0:
+        return [f"  [ERR] tasklist rc={r.returncode} stderr={r.stderr!r}"]
+    keys = ("sqdedupe", "dedupe_pic", "pipeline.exe", "sqdedupegui",
+            "extract_frames", "sqextract")
+    hits: list[str] = []
+    for line in r.stdout.splitlines():
+        lower = line.lower()
+        if any(k in lower for k in keys):
+            hits.append("  " + line)
+    if not hits:
+        return ["  (未发现残留 sqDedupe/dedupe_pic/pipeline/sqDedupeGui/extract 进程)"]
+    hits.insert(0, "  格式: 名称, PID, 会话名, 会话#, 内存, 状态, 用户, CPU时间, 窗口标题")
+    return hits
+
+
+def _try_dhash(image_path: str) -> str:
+    r"""跟 dedupe_pic.dhash 完全一致的逻辑, 但用 winpath_util._pil_open (跟生产完全一致)."""
+    try:
+        from PIL import Image
+        from winpath_util import pil_open as _pil_open
+    except Exception as e:
+        return f"[SKIP] 导入 PIL/winpath_util 失败: {type(e).__name__}: {e}"
+    hash_size = 8
+    try:
+        with _pil_open(image_path) as img:
+            img = img.convert("L").resize(
+                (hash_size + 1, hash_size), Image.LANCZOS)
+            pixels = list(img.tobytes())
+    except Exception as e:
+        return f"[FAIL] _pil_open/dhash 抛异常: {type(e).__name__}: {e}"
+    bits = 0
+    width = hash_size + 1
+    for row in range(hash_size):
+        for col in range(hash_size):
+            L = pixels[row * width + col]
+            R = pixels[row * width + col + 1]
+            bits = (bits << 1) | (1 if L > R else 0)
+    is_zero = "  ⚠ 全 0 (读到黑图/空图, 会跟其他 0 哈希图强行聚成 1 组)" if bits == 0 else ""
+    is_ffff = "  ⚠ 全 1 (罕见, 通常也是异常)" if bits == 0xFFFFFFFFFFFFFFFF else ""
+    return f"dhash = 0x{bits:016x}{is_zero}{is_ffff}"
+
+
+def run_deepdir_diagnostics(target_dir: str) -> str:
+    r"""一键跑完深路径去重诊断. 用户只点一次目录, 剩下 diag_pic 自己搞."""
+    lines: list[str] = []
+    def w(s: str = "") -> None:
+        lines.append(s)
+
+    w("=" * 68)
+    w("深路径去重诊断报告  (v0.4.110+)")
+    w(f"生成时间 : {datetime.now().isoformat(timespec='seconds')}")
+    w(f"平台     : {platform.platform()}")
+    w(f"Python   : {sys.version.split()[0]}")
+    w("=" * 68)
+    w("")
+
+    # ---------- §1 路径类型识别 ----------
+    w("--- §1 用户选的目录本身 ---")
+    w(f"  原始字符串 : {target_dir!r}")
+    w(f"  字符串长度 : {len(target_dir)}")
+    w(f"  类型判定   : {_classify_path(target_dir)}")
+    normed = _normalize_windows_path(target_dir)
+    w(f"  归一化后   : {normed!r}")
+    long_p = _to_long_path(target_dir)
+    w(f"  长路径版   : {long_p!r}")
+    w("")
+
+    # ---------- §2 找最深 / 最长的一张图 ----------
+    w("--- §2 递归扫图 (寻找最深叶子 / 最长字符串) ---")
+    w(f"  os.walk 起点 (长路径): {_to_long_path(target_dir)!r}")
+    deepest, longest, stats = _find_deepest_and_longest(target_dir)
+    w(f"  扫描目录数 : {stats.get('walked_dirs')}")
+    w(f"  扫描图片数 : {stats.get('total_images')}")
+    w(f"  耗时       : {stats.get('elapsed_sec')} 秒"
+      + ("   (⚠ 达到 30s 上限, 已提前中止)" if stats.get('timeout') else ""))
+    if "walk_exc" in stats:
+        w(f"  ⚠ os.walk 抛异常: {stats['walk_exc']}")
+    if stats.get('total_images', 0) == 0:
+        w("  ⚠ 扫不到任何图片! 可能路径本身就有问题, 或子目录 os.walk 穿不过去.")
+        w("")
+        w("  建议: 用文件资源管理器进选目录, 确认里面确实有 jpg. 若资源管理器")
+        w("        能看到而 diag_pic 扫不到, 就是 Python os.walk 层的坑.")
+        w("=" * 68)
+        return "\n".join(lines)
+    w(f"  最深叶子   : depth={stats.get('max_depth')}")
+    w(f"    路径     : {deepest!r}")
+    w(f"    长度     : {len(deepest) if deepest else 0}")
+    w(f"  最长字符串 : len={stats.get('max_len')}")
+    w(f"    路径     : {longest!r}")
+    w("")
+
+    # ---------- §3 对最深图跑 5 种变体探测 ----------
+    for probe_name, probe_path in (("最深图", deepest), ("最长图", longest)):
+        if probe_path is None:
+            continue
+        if probe_name == "最长图" and probe_path == deepest:
+            w(f"--- §3.{probe_name} 与最深图相同, 跳过重复探测 ---")
+            w("")
+            continue
+        w(f"--- §3 {probe_name}路径 5 种变体探测 ---")
+        w(f"  原始: {probe_path!r}")
+        w("")
+        variants: list[tuple[str, str]] = []
+        variants.append(("原始形式 (dedupe 从 os.walk 剥回的样子)", probe_path))
+        v_norm = _normalize_windows_path(probe_path)
+        variants.append(("归一化 (_normalize_windows_path)", v_norm))
+        v_long = _to_long_path(probe_path)
+        variants.append(("长路径 (_to_long_path)", v_long))
+        v_mang = _mangle_unc_single_slash(v_long)
+        if v_mang != v_long:
+            variants.append(
+                ("⚠ 畸形单斜杠 UNC (复现 dedupe_gui bug)", v_mang))
+        else:
+            variants.append(
+                ("(非 UNC 长路径, 无法造出畸形单斜杠版, 跳过)", ""))
+        v_tk = _mangle_tkinter_style(probe_path)
+        if v_tk != probe_path:
+            variants.append(("tkinter 混斜杠 (//?/UNC/... 复现)", v_tk))
+        for label, p in variants:
+            if p == "":
+                w(f"  ── 变体: {label}  [跳过]")
+                continue
+            for line in _probe_one_variant(label, p):
+                w(line)
+            w("")
+        w("")
+
+    # ---------- §4 dhash 对最深图 ----------
+    if deepest:
+        w("--- §4 对最深图跑 dhash (跟 dedupe_pic 完全一致的逻辑) ---")
+        w(f"  target = {deepest!r}")
+        w(f"  {_try_dhash(deepest)}")
+        w("")
+
+    # ---------- §5 复现 dedupe_gui._find_dedupe_targets(recursive) ----------
+    w("--- §5 复现 dedupe_gui._find_dedupe_targets(recursive) ---")
+    w("  (这就是 sqDedupeGui.exe 递归模式下真正传给 sqDedupe.exe 的目录列表)")
+    w("")
+    try:
+        fn, src = _try_import_find_dedupe_targets()
+        w(f"  函数来源 : {src}")
+        import time as _t
+        t0 = _t.time()
+        from pathlib import Path as _Path_dd
+        result = fn(_Path_dd(target_dir), "recursive", logger=None)
+        w(f"  返回目录数 : {len(result)}")
+        w(f"  耗时       : {round(_t.time() - t0, 2)} 秒")
+        show = list(result)[:5]
+        for i, d in enumerate(show, 1):
+            ds = str(d)
+            w(f"  [{i}] {ds!r}")
+            w(f"      长度={len(ds)}  开头={ds[:6]!r}")
+            # 关键: 这条字符串到底是"两根反斜杠开头"的合法 UNC, 还是被剥剩一根的畸形?
+            if os.name == "nt":
+                if ds.startswith("\\\\") and not ds.startswith("\\\\?\\"):
+                    w("      ✔ 合法 UNC (双反斜杠开头)")
+                elif ds.startswith("\\") and not ds.startswith("\\\\"):
+                    w("      ⚠⚠⚠ 畸形 UNC! 单反斜杠开头, 生产上会挂 ⚠⚠⚠")
+                elif ds.startswith("\\\\?\\"):
+                    w("      • 带 \\\\?\\ 前缀 (少见, 通常剥完不该带)")
+                elif len(ds) >= 2 and ds[1] == ":":
+                    w("      • 盘符路径 (本地/映射)")
+        if len(result) > 5:
+            w(f"  (仅显示前 5 条, 共 {len(result)} 条)")
+    except Exception as e:
+        w(f"  ⚠ 调用失败: {type(e).__name__}: {e}")
+        w("  详情:")
+        for l in traceback.format_exc().splitlines():
+            w("    " + l)
+    w("")
+
+    # ---------- §6 残留进程扫描 ----------
+    w("--- §6 tasklist 扫残留进程 ---")
+    w("  (用来对上你 GUI 里报'删除 0 张'但目录里数量在减少的情况:")
+    w("   如果这里能看到多个 sqDedupe/dedupe_pic 进程, 就是上一轮的残留仍在删)")
+    for line in _scan_processes():
+        w(line)
+    w("")
+
+    # ---------- 小结 ----------
+    w("=" * 68)
+    w("[小结判读参考]")
+    w("=" * 68)
+    w("- §3 最深图变体探测里, 如果'原始形式' os.stat/isfile 直接 ERR,")
+    w("  但'长路径 (_to_long_path)' OK -> 说明 dedupe_pic 内部只要走 _safe_* 就能过")
+    w("- 如果'畸形单斜杠 UNC' 变体的 os.stat 居然能过 -> 是当前盘根意外命中, 危险!")
+    w("- §5 返回的目录列表里若有'⚠⚠⚠ 畸形 UNC', 就是本次问题的直接病灶")
+    w("- §6 如果有残留 sqDedupe 进程 (启动很久还没退), 用户看到的'数量减少'就是它")
+    w("- §4 dhash 全 0 -> 图读进来是黑图/空图, 200 张全 0 就会强行聚成 1 组")
+    return "\n".join(lines)
+
+
 # ---------------- 视频时长 (ffprobe) 诊断 (v0.4.96 新增) ----------------
 
 def _run_ffprobe_once(ffprobe: str, arg: str, timeout: float = 15.0) -> dict:
@@ -1227,6 +1637,11 @@ class DiagApp:
         vd_tab = ttk.Frame(nb)
         nb.add(vd_tab, text="视频时长诊断")
         self._build_videodur_tab(vd_tab)
+
+        # Tab 6: 深路径去重诊断 (v0.4.110 新增)
+        dd_tab = ttk.Frame(nb)
+        nb.add(dd_tab, text="深路径去重诊断")
+        self._build_deepdir_tab(dd_tab)
 
         # 挪到首位显示 (用户开 diag_pic 先看环境)
         nb.select(env_tab)
@@ -1741,6 +2156,97 @@ class DiagApp:
         except Exception:
             report = "诊断脚本自身抛异常:\n" + traceback.format_exc()
         self._vd_append(report + "\n")
+
+
+    # ---------- Tab 6: 深路径去重诊断 (v0.4.110) ----------
+
+    def _build_deepdir_tab(self, parent):
+        top = ttk.Frame(parent, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="深路径去重诊断",
+                  font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+
+        btns = ttk.Frame(parent, padding=(8, 4))
+        btns.pack(fill=tk.X)
+        ttk.Button(btns, text="选一个去重目标目录开始诊断",
+                   command=self.on_dd_pick_and_run).pack(side=tk.LEFT)
+        ttk.Button(btns, text="清空日志",
+                   command=self.on_dd_clear).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="复制全部日志",
+                   command=self.on_dd_copy).pack(side=tk.LEFT)
+        ttk.Label(btns,
+                  text="  (只点一次目录, 剩下的 diag_pic 全自动跑)",
+                  foreground="#888").pack(side=tk.LEFT, padx=8)
+
+        body = ttk.Frame(parent, padding=8)
+        body.pack(fill=tk.BOTH, expand=True)
+        self.dd_txt = tk.Text(body, wrap=tk.NONE, font=("Consolas", 10))
+        yscroll = ttk.Scrollbar(body, orient=tk.VERTICAL,
+                                command=self.dd_txt.yview)
+        xscroll = ttk.Scrollbar(body, orient=tk.HORIZONTAL,
+                                command=self.dd_txt.xview)
+        self.dd_txt.configure(yscrollcommand=yscroll.set,
+                              xscrollcommand=xscroll.set)
+        self.dd_txt.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+        self.dd_txt.bind("<Control-a>", self._select_all_dd)
+        self.dd_txt.bind("<Control-A>", self._select_all_dd)
+
+        self._dd_append("深路径去重诊断  (v0.4.110+)\n\n")
+        self._dd_append("用途: 一键定位'去重日志显示删除 0 张, 但目录里数量在减少'这类问题.\n\n")
+        self._dd_append("怎么用:\n")
+        self._dd_append("  1) 点 [选一个去重目标目录开始诊断]\n")
+        self._dd_append("  2) 在弹出的目录选择框里, 选 GUI 上'去重目标'那一栏填的目录\n")
+        self._dd_append("     (可以是网络位置 \\\\filestor01...\\..., 也可以是 Z: / D:)\n")
+        self._dd_append("  3) diag_pic 会自动:\n")
+        self._dd_append("     - 判断路径类型 (本地 / 映射盘 / UNC 直连 / 长路径)\n")
+        self._dd_append("     - 递归找里面最深 / 最长的一张图\n")
+        self._dd_append("     - 对这张图用 5 种前缀变体 (原始 / 归一化 / 长路径 / 畸形 / tkinter 混斜杠)\n")
+        self._dd_append("       跑 exists / isfile / stat / open / FindFirstFileW\n")
+        self._dd_append("     - 复现 dedupe_gui._find_dedupe_targets, 显示它真实返回的目录列表\n")
+        self._dd_append("     - 对最深图跑 dhash, 看是否黑图/空图\n")
+        self._dd_append("     - tasklist 扫残留 sqDedupe/dedupe_pic 进程\n")
+        self._dd_append("  4) 用 [复制全部日志] 把结果贴给作者\n\n")
+
+    def _select_all_dd(self, _event=None):
+        self.dd_txt.tag_add("sel", "1.0", "end")
+        return "break"
+
+    def _dd_append(self, s: str) -> None:
+        self.dd_txt.insert(tk.END, s)
+        self.dd_txt.see(tk.END)
+
+    def on_dd_clear(self):
+        self.dd_txt.delete("1.0", tk.END)
+
+    def on_dd_copy(self):
+        try:
+            content = self.dd_txt.get("1.0", tk.END)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(content)
+            self.root.update()
+            messagebox.showinfo("已复制", "深路径去重诊断报告已复制到剪贴板")
+        except Exception as e:
+            messagebox.showerror("复制失败", str(e))
+
+    def on_dd_pick_and_run(self):
+        d = filedialog.askdirectory(
+            title="选一个去重目标目录 (跟 sqDedupeGui 里'去重目标'那栏填的一致)",
+            mustexist=True,
+        )
+        if not d:
+            return
+        self._dd_append(f"\n>>> 开始诊断: {d}\n")
+        self._dd_append("    (递归扫图 + 5 变体探测, 大目录可能 5-30 秒, 请稍候...)\n\n")
+        self.root.update()
+        try:
+            report = run_deepdir_diagnostics(d)
+        except Exception:
+            report = "诊断脚本自身抛异常:\n" + traceback.format_exc()
+        self._dd_append(report + "\n")
 
 
 def main():
