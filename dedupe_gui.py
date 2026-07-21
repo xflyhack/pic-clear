@@ -244,7 +244,10 @@ def _find_dedupe_targets(root: Path, mode: str,
         # 剥掉 \?\ 前缀, 结果里存正常路径 (dedupe_pic.exe 会自己处理长路径)
         normal_dirpath = dirpath
         if normal_dirpath.startswith("\\\\?\\UNC\\"):
-            normal_dirpath = "\\" + normal_dirpath[len("\\\\?\\UNC\\"):]
+            # v0.4.114: \\?\UNC\server\share\... 剥前缀要补 2 根 \, 恢复合法 UNC
+            # 老代码只补 1 根 -> \server\share\..., 生产上 sqDedupe.exe 视为
+            # "当前盘根路径" 找不到 -> [ERROR] 根目录不存在 -> 待删 0 (真相实锤)
+            normal_dirpath = "\\\\" + normal_dirpath[len("\\\\?\\UNC\\"):]
         elif normal_dirpath.startswith("\\\\?\\"):
             normal_dirpath = normal_dirpath[len("\\\\?\\"):]
 

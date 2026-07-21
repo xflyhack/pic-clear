@@ -1173,7 +1173,7 @@ def _try_import_find_dedupe_targets():
         for dirpath, _dirnames, filenames in os.walk(walk_root):
             normal_dirpath = dirpath
             if normal_dirpath.startswith("\\\\?\\UNC\\"):
-                normal_dirpath = "\\" + normal_dirpath[len("\\\\?\\UNC\\"):]
+                normal_dirpath = "\\\\" + normal_dirpath[len("\\\\?\\UNC\\"):]
             elif normal_dirpath.startswith("\\\\?\\"):
                 normal_dirpath = normal_dirpath[len("\\\\?\\"):]
             has = False
