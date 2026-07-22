@@ -106,3 +106,28 @@ jobs:
         run: |
           ssh -p "${P:-22}" "${U}@${H}" \
               "ls -lh '${D}/${V}/' && du -sh '${D}/${V}/'"
+
+      - name: Checkout (for scripts/send_feishu.py)
+        uses: actions/checkout@v4
+
+      - name: Prepare files list for Feishu
+        run: |
+          cd /tmp/rel
+          : > /tmp/files.txt
+          for f in *.exe; do
+            size=$(stat -c '%s' "$f")
+            sha=$(cat "$f.sha256" 2>/dev/null | awk '{print $1}')
+            echo "$f  $size  $sha" >> /tmp/files.txt
+          done
+          echo "---- files.txt ----"
+          cat /tmp/files.txt
+
+      - name: Notify Feishu
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_BOT_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_BOT_SECRET }}
+          TAG: ${{ steps.tag.outputs.value }}
+          FILES_TXT: /tmp/files.txt
+          DOWNLOAD_BASE: http://download.ixweb.cc
+          GITHUB_REPO: ${{ github.repository }}
+        run: python3 scripts/send_feishu.py
