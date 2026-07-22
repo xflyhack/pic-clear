@@ -352,6 +352,38 @@ def iter_files(root: Path, extensions: set[str] | None) -> Iterable[Path]:
                 yield p
 
 
+
+def _is_close_person(
+    det,
+    img_size,
+    min_height_ratio: float,
+    min_conf: float,
+) -> bool:
+    """v0.4.117: 判断一个 person Detection 是不是'近人'.
+
+    规则:
+      1) confidence < min_conf         -> 远人 / 不确定 (return False)
+      2) 拿不到 img_size 或图高 <= 0    -> 保守当近人保护 (return True)
+      3) bbox 高度 / 图高 >= min_height_ratio -> 近人 (return True)
+         否则 -> 远人 (return False)
+
+    仅在 args.person_distance == "close" 时被调用, 老行为完全不走这里.
+    """
+    try:
+        if det.confidence < min_conf:
+            return False
+        if not img_size:
+            return True
+        _img_w, img_h = img_size
+        if img_h <= 0:
+            return True
+        _x1, y1, _x2, y2 = det.box_xyxy
+        return (float(y2 - y1) / float(img_h)) >= min_height_ratio
+    except Exception:
+        # 数据异常时保守保护 (对齐兜底原则)
+        return True
+
+
 def build_index(
     root: Path,
     extensions: set[str] | None,
@@ -377,6 +409,7 @@ def build_index(
     count = 0
     current_dir: str | None = None
     protect_hits = 0
+    _far_persons_released = 0  # v0.4.117: --person-distance=close 时统计放行的远人张次
     scene_hits = 0
 
     _analyze_scene = None
@@ -443,7 +476,25 @@ def build_index(
             #   只有车类，没有 person -> 不硬保护，交给"相邻帧车运动"判定
             #                            （动了就 motion_protected=True 保留，
             #                              没动就参与相似度去重被删）
-            has_person = any(d.class_name == "person" for d in hits)
+            # v0.4.117: --person-distance=close 时, 只保护'近人',
+            #           远的 person 走跟'只有车类'一样的分支 (不硬保护).
+            if args.person_distance == "close":
+                person_hits_all = [d for d in hits if d.class_name == "person"]
+                person_hits_close = [
+                    d for d in person_hits_all
+                    if _is_close_person(
+                        d, size,
+                        args.person_min_height_ratio,
+                        args.person_min_conf,
+                    )
+                ]
+                has_person = bool(person_hits_close)
+                # 远人放行统计: 检出了 person 但没算近人, 计入日志
+                _far_persons_released += (
+                    len(person_hits_all) - len(person_hits_close)
+                )
+            else:
+                has_person = any(d.class_name == "person" for d in hits)
             if has_person:
                 item.is_protected = True
                 item.detected_classes = tuple(
@@ -483,6 +534,8 @@ def build_index(
         extra_parts = []
         if detector is not None:
             extra_parts.append(f"受保护 {protect_hits}")
+            if args.person_distance == "close" and _far_persons_released > 0:
+                extra_parts.append(f"远人放行 {_far_persons_released}")
         if _analyze_scene is not None:
             extra_parts.append(f"场景 {scene_hits}")
         extra = "  ".join(extra_parts)
@@ -491,6 +544,8 @@ def build_index(
     final_parts = []
     if detector is not None:
         final_parts.append(f"受保护 {protect_hits}")
+        if args.person_distance == "close" and _far_persons_released > 0:
+            final_parts.append(f"远人放行 {_far_persons_released}")
     if _analyze_scene is not None:
         final_parts.append(f"场景 {scene_hits}")
     reporter.finish(extra="  ".join(final_parts))
@@ -820,6 +875,37 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.35,
         help="目标检测置信度阈值（0~1，越大越严格）。默认: %(default)s",
+    )
+    # ---- v0.4.117: 人的距离档位保护规则 (可选, 默认 raw 兼容老行为) ----
+    p.add_argument(
+        "--person-distance",
+        choices=["raw", "close"],
+        default="raw",
+        help=(
+            "人的距离档位保护规则: "
+            "raw=检出 person 即硬保护 (老行为, 默认); "
+            "close=仅硬保护近人, 远的 person 参与去重可能被删. "
+            "'近'的判定: bbox 高度 / 图高 >= --person-min-height-ratio "
+            "且 confidence >= --person-min-conf. 默认: %(default)s"
+        ),
+    )
+    p.add_argument(
+        "--person-min-height-ratio",
+        type=float,
+        default=0.15,
+        help=(
+            "仅 --person-distance=close 生效. 人 bbox 高度 / 图高 >= 此值算'近人'. "
+            "默认: %(default)s (跟当前 close 档位建议起始值一致)."
+        ),
+    )
+    p.add_argument(
+        "--person-min-conf",
+        type=float,
+        default=0.35,
+        help=(
+            "仅 --person-distance=close 生效. 人置信度 >= 此值才算'近人'. "
+            "默认: %(default)s (跟 --conf 一致)."
+        ),
     )
     p.add_argument(
         "--motion-threshold",

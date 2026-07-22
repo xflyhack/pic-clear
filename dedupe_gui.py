@@ -326,6 +326,13 @@ class DedupeGUI:
             value=int(self._cfg.get("lock_ttl", 900)))
         self._markers_root_var = tk.StringVar(
             value=self._cfg.get("markers_root", ""))
+        # v0.4.117: 人的距离档位保护 (raw=老行为 / close=只保护近人)
+        self._person_distance_var = tk.StringVar(
+            value=self._cfg.get("person_distance", "raw"))
+        self._person_min_h_ratio_var = tk.DoubleVar(
+            value=float(self._cfg.get("person_min_height_ratio", 0.15)))
+        self._person_min_conf_var = tk.DoubleVar(
+            value=float(self._cfg.get("person_min_conf", 0.35)))
 
         # 保护类别（COCO 80）
         saved_pc = self._cfg.get("protect_classes")
@@ -607,6 +614,41 @@ class DedupeGUI:
             font=("Microsoft YaHei", 9),
             foreground="#555", justify="left").pack(anchor="w", pady=(2, 4))
 
+        # v0.4.117: 人的距离档位控件区
+        dist_frame = ttk.LabelFrame(page, text="人的距离档位（仅当勾选『人』类别时生效）")
+        dist_frame.pack(fill="x", **pad)
+        row1 = ttk.Frame(dist_frame); row1.pack(fill="x", padx=6, pady=(4, 2))
+        self._person_distance_rb_raw = ttk.Radiobutton(
+            row1, text="原始（默认，检出 person 即保护）",
+            variable=self._person_distance_var, value="raw",
+            command=lambda: self._update_person_distance_state())
+        self._person_distance_rb_raw.pack(side="left", padx=(0, 12))
+        self._person_distance_rb_close = ttk.Radiobutton(
+            row1, text="近（仅保护近人，远的可删）",
+            variable=self._person_distance_var, value="close",
+            command=lambda: self._update_person_distance_state())
+        self._person_distance_rb_close.pack(side="left")
+
+        row2 = ttk.Frame(dist_frame); row2.pack(fill="x", padx=6, pady=(2, 2))
+        ttk.Label(row2, text="近人高度比阈值：").pack(side="left")
+        self._person_min_h_ratio_spin = ttk.Spinbox(
+            row2, from_=0.00, to=1.00, increment=0.01, width=8,
+            textvariable=self._person_min_h_ratio_var,
+            format="%.2f")
+        self._person_min_h_ratio_spin.pack(side="left")
+        ttk.Label(row2, text="  (bbox 高 / 图高，越大越激进删远人；默认 0.15)",
+                  foreground="#888").pack(side="left")
+
+        row3 = ttk.Frame(dist_frame); row3.pack(fill="x", padx=6, pady=(2, 4))
+        ttk.Label(row3, text="近人置信度阈值：").pack(side="left")
+        self._person_min_conf_spin = ttk.Spinbox(
+            row3, from_=0.10, to=0.95, increment=0.05, width=8,
+            textvariable=self._person_min_conf_var,
+            format="%.2f")
+        self._person_min_conf_spin.pack(side="left")
+        ttk.Label(row3, text="  (< 此值算远人/不确定，越大越激进删；默认 0.35)",
+                  foreground="#888").pack(side="left")
+
         btnbar = ttk.Frame(page); btnbar.pack(fill="x", **pad)
         ttk.Button(btnbar, text="全选",
                    command=lambda: self._protect_bulk("all")).pack(
@@ -656,29 +698,73 @@ class DedupeGUI:
                 cb = ttk.Checkbutton(gf, text=text,
                                      variable=self._protect_class_vars[cname])
                 cb.grid(row=r, column=c, sticky="w", padx=6, pady=2)
+                # v0.4.117: 不再强制勾+置灰"人", 用户可手动取消勾选;
+                # 默认勾选靠上面的 checked_set 保证 (首次启动 checked_set 里就有 person).
                 if cname == "person":
-                    self._protect_class_vars[cname].set(True)
-                    cb.configure(state="disabled")
+                    # 保存 checkbox 引用, 供联动置灰 (person 未勾时档位控件也灰掉)
+                    self._person_checkbutton = cb
+                    # 勾选变化时联动更新档位控件的置灰状态
+                    self._protect_class_vars[cname].trace_add(
+                        "write",
+                        lambda *_: self._update_person_distance_state())
+
+        # 建完 UI 后跑一次, 初始化档位控件的启用/置灰
+        self._update_person_distance_state()
+
+    def _update_person_distance_state(self) -> None:
+        """v0.4.117: 联动置灰规则:
+          - 人复选框未勾 -> 整个档位区置灰 (person 不检测, 档位无意义)
+          - 人勾了 + 档位=raw -> 两个 Spinbox 置灰 (raw 不用阈值)
+          - 人勾了 + 档位=close -> 两个 Spinbox 启用
+        """
+        try:
+            person_on = bool(self._protect_class_vars.get(
+                "person",
+                tk.BooleanVar(value=False),
+            ).get())
+        except Exception:
+            person_on = False
+        # 单选按钮: person 未勾时全部灰
+        rb_state = "normal" if person_on else "disabled"
+        try:
+            self._person_distance_rb_raw.configure(state=rb_state)
+            self._person_distance_rb_close.configure(state=rb_state)
+        except Exception:
+            pass
+        # Spinbox: person 勾了 && 档位=close 才启用
+        spin_state = "normal" if (
+            person_on and self._person_distance_var.get() == "close"
+        ) else "disabled"
+        try:
+            self._person_min_h_ratio_spin.configure(state=spin_state)
+            self._person_min_conf_spin.configure(state=spin_state)
+        except Exception:
+            pass
 
     def _protect_bulk(self, mode: str) -> None:
-        """『全选/全不选/恢复默认/仅人和车』快捷按钮实现。person 永远保持勾选。"""
+        """『全选/全不选/恢复默认/仅人和车』快捷按钮实现。
+        v0.4.117: 不再强制 person 常勾, 用户可完全掌控."""
         if mode == "all":
             for _, v in self._protect_class_vars.items():
                 v.set(True)
         elif mode == "none":
-            for name, v in self._protect_class_vars.items():
-                v.set(name == "person")
+            for _, v in self._protect_class_vars.items():
+                v.set(False)
         elif mode == "default":
             for name, v in self._protect_class_vars.items():
                 v.set(name in _pg.COCO_DEFAULT_PROTECT)
         elif mode == "person_and_vehicle":
             for name, v in self._protect_class_vars.items():
                 v.set(name == "person" or name in _pg.COCO_VEHICLE_SET)
+        # 触发一次档位控件联动置灰
+        try:
+            self._update_person_distance_state()
+        except Exception:
+            pass
 
     def _get_selected_protect_arg(self) -> str:
+        """v0.4.117: 不再强塞 person; 用户明确取消勾选就应该真的不传给 --protect."""
         names = [n for n, v in self._protect_class_vars.items() if v.get()]
-        if "person" not in names:
-            names.insert(0, "person")
         return ",".join(names)
 
     def _build_log_tab(self, page: ttk.Frame):
@@ -1100,6 +1186,23 @@ class DedupeGUI:
                 cmd.append("--force")
             if protect_arg:
                 cmd.extend(["--protect", protect_arg])
+            # v0.4.117: 人的距离档位; raw 是默认值不必传, 只在 close 时显式传
+            try:
+                _pd = str(self._person_distance_var.get() or "raw")
+            except Exception:
+                _pd = "raw"
+            if _pd == "close":
+                cmd.extend(["--person-distance", "close"])
+                try:
+                    _pmh = float(self._person_min_h_ratio_var.get())
+                except Exception:
+                    _pmh = 0.15
+                try:
+                    _pmc = float(self._person_min_conf_var.get())
+                except Exception:
+                    _pmc = 0.35
+                cmd.extend(["--person-min-height-ratio", f"{_pmh:.2f}"])
+                cmd.extend(["--person-min-conf", f"{_pmc:.2f}"])
 
             try:
                 # v0.4.46 走 SubprocGroup: 自动绑 Job Object,
@@ -1223,6 +1326,10 @@ class DedupeGUI:
             "hotkey": self._hotkey_var.get(),
             "protect_classes": [n for n, v in
                                 self._protect_class_vars.items() if v.get()],
+            # v0.4.117: 人距离档位配置持久化
+            "person_distance": str(self._person_distance_var.get() or "raw"),
+            "person_min_height_ratio": float(self._person_min_h_ratio_var.get()),
+            "person_min_conf": float(self._person_min_conf_var.get()),
         }
         try:
             geo = self.root.winfo_geometry()
