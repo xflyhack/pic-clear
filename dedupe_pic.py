@@ -392,6 +392,9 @@ def build_index(
     total: int | None = None,
     progress_interval: float = 5.0,
     enable_scene: bool = False,
+    person_distance: str = "raw",
+    person_min_height_ratio: float = 0.15,
+    person_min_conf: float = 0.35,
 ) -> tuple[list[Item], list[Path], list[Path]]:
     """扫描 root 下所有匹配图片，计算 dHash；如果提供了 detector，
     还会跑目标检测并在 Item 上打上 is_protected 标记。
@@ -478,14 +481,14 @@ def build_index(
             #                              没动就参与相似度去重被删）
             # v0.4.117: --person-distance=close 时, 只保护'近人',
             #           远的 person 走跟'只有车类'一样的分支 (不硬保护).
-            if args.person_distance == "close":
+            if person_distance == "close":
                 person_hits_all = [d for d in hits if d.class_name == "person"]
                 person_hits_close = [
                     d for d in person_hits_all
                     if _is_close_person(
                         d, size,
-                        args.person_min_height_ratio,
-                        args.person_min_conf,
+                        person_min_height_ratio,
+                        person_min_conf,
                     )
                 ]
                 has_person = bool(person_hits_close)
@@ -534,7 +537,7 @@ def build_index(
         extra_parts = []
         if detector is not None:
             extra_parts.append(f"受保护 {protect_hits}")
-            if args.person_distance == "close" and _far_persons_released > 0:
+            if person_distance == "close" and _far_persons_released > 0:
                 extra_parts.append(f"远人放行 {_far_persons_released}")
         if _analyze_scene is not None:
             extra_parts.append(f"场景 {scene_hits}")
@@ -544,7 +547,7 @@ def build_index(
     final_parts = []
     if detector is not None:
         final_parts.append(f"受保护 {protect_hits}")
-        if args.person_distance == "close" and _far_persons_released > 0:
+        if person_distance == "close" and _far_persons_released > 0:
             final_parts.append(f"远人放行 {_far_persons_released}")
     if _analyze_scene is not None:
         final_parts.append(f"场景 {scene_hits}")
@@ -1220,6 +1223,9 @@ def _run_dedupe(args: argparse.Namespace) -> int:
         detector=detector, protect_classes=protect_set,
         total=total,
         enable_scene=args.scene_protect,
+        person_distance=args.person_distance,
+        person_min_height_ratio=args.person_min_height_ratio,
+        person_min_conf=args.person_min_conf,
     )
     _n_open = len(_stat_failed) + len(_hash_failed)
     print(
