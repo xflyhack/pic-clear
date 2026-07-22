@@ -1,0 +1,108 @@
+name: Upload Release to US mirror
+
+# 触发时机:
+#   - release: published: tag 一 push 建 release 就触发, 但此时 8 个 build workflow 可能还没跑完.
+#     所以下面加了 15 分钟 sleep 兜底 (等 asset 都挂上来).
+#   - workflow_dispatch: 手动重跑指定 tag (asset 已经全在 release 上了立刻跑, 不 sleep).
+#
+# 前置条件 (在 GitHub 仓库 Secrets 里配好):
+#   US_SSH_HOST       美国机器地址 (例如 23.95.88.247 或域名)
+#   US_SSH_PORT       SSH 端口, 默认 22
+#   US_SSH_USER       专用部署用户 (例如 picclear-deploy, 由 23 机器的 init_server.sh 建好)
+#   US_SSH_KEY        对应的 SSH 私钥 (整个 -----BEGIN OPENSSH PRIVATE KEY----- ... 段)
+#   US_UPLOADS_DIR    上传根目录 (例如 /data/pic-clear-uploads)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 手工重发的 tag (例如 v0.4.118)
+        required: true
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "wait=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            # release: published 时可能 build workflow 还没挂完 asset, sleep 兜底
+            echo "wait=900" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Wait for build workflows to finish (only on release event)
+        if: steps.tag.outputs.wait != '0'
+        run: |
+          echo "等 ${{ steps.tag.outputs.wait }} 秒让 8 个 build-*.yml 挂完 asset..."
+          sleep ${{ steps.tag.outputs.wait }}
+
+      - name: Download all release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/rel
+          gh release download "${{ steps.tag.outputs.value }}" \
+              --repo "${{ github.repository }}" \
+              -D /tmp/rel/ \
+              --pattern '*.exe' \
+              --clobber
+          ls -lh /tmp/rel/
+          echo "共下载 $(ls /tmp/rel/*.exe 2>/dev/null | wc -l) 个 exe"
+
+      - name: Generate .sha256 sidecar files
+        run: |
+          cd /tmp/rel
+          for f in *.exe; do
+            sha256sum "$f" | awk '{print $1}' > "$f.sha256"
+            echo "$(cat $f.sha256)  $f"
+          done
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.US_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # trust host key
+          ssh-keyscan -p "${{ secrets.US_SSH_PORT || 22 }}" \
+              -H "${{ secrets.US_SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Ensure remote version dir exists
+        env:
+          H: ${{ secrets.US_SSH_HOST }}
+          P: ${{ secrets.US_SSH_PORT }}
+          U: ${{ secrets.US_SSH_USER }}
+          D: ${{ secrets.US_UPLOADS_DIR }}
+          V: ${{ steps.tag.outputs.value }}
+        run: |
+          ssh -p "${P:-22}" "${U}@${H}" \
+              "mkdir -p '${D}/${V}' && chmod 755 '${D}/${V}'"
+
+      - name: Upload exe + sha256 to US mirror
+        env:
+          H: ${{ secrets.US_SSH_HOST }}
+          P: ${{ secrets.US_SSH_PORT }}
+          U: ${{ secrets.US_SSH_USER }}
+          D: ${{ secrets.US_UPLOADS_DIR }}
+          V: ${{ steps.tag.outputs.value }}
+        run: |
+          cd /tmp/rel
+          scp -P "${P:-22}" -B -q *.exe *.exe.sha256 "${U}@${H}:${D}/${V}/"
+          echo "已上传到 ${U}@${H}:${D}/${V}/"
+
+      - name: Verify remote size
+        env:
+          H: ${{ secrets.US_SSH_HOST }}
+          P: ${{ secrets.US_SSH_PORT }}
+          U: ${{ secrets.US_SSH_USER }}
+          D: ${{ secrets.US_UPLOADS_DIR }}
+          V: ${{ steps.tag.outputs.value }}
+        run: |
+          ssh -p "${P:-22}" "${U}@${H}" \
+              "ls -lh '${D}/${V}/' && du -sh '${D}/${V}/'"
