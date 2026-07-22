@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   create-release:
@@ -91,3 +92,18 @@ jobs:
             ### 自动生成的更新记录
 
             （下面这段由 GitHub 自动生成，列出这次 tag 相比上一个 tag 的所有 commit）
+
+      # release-published 用默认 GITHUB_TOKEN 创建 release 不会级联触发其他 workflow
+      # (GitHub 防递归). 所以这里显式 workflow_dispatch upload-to-us, 让飞书通知能跑起来.
+      - name: Trigger upload-to-us workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          curl -sS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/upload-to-us.yml/dispatches" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"tag\":\"${TAG}\"}}"
+          echo "已请求 upload-to-us workflow_dispatch, tag=${TAG}"
