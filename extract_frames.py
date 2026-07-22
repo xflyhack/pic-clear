@@ -66,6 +66,15 @@ def _log_err(msg: str) -> None:
         pass
 
 
+def _log_info(msg: str) -> None:
+    """stderr 打 [INFO] 日志. 用于'数据本身缺信息但不是错误'的场景, 别刷成 [ERROR] 吓人."""
+    try:
+        sys.stderr.write("[INFO] " + msg + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 # stats_db 可选; 打包时 hidden-import, 缺失时不影响主流程
 try:
     import stats_db as _stats_db  # type: ignore
@@ -286,6 +295,12 @@ def probe_video_duration(ffprobe: Path | None, video_path: Path) -> float | None
             continue
         s = (result.stdout or "").strip()
         if result.returncode == 0 and s:
+            # ffprobe 对没有 duration 元数据的流(常见 .h265 裸流)会返回 'N/A'.
+            # 这不是错, 是数据本身没有. 打一次 [INFO] 早退, 不再试 long 路径, 不再刷 [ERROR].
+            if s.upper() == "N/A":
+                _log_info(f"probe_video_duration 视频无 duration 元数据 "
+                          f"(常见于 .h265 裸流): path={src_str}")
+                return None
             try:
                 return float(s)
             except ValueError as e:
