@@ -395,7 +395,7 @@ class ExtractGUI:
         self._fps_rules_frame = FpsRulesFrame(
             page, initial_state=self._fps_rules_state_initial,
         )
-        self._fps_rules_frame.pack(fill="both", expand=True, padx=6, pady=4)
+        self._fps_rules_frame.pack(fill="x", padx=6, pady=4)
 
         # 抽帧并发数
         row = ttk.Frame(page); row.pack(fill="x", **pad)

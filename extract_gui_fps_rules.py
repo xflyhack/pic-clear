@@ -125,11 +125,18 @@ class FpsRulesFrame(ttk.LabelFrame):
             foreground="#666",
         ).pack(anchor="w", padx=6)
 
-        # Treeview: fill both + height 加到 10, LabelFrame 也允许纵向拉伸.
+        # Treeview: 独立 style 拉高 rowheight, 避免中文字体上下贴顶.
+        try:
+            _style = ttk.Style(self)
+            # 默认 Treeview 行高 ~20px, 中文渲染上视觉贴顶. 30 更透气.
+            _style.configure("FpsRules.Treeview", rowheight=30)
+        except Exception:
+            pass
         tree_wrap = ttk.Frame(self)
-        tree_wrap.pack(fill="both", expand=True, padx=6, pady=4)
+        tree_wrap.pack(fill="x", padx=6, pady=4)
         self._tree = ttk.Treeview(
-            tree_wrap, columns=self.COLS, show="headings", height=10,
+            tree_wrap, columns=self.COLS, show="headings", height=8,
+            style="FpsRules.Treeview",
         )
         for c in self.COLS:
             self._tree.heading(c, text=self.COL_TITLES[c])
