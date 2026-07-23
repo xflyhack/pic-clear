@@ -43,8 +43,8 @@ except Exception as e:
 import pipe_gui as _pg  # noqa: E402
 import pipeline  # noqa: E402
 from gui_log_util import GuiLogController  # noqa: E402
-from tray_util import TrayController
-from extract_gui_fps_rules import FpsRulesFrame, TOOLTIP_EXTRACT  # noqa: E402
+from tray_util import TrayController, TOOLTIP_EXTRACT
+from extract_gui_fps_rules import FpsRulesFrame  # noqa: E402
 
 # stats_db 可选; 主流程不能因为落库失败中断
 try:
