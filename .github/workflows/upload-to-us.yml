@@ -30,18 +30,54 @@ jobs:
         run: |
           if [ -n "${{ inputs.tag }}" ]; then
             echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-            echo "wait=0" >> "$GITHUB_OUTPUT"
           else
             echo "value=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-            # release: published 时可能 build workflow 还没挂完 asset, sleep 兜底
-            echo "wait=900" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Wait for build workflows to finish (only on release event)
-        if: steps.tag.outputs.wait != '0'
+      # 主动 poll 本 tag 下所有 build-*.yml workflow, 全部结束 (success/failure/cancelled)
+      # 才继续. 比死 sleep 更可靠 -- 8 个 workflow 有的 10 分钟有的 30 分钟, 平均要等最慢的.
+      # 触发路径无论 release:published 还是 workflow_dispatch, 都走这一步.
+      - name: Wait for build workflows to finish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.value }}
         run: |
-          echo "等 ${{ steps.tag.outputs.wait }} 秒让 8 个 build-*.yml 挂完 asset..."
-          sleep ${{ steps.tag.outputs.wait }}
+          set -e
+          # 所有以 build- 开头的 workflow 文件名 (排除本 workflow 自己 + release notes)
+          BUILD_WFS=$(gh workflow list --repo "${{ github.repository }}" --all --json path --jq '.[].path | split("/") | .[-1]' | grep -E '^build-.*\.yml$' || true)
+          echo "监控以下 build workflow:"
+          echo "$BUILD_WFS"
+          echo "---"
+          MAX_WAIT_MIN=45
+          INTERVAL=30
+          START=$(date +%s)
+          while :; do
+            ELAPSED=$(( ($(date +%s) - START) / 60 ))
+            if [ "$ELAPSED" -ge "$MAX_WAIT_MIN" ]; then
+              echo "[WARN] 等待 ${MAX_WAIT_MIN} 分钟仍有 build workflow 未结束, 强制继续下 asset"
+              break
+            fi
+            PENDING=0
+            for WF in $BUILD_WFS; do
+              # 找该 workflow 在本 tag 下最近一次 run 的状态
+              STATE=$(gh run list --repo "${{ github.repository }}"                 --workflow "$WF" --branch "$TAG" --limit 1                 --json status,conclusion --jq '.[0] // {} | .status + "/" + (.conclusion//"null")' 2>/dev/null || echo "not_found/null")
+              case "$STATE" in
+                completed/*|not_found/null)
+                  # not_found: 该 workflow 没被这个 tag 触发 (可能被 paths 过滤了), 也算完成
+                  ;;
+                *)
+                  PENDING=$((PENDING+1))
+                  echo "  等待: $WF  状态=$STATE"
+                  ;;
+              esac
+            done
+            if [ "$PENDING" -eq 0 ]; then
+              echo "全部 build workflow 已结束, 继续下 asset (已等 ${ELAPSED} 分钟)"
+              break
+            fi
+            echo "还有 $PENDING 个 workflow 未结束, ${INTERVAL}s 后再查 (已等 ${ELAPSED} 分钟)..."
+            sleep "$INTERVAL"
+          done
 
       - name: Download all release assets
         env:
