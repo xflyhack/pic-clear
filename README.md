@@ -363,7 +363,9 @@ D:\frames\
 ```
 sqFrameGrab.exe <SRC_ROOT> <DST_ROOT> [选项]
 
-  --fps FLOAT              每秒抽多少帧，默认 1.0
+  --fps FLOAT              每秒抽多少帧，默认 1.0（未命中任何规则时的兜底 fps）
+  --fps-rules PATH         可选，差异化 fps 规则 JSON。命中规则的视频用规则的
+                           speed 替换 --fps。详见 docs/fps_rules.md
   --ext EXT                扫描扩展名（逗号分隔），默认 h265
   --skip-dir NAME          要跳过的目录名（逗号分隔），默认 VLM
   --quality INT            JPEG 质量 1-100，默认 90
@@ -376,6 +378,31 @@ sqFrameGrab.exe <SRC_ROOT> <DST_ROOT> [选项]
                            填了就视同 --name-style custom
   --name-digits N          {seq} 补零位数（1-8），默认 6
 ```
+
+### 差异化 fps 规则（v0.4.102 起）
+
+新需求：一次任务里，DTSS 类视频用 30fps，其余用默认 1fps。GUI 里"抽帧率"下方
+有"差异化抽帧规则"表格；命令行用 `--fps-rules rules.json`。
+
+示例 JSON：
+
+```json
+{
+  "default_fps": 1.0,
+  "camera_regex": "camera(\\d+)",
+  "rules": [
+    {"keyword": "dtss",   "ids": ["02~16"],           "speed": 30.0},
+    {"keyword": "cndtss", "ids": ["02","16","14~17"], "speed": 30.0}
+  ]
+}
+```
+
+`ids` 支持单值 `"02"` 和区间 `"02~16"`（或 `"camera02~camera16"`），
+关键字大小写不敏感、按 word boundary 匹配（`cndtss` 不会命中 `dtss`）。
+完整语义见 `docs/fps_rules.md`。
+
+抽帧完 `sqStatsViewerGui` 里能直接看到每条流水的**实际 fps + 命中规则 + fps 来源**
+（rule / default），方便复核。
 
 ### 图片命名规则
 

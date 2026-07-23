@@ -324,6 +324,9 @@ class VideoTask:
     out_dir: Path        # 抽帧输出目录（视频同名文件夹）
     rel_path: Path       # 相对于 src_root 的路径（打印用）
     marker_dir: Path     # marker/lock 存放目录（集中在 markers_root 下的镜像位置）
+    # v0.4.102: 差异化 fps 相关. 若未启用规则或未命中, resolved_fps=None 表示"沿用 args.fps".
+    resolved_fps: float | None = None
+    fps_rule_hit: str | None = None  # 命中的关键字, 未命中 -> None
 
 
 # ------------------------------ 命名规则 ------------------------------------
@@ -565,13 +568,15 @@ def extract_one(
             if _ffprobe is not None:
                 _duration = probe_video_duration(_ffprobe, task.src_path)
         try:
+            _fps_for_stats = task.resolved_fps if task.resolved_fps is not None else _STATS_CTX.get("fps")
+            _fps_source = "rule" if task.fps_rule_hit else "default"
             _stats_db.record_extract(
                 video_path=str(task.src_path),
                 output_dir=str(task.out_dir),
                 rel_path=str(task.rel_path),
                 frames=int(n or 0),
                 duration_sec=_duration,
-                fps=_STATS_CTX.get("fps"),
+                fps=_fps_for_stats,
                 quality=_STATS_CTX.get("quality"),
                 naming_style=name_style,
                 seq_digits=int(name_digits or 0),
@@ -585,6 +590,8 @@ def extract_one(
                 version=_STATS_CTX.get("version"),
                 video_md5=_md5,
                 file_size=_fsize,
+                fps_rule_hit=task.fps_rule_hit,
+                fps_source=_fps_source,
             )
         except Exception as e:
             _log_err(f"record_extract 失败: {type(task.src_path).__name__} "
@@ -1010,7 +1017,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("dst_root", type=Path, help="抽帧输出根目录（自动创建）")
     p.add_argument(
         "--fps", type=float, default=1.0,
-        help="每秒抽多少帧，默认: %(default)s",
+        help="每秒抽多少帧（默认/兜底 fps），默认: %(default)s",
+    )
+    p.add_argument(
+        "--fps-rules", type=Path, default=None,
+        help=(
+            "可选，差异化 fps 规则 JSON 文件。文件里可为每类文件名指定不同 fps；"
+            "未命中任何规则的视频回落到 --fps。schema 见 docs/fps_rules.md。"
+        ),
     )
     p.add_argument(
         "--ext", default="h265",
@@ -1204,6 +1218,27 @@ def main() -> int:
     _STATS_CTX["seq_digits"] = int(name_digits)
     _STATS_CTX["version"] = _read_version()
     _STATS_CTX["ffprobe"] = ffprobe  # v0.4.92: 抽帧完立即 probe duration 一并落库
+
+    # v0.4.102: 加载差异化 fps 规则 (可选)
+    fps_ruleset = None
+    if args.fps_rules is not None:
+        try:
+            from fps_rules import load_fps_rules
+            fps_ruleset = load_fps_rules(str(args.fps_rules))
+            # 用户没在 JSON 里显式写 default_fps 时, 沿用 --fps
+            if not fps_ruleset.rules:
+                print(f"[FPS-RULE] 规则文件 {args.fps_rules} 未包含任何规则, 全部走默认 fps={args.fps}",
+                      flush=True)
+                fps_ruleset = None
+            else:
+                # 若 JSON 没写 default_fps, ruleset 里默认是 1.0, 这里改为 --fps 更贴合语义
+                # 判定方法: 用户明确写过 default_fps=1.0 也算, 不区分. 想覆盖就在 JSON 显式写.
+                fps_ruleset.default_fps = float(args.fps)
+        except Exception as e:
+            print(f"[FATAL] 解析 --fps-rules 失败: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+            return 2
+
     if _stats_db is not None:
         try:
             _stats_db.open_stats_db()
@@ -1220,6 +1255,12 @@ def main() -> int:
     print(f"  锁 TTL    : {int(args.lock_ttl)}s")
     print(f"  markers   : {args.markers_root}")
     print(f"  命名规则  : {name_style}  模板={_resolve_template(name_style, name_template)!r}  位数={name_digits}")
+    if fps_ruleset is not None:
+        print(f"  fps 规则  : {args.fps_rules} (共 {len(fps_ruleset.rules)} 条, camera_regex={fps_ruleset.camera_regex!r})")
+        for _i, _r in enumerate(fps_ruleset.rules, 1):
+            print(f"              #{_i} keyword={_r.keyword!r} ids={_r.ids} speed={_r.speed}")
+    else:
+        print(f"  fps 规则  : (未启用)")
     print(f"  hostname  : {_HOSTNAME}")
     # v0.4.72: 打一行环境画像到 stdout, 让日志开头就有环境证据
     try:
@@ -1236,6 +1277,24 @@ def main() -> int:
     tasks = collect_tasks(
         args.src_root, args.dst_root, extensions, skip_dirs, args.markers_root,
     )
+    # v0.4.102: 若启用规则, 给每个 task 打上 resolved_fps + fps_rule_hit
+    if fps_ruleset is not None and tasks:
+        try:
+            from fps_rules import resolve_fps_for_video
+        except Exception as e:
+            print(f"[FATAL] 加载 fps_rules 失败: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+            return 2
+        _rule_hit_cnt: dict[str, int] = {}
+        for _t in tasks:
+            _fps, _hit = resolve_fps_for_video(_t.src_path.name, fps_ruleset)
+            _t.resolved_fps = _fps
+            _t.fps_rule_hit = _hit
+            _key = _hit or "(default)"
+            _rule_hit_cnt[_key] = _rule_hit_cnt.get(_key, 0) + 1
+        print("[FPS-RULE] 各规则命中视频数:", flush=True)
+        for _k, _v in sorted(_rule_hit_cnt.items(), key=lambda x: (-x[1], x[0])):
+            print(f"           {_k:20s} = {_v}", flush=True)
     print(
         f"[扫描] 找到 {len(tasks)} 个待处理视频，耗时 {time.time()-t0:.1f}s",
         flush=True,
@@ -1276,8 +1335,9 @@ def main() -> int:
     def _run_one(task: VideoTask) -> tuple[VideoTask, str, int, str, float]:
         t0 = time.time()
         try:
+            _fps_this = task.resolved_fps if task.resolved_fps is not None else args.fps
             stage, n, msg = extract_one(
-                task, ffmpeg, args.fps, args.quality,
+                task, ffmpeg, _fps_this, args.quality,
                 skip_existing=not args.no_skip_existing,
                 lock_ttl=args.lock_ttl,
                 name_style=name_style,
@@ -1334,12 +1394,17 @@ def main() -> int:
         elif stage == "failed" and _stripped_msg and _stripped_msg != "OK":
             _reason_line = f"\n    失败原因: {_stripped_msg}"
             _tail_msg = "失败"
+        _fps_tag = ""
+        if task.fps_rule_hit:
+            _fps_tag = f"  [fps={task.resolved_fps} hit={task.fps_rule_hit}]"
+        elif task.resolved_fps is not None and task.resolved_fps != args.fps:
+            _fps_tag = f"  [fps={task.resolved_fps}]"
         with print_lock:
             print(
                 f"[第 {idx} 个/共 {len(tasks)} 个] {tag}\n"
                 f"    源视频: {_full_src}   {_dur_str}\n"
                 f"    结果  : 已抽帧数={n} 本次耗时={dt:.1f}s  "
-                f"(已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)})  {_tail_msg}"
+                f"(已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)})  {_tail_msg}{_fps_tag}"
                 f"{_reason_line}",
                 flush=True,
             )
@@ -1357,17 +1422,23 @@ def main() -> int:
             # v0.4.83: 单线程分支的开头 header 也走同款 3 行结构.
             _dur = probe_video_duration(ffprobe, task.src_path)
             _dur_str = f"视频总时长={_dur:.1f}s" if _dur else "视频总时长=未知"
+            _fps_hdr = ""
+            if task.fps_rule_hit:
+                _fps_hdr = f"\n    fps 规则: 命中 {task.fps_rule_hit} -> fps={task.resolved_fps}"
+            elif task.resolved_fps is not None and task.resolved_fps != args.fps:
+                _fps_hdr = f"\n    fps 规则: 无命中 -> fps={task.resolved_fps}"
             print(
                 f"\n[第 {i} 个/共 {len(tasks)} 个]\n"
                 f"    源视频: {_full_src}   {_dur_str}\n"
-                f"    进度  : (已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)})",
+                f"    进度  : (已运行 {_fmt_time(elapsed)}, 预计剩余 ~{_fmt_time(remain)}){_fps_hdr}",
                 flush=True,
             )
             print(f'    → "{task.out_dir}"', flush=True)
             print("    ...抽帧中，请稍候（ffmpeg 静默运行，视频越长等得越久）", flush=True)
             try:
+                _fps_this = task.resolved_fps if task.resolved_fps is not None else args.fps
                 stage, n, msg = extract_one(
-                    task, ffmpeg, args.fps, args.quality,
+                    task, ffmpeg, _fps_this, args.quality,
                     skip_existing=not args.no_skip_existing,
                     lock_ttl=args.lock_ttl,
                     name_style=name_style,

@@ -63,6 +63,7 @@ jobs:
           copy stats_db.py build_extract\
           copy winpath_util.py build_extract\
           copy env_probe.py build_extract\
+          copy fps_rules.py build_extract\
           copy _version.py build_extract\
         shell: cmd
 
@@ -73,10 +74,12 @@ jobs:
           pyarmor gen --output dist_obf extract_frames.py
           pyarmor gen --output dist_obf licensing.py
           pyarmor gen --output dist_obf stats_db.py
+          pyarmor gen --output dist_obf fps_rules.py
           dir dist_obf
           copy /Y dist_obf\extract_frames.py extract_frames.py
           copy /Y dist_obf\licensing.py licensing.py
           copy /Y dist_obf\stats_db.py stats_db.py
+          copy /Y dist_obf\fps_rules.py fps_rules.py
           cd ..
         shell: cmd
 
@@ -108,6 +111,7 @@ jobs:
             --hidden-import cryptography.hazmat.primitives.serialization ^
             --hidden-import licensing ^
             --hidden-import stats_db ^
+            --hidden-import fps_rules ^
             --hidden-import sqlite3 ^
             extract_frames.py
           cd ..
