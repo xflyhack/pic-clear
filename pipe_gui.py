@@ -1581,6 +1581,50 @@ def _otp_session_expires_at() -> float:
         return 0.0
 
 
+def _pid_alive(pid: int) -> bool:
+    """v0.4.125: 检查 pid 是否还是活进程. 用于识别陈旧的 OTP prompt lock.
+
+    Windows: 用 kernel32.OpenProcess + GetExitCodeProcess (不引 psutil).
+    POSIX: os.kill(pid, 0), OSError 说明进程不存在.
+    任一失败或异常一律保守返回 True (视为活着), 避免误覆盖别人的锁.
+    """
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            k32 = ctypes.windll.kernel32
+            h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h:
+                # 进程不存在 (ERROR_INVALID_PARAMETER=87) 或权限不够;
+                # 权限不够时保守返回 True 避免误清活锁.
+                err = ctypes.get_last_error()
+                return err not in (87,)
+            try:
+                code = ctypes.c_ulong(0)
+                if k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                    return code.value == STILL_ACTIVE
+                return True
+            finally:
+                k32.CloseHandle(h)
+        except Exception:
+            return True
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except Exception:
+            return True
+
+
 def _otp_prompt_lock_acquire() -> bool:
     """尝试抢"当前正在弹 OTP 输入框"的全局锁.
 
@@ -1594,9 +1638,17 @@ def _otp_prompt_lock_acquire() -> bool:
             try:
                 data = json.loads(OTP_PROMPT_LOCK_PATH.read_text(encoding="utf-8"))
                 created_at = float(data.get("created_at", 0))
-                if time.time() - created_at < OTP_PROMPT_LOCK_TTL:
-                    return False  # 别人还在弹, 且没超时
-                # 超时, 走下面覆盖逻辑
+                lock_pid = int(data.get("pid", 0))
+                ttl_ok = time.time() - created_at < OTP_PROMPT_LOCK_TTL
+                # v0.4.125: 除了 TTL, 还要判 pid 是否活着;
+                # 死进程的锁 (GUI 崩溃/被强杀) 立刻可覆盖, 不用等 30 分钟.
+                pid_ok = _pid_alive(lock_pid) if lock_pid > 0 else False
+                if ttl_ok and pid_ok:
+                    return False  # 别人还在弹且进程活着, 让位
+                if not pid_ok and lock_pid > 0:
+                    print(f"[OTP] 检测到陈旧锁 pid={lock_pid} (进程已死), 覆盖",
+                          file=sys.stderr)
+                # 陈旧, 走下面覆盖逻辑
             except Exception:
                 pass  # 锁文件损坏, 覆盖
         # 原子创建 (O_EXCL 抢锁)
@@ -1633,13 +1685,19 @@ def _otp_prompt_lock_release() -> None:
 
 
 def _otp_prompt_lock_alive() -> bool:
-    """当前是否有活着的弹窗锁 (仅用于'该不该挂黄条'的判断)."""
+    """当前是否有活着的弹窗锁 (仅用于'该不该挂黄条'的判断).
+
+    v0.4.125: TTL + pid 双条件. 死进程的锁不算活.
+    """
     try:
         if not OTP_PROMPT_LOCK_PATH.is_file():
             return False
         data = json.loads(OTP_PROMPT_LOCK_PATH.read_text(encoding="utf-8"))
         created_at = float(data.get("created_at", 0))
-        return (time.time() - created_at) < OTP_PROMPT_LOCK_TTL
+        lock_pid = int(data.get("pid", 0))
+        ttl_ok = (time.time() - created_at) < OTP_PROMPT_LOCK_TTL
+        pid_ok = _pid_alive(lock_pid) if lock_pid > 0 else False
+        return ttl_ok and pid_ok
     except Exception:
         return False
 
