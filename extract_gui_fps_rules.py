@@ -58,7 +58,7 @@ class FpsRulesFrame(ttk.LabelFrame):
         "ids":     "编号规则",
         "speed":   "抽帧率",
     }
-    COL_WIDTHS = {"enabled": 50, "keyword": 120, "ids": 260, "speed": 80}
+    COL_WIDTHS = {"enabled": 60, "keyword": 140, "ids": 320, "speed": 90}
 
     def __init__(self, parent: tk.Misc, *, initial_state: dict | None = None) -> None:
         super().__init__(parent, text="差异化抽帧规则 (可选)")
@@ -97,18 +97,20 @@ class FpsRulesFrame(ttk.LabelFrame):
     def _build_ui(self) -> None:
         pad = {"padx": 6, "pady": 3}
 
-        # 启用勾 + 说明
+        # 启用勾一行, 说明单独一行 (避免挤在一起)
         top = ttk.Frame(self)
         top.pack(fill="x", **pad)
         ttk.Checkbutton(
             top, text="启用规则", variable=self._enabled_var,
         ).pack(side="left")
         ttk.Label(
-            top, text="  勾选后, 命中规则的视频会用规则里的 fps 替换默认 fps",
+            self,
+            text="    勾选后, 命中规则的视频会用规则里的 fps 替换默认 fps; "
+                 "未命中的视频用主界面上的 抽帧率(fps) 兜底.",
             foreground="#666",
-        ).pack(side="left")
+        ).pack(anchor="w", padx=6)
 
-        # camera_regex 行
+        # camera_regex 行 (说明单独一行)
         row = ttk.Frame(self); row.pack(fill="x", **pad)
         ttk.Label(row, text="编号提取正则:", width=14).pack(side="left")
         self._regex_entry = ttk.Entry(row, textvariable=self._regex_var, width=32)
@@ -118,20 +120,23 @@ class FpsRulesFrame(ttk.LabelFrame):
             command=lambda: self._regex_var.set(DEFAULT_CAMERA_REGEX),
         ).pack(side="left", padx=4)
         ttk.Label(
-            row, text="  从文件名里取 编号(int) 用. 留空 = 不看编号只看关键字.",
+            self,
+            text="    从文件名里取 编号(int) 用. 留空 = 不看编号只看关键字.",
             foreground="#666",
-        ).pack(side="left")
+        ).pack(anchor="w", padx=6)
 
-        # Treeview
-        tree_wrap = ttk.Frame(self); tree_wrap.pack(fill="x", padx=6, pady=4)
+        # Treeview: fill both + height 加到 10, LabelFrame 也允许纵向拉伸.
+        tree_wrap = ttk.Frame(self)
+        tree_wrap.pack(fill="both", expand=True, padx=6, pady=4)
         self._tree = ttk.Treeview(
-            tree_wrap, columns=self.COLS, show="headings", height=6,
+            tree_wrap, columns=self.COLS, show="headings", height=10,
         )
         for c in self.COLS:
             self._tree.heading(c, text=self.COL_TITLES[c])
             self._tree.column(c, width=self.COL_WIDTHS[c],
-                              anchor="center" if c in ("enabled", "speed") else "w")
-        self._tree.pack(side="left", fill="x", expand=True)
+                              anchor="center" if c in ("enabled", "speed") else "w",
+                              stretch=(c == "ids"))
+        self._tree.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(tree_wrap, orient="vertical",
                            command=self._tree.yview)
         sb.pack(side="left", fill="y")
