@@ -137,7 +137,9 @@ CREATE TABLE IF NOT EXISTS extract_stats (
     elapsed_sec   REAL,                    -- 本视频耗时 (秒)
     stage         TEXT,                    -- ok / empty / failed / locked
     exit_code     INTEGER,                 -- 兼容字段, 0 表 ok, 非 0 失败
-    msg           TEXT                     -- 备注 (ffmpeg 报错等)
+    msg           TEXT,                    -- 备注 (ffmpeg 报错等)
+    fps_rule_hit  TEXT,                    -- v0.4.102: 命中的 fps 规则关键字, NULL=未命中
+    fps_source    TEXT                     -- v0.4.102: 'rule' 或 'default'
 );
 CREATE INDEX IF NOT EXISTS idx_extract_ts       ON extract_stats(ts);
 CREATE INDEX IF NOT EXISTS idx_extract_task     ON extract_stats(task_id);
@@ -219,6 +221,8 @@ CREATE TABLE IF NOT EXISTS extract_final (
     quality       INTEGER,
     naming_style  TEXT,
     seq_digits    INTEGER,
+    fps_rule_hit  TEXT,                       -- v0.4.102: 最新一次 fps 规则命中
+    fps_source    TEXT,                       -- v0.4.102: 'rule' / 'default'
     last_ts       TEXT NOT NULL,             -- 最后一次落库时间
     last_host     TEXT NOT NULL,             -- 最后一次是哪台机器 (hostname)
     last_machine_fp TEXT,                    -- 最后一次机器指纹
@@ -322,11 +326,14 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     """给已存在的老 db 补齐新增列, 幂等. SQLite 的 ALTER TABLE ADD COLUMN
     不支持 IF NOT EXISTS, 所以先 PRAGMA table_info 探测再加."""
     plan = {
-        "extract_stats":   [("machine_fp", "TEXT"), ("local_ip", "TEXT")],
+        "extract_stats":   [("machine_fp", "TEXT"), ("local_ip", "TEXT"),
+                            ("fps_rule_hit", "TEXT"), ("fps_source", "TEXT")],
         "dedupe_stats":    [("machine_fp", "TEXT"), ("local_ip", "TEXT")],
         "classify_stats":  [("machine_fp", "TEXT"), ("local_ip", "TEXT")],
         "extract_final":   [("last_machine_fp", "TEXT"),
-                            ("last_local_ip", "TEXT")],
+                            ("last_local_ip", "TEXT"),
+                            ("fps_rule_hit", "TEXT"),
+                            ("fps_source", "TEXT")],
         "dedupe_final":    [("last_machine_fp", "TEXT"),
                             ("last_local_ip", "TEXT")],
         "classify_final":  [("last_machine_fp", "TEXT"),
@@ -467,6 +474,8 @@ def record_extract(
     version: str | None = None,
     video_md5: str | None = None,
     file_size: int | None = None,
+    fps_rule_hit: str | None = None,
+    fps_source: str | None = None,
     db_path: str | os.PathLike | None = None,
 ) -> None:
     """记录一次抽帧结果.
@@ -490,8 +499,9 @@ def record_extract(
                 ts, host, machine_fp, local_ip, task_id, version,
                 src_root, dst_root, video_path, output_dir, rel_path,
                 frames, duration_sec, fps, quality, naming_style,
-                seq_digits, elapsed_sec, stage, exit_code, msg
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                seq_digits, elapsed_sec, stage, exit_code, msg,
+                fps_rule_hit, fps_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ts_now, host, m_fp, l_ip, task_id, version,
@@ -499,6 +509,7 @@ def record_extract(
                 int(frames or 0),
                 duration_sec, fps, quality, naming_style, seq_digits,
                 elapsed_sec, stage, int(exit_code or 0), msg,
+                fps_rule_hit, fps_source,
             ),
         )
         # UPSERT 到 extract_final; 无 md5 时不写 (无法唯一标识视频)
@@ -510,11 +521,13 @@ def record_extract(
                     video_md5, file_size, video_path, src_root, dst_root,
                     output_dir, rel_path, frames, duration_sec, fps,
                     quality, naming_style, seq_digits,
+                    fps_rule_hit, fps_source,
                     last_ts, last_host, last_machine_fp, last_local_ip,
                     last_task_id, last_version,
                     last_stage, last_elapsed_sec, last_msg,
                     first_ts, run_count
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?,
                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(video_md5) DO UPDATE SET
                     file_size    = excluded.file_size,
@@ -529,6 +542,8 @@ def record_extract(
                     quality      = excluded.quality,
                     naming_style = excluded.naming_style,
                     seq_digits   = excluded.seq_digits,
+                    fps_rule_hit = excluded.fps_rule_hit,
+                    fps_source   = excluded.fps_source,
                     last_ts      = excluded.last_ts,
                     last_host    = excluded.last_host,
                     last_machine_fp = excluded.last_machine_fp,
@@ -544,6 +559,7 @@ def record_extract(
                     video_md5, file_size, video_path, src_root, dst_root,
                     output_dir, rel_path, int(frames or 0), duration_sec, fps,
                     quality, naming_style, seq_digits,
+                    fps_rule_hit, fps_source,
                     ts_now, host, m_fp, l_ip, task_id, version,
                     stage, elapsed_sec, msg,
                     ts_now,

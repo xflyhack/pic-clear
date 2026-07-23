@@ -241,10 +241,12 @@ class StatsViewerApp:
         pw.add(bot, weight=3)
         cols = ("ts", "host", "machine_fp", "local_ip",
                 "video_path", "frames", "stage",
-                "run_count", "version", "elapsed_sec", "fps")
+                "run_count", "version", "elapsed_sec", "fps",
+                "fps_rule_hit", "fps_source")
         tv = _make_table(bot, cols, headers=(
             "时间", "机器", "指纹", "IP", "视频", "帧数", "结果",
             "重复次数", "版本", "耗时(s)", "fps",
+            "命中规则", "fps 来源",
         ), on_double_click=lambda row:
            self._show_row_detail("抽帧记录", row, "extract"))
         self._extract_tv = tv
@@ -741,6 +743,8 @@ class StatsViewerApp:
             ("version", lambda r: r.get("version") or ""),
             ("elapsed_sec", lambda r: f"{(r.get('elapsed_sec') or 0):.1f}"),
             ("fps", "fps"),
+            ("fps_rule_hit", lambda r: r.get("fps_rule_hit") or ""),
+            ("fps_source",   lambda r: r.get("fps_source") or ""),
         ])
         # v0.4.93: footer 汇总. '涉及视频数' 按 video_md5 去重, 无 md5
         # 兜底用 video_path (老数据/长路径 fingerprint 失败等场景).
@@ -1133,6 +1137,8 @@ _ROW_FIELD_LABELS: dict[str, str] = {
     "frames": "抽出帧数",
     "duration_sec": "视频时长(s)",
     "fps": "抽帧 fps",
+    "fps_rule_hit": "命中 fps 规则",
+    "fps_source": "fps 来源 (rule/default)",
     "quality": "JPEG 质量",
     "naming_style": "命名规则",
     "seq_digits": "序号位数",
