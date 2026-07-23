@@ -342,6 +342,11 @@ class ExtractGUI:
         nb.add(page, text="抽帧")
         self._build_main_tab(page)
 
+        # 配置 tab (v0.4.126: 从抽帧 tab 抽离, 避免一屏挤不下)
+        config_tab = ttk.Frame(nb)
+        nb.add(config_tab, text="配置")
+        self._build_config_tab(config_tab)
+
         # 日志 tab（独立出来，避免主页按钮/控件被挤没）
         log_tab = ttk.Frame(nb)
         nb.add(log_tab, text="日志")
@@ -353,6 +358,11 @@ class ExtractGUI:
         self._build_about_tab(about)
 
     def _build_main_tab(self, page: ttk.Frame):
+        """抽帧 tab: 每次任务级选择 (路径 + 子目录 + 进度).
+
+        v0.4.126: 行为参数 (fps/规则/并发/命名/托盘) 全部拆到 配置 tab,
+        本 tab 只留跑一次任务必看的核心.
+        """
         pad = {"padx": 6, "pady": 4}
 
         # 源目录
@@ -379,52 +389,82 @@ class ExtractGUI:
         ttk.Button(row, text="浏览...", command=self._browse_markers_root).pack(
             side="left", padx=4)
         ttk.Label(page,
-                  text="  抽帧锁/完成标记集中放到这里，按视频层级建镜像；"
-                       "多机共享盘时所有机器指向同一位置",
+                  text="  抽帧锁/完成标记集中放到这里；多机共享盘时所有机器指向同一位置",
                   foreground="#666").pack(anchor="w", padx=18)
 
-        # fps
+        # 子目录多选
         row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="子目录多选（勾选要处理的一级子目录）：").pack(side="left")
+        ttk.Button(row, text="扫描/刷新",
+                   command=self._rescan_subs).pack(side="right")
+        ttk.Button(row, text="全不选",
+                   command=lambda: self._toggle_all(False)).pack(
+            side="right", padx=4)
+        ttk.Button(row, text="全选",
+                   command=lambda: self._toggle_all(True)).pack(
+            side="right", padx=4)
+
+        self._sub_frame = ttk.LabelFrame(page, text="一级子目录")
+        self._sub_frame.pack(fill="both", expand=True, padx=6, pady=4)
+
+        # 进度（日志区已挪到独立 Tab）
+        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        ttk.Label(row, text="进度：").pack(side="left")
+        ttk.Label(row, textvariable=self._progress_var,
+                  foreground="#0066cc").pack(side="left")
+        ttk.Label(row, text="（详细日志见「日志」Tab；抽帧率/规则/命名等见「配置」Tab）",
+                  foreground="#888").pack(side="left", padx=8)
+
+    def _build_config_tab(self, page: ttk.Frame):
+        """配置 tab (v0.4.126 拆出): 抽帧行为参数, 分小节 LabelFrame 组织."""
+        pad = {"padx": 6, "pady": 4}
+
+        # ---------------- 抽帧参数 ----------------
+        sec_run = ttk.LabelFrame(page, text="抽帧参数")
+        sec_run.pack(fill="x", padx=8, pady=(6, 4))
+
+        # fps
+        row = ttk.Frame(sec_run); row.pack(fill="x", **pad)
         ttk.Label(row, text="抽帧率(fps)：", width=12).pack(side="left")
         ttk.Spinbox(row, from_=0.1, to=60.0, increment=0.5, width=8,
                     textvariable=self._fps_var).pack(side="left")
-        ttk.Label(row, text="  默认 1 = 每秒 1 帧 (未命中任何规则的视频会用它)",
+        ttk.Label(row, text="  默认 1 = 每秒 1 帧 (未命中任何规则时的兜底)",
                   foreground="#666").pack(side="left", padx=8)
 
-        # v0.4.102: 差异化 fps 规则表 (可选)
+        # 差异化 fps 规则 (整个 LabelFrame, 自带小标题)
         self._fps_rules_frame = FpsRulesFrame(
-            page, initial_state=self._fps_rules_state_initial,
+            sec_run, initial_state=self._fps_rules_state_initial,
         )
         self._fps_rules_frame.pack(fill="x", padx=6, pady=4)
 
-        # 抽帧并发数
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        # 并发数
+        row = ttk.Frame(sec_run); row.pack(fill="x", **pad)
         ttk.Label(row, text="并发数：", width=12).pack(side="left")
         ttk.Spinbox(row, from_=1, to=32, increment=1, width=8,
                     textvariable=self._extract_jobs_var).pack(side="left")
-        ttk.Label(row,
-                  text="  一台机器同时抽多少个视频，默认 1，多机共享盘并发也安全",
+        ttk.Label(row, text="  一台机器同时抽多少个视频，默认 1",
                   foreground="#666").pack(side="left", padx=8)
 
         # 视频锁 TTL
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        row = ttk.Frame(sec_run); row.pack(fill="x", **pad)
         ttk.Label(row, text="视频锁 TTL(s)：", width=12).pack(side="left")
         ttk.Spinbox(row, from_=30, to=86400, increment=60, width=10,
                     textvariable=self._lock_ttl_var).pack(side="left")
-        ttk.Label(row,
-                  text="  多机共享盘的抢占锁，默认 900（15 分钟）",
+        ttk.Label(row, text="  多机共享盘的抢占锁，默认 900（15 分钟）",
                   foreground="#666").pack(side="left", padx=8)
 
-        # 强制重切（默认不勾）：忽略已有 _done.marker，全部重抽
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        # 强制重切
+        row = ttk.Frame(sec_run); row.pack(fill="x", **pad)
         ttk.Checkbutton(row, text="强制重切（忽略已完成标记，全部重抽）",
                         variable=self._force_reextract_var).pack(side="left")
-        ttk.Label(row,
-                  text="  极端场景使用；会覆盖已完成的视频，默认不勾选",
+        ttk.Label(row, text="  极端场景使用；默认不勾选",
                   foreground="#a00").pack(side="left", padx=8)
 
-        # 命名规则：新版 / 老版 / 自定义 + 位数 + 预览
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        # ---------------- 命名规则 ----------------
+        sec_name = ttk.LabelFrame(page, text="命名规则")
+        sec_name.pack(fill="x", padx=8, pady=4)
+
+        row = ttk.Frame(sec_name); row.pack(fill="x", **pad)
         ttk.Label(row, text="命名规则：", width=12).pack(side="left")
         self._name_style_combo = ttk.Combobox(
             row, width=32, state="readonly",
@@ -456,7 +496,7 @@ class ExtractGUI:
                     textvariable=self._name_digits_var,
                     command=self._refresh_name_preview).pack(side="left")
 
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        row = ttk.Frame(sec_name); row.pack(fill="x", **pad)
         ttk.Label(row, text="模板：", width=12).pack(side="left")
         self._name_template_entry = ttk.Entry(
             row, textvariable=self._name_template_var, width=44)
@@ -469,38 +509,18 @@ class ExtractGUI:
         self._name_digits_var.trace_add(
             "write", lambda *_: self._refresh_name_preview())
 
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        row = ttk.Frame(sec_name); row.pack(fill="x", **pad)
         ttk.Label(row, text="预览：", width=12).pack(side="left")
         ttk.Label(row, textvariable=self._name_preview_var,
                   foreground="#0066cc").pack(side="left")
         # 初始状态同步一次
         self._on_name_style_changed(persist=False)
 
-        # 子目录多选
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
-        ttk.Label(row, text="子目录多选（勾选要处理的一级子目录）：").pack(side="left")
-        ttk.Button(row, text="扫描/刷新",
-                   command=self._rescan_subs).pack(side="right")
-        ttk.Button(row, text="全不选",
-                   command=lambda: self._toggle_all(False)).pack(
-            side="right", padx=4)
-        ttk.Button(row, text="全选",
-                   command=lambda: self._toggle_all(True)).pack(
-            side="right", padx=4)
+        # ---------------- 托盘 & 快捷键 ----------------
+        sec_tray = ttk.LabelFrame(page, text="托盘 & 快捷键")
+        sec_tray.pack(fill="x", padx=8, pady=4)
 
-        self._sub_frame = ttk.LabelFrame(page, text="一级子目录")
-        self._sub_frame.pack(fill="both", expand=True, padx=6, pady=4)
-
-        # 进度（日志区已挪到独立 Tab）
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
-        ttk.Label(row, text="进度：").pack(side="left")
-        ttk.Label(row, textvariable=self._progress_var,
-                  foreground="#0066cc").pack(side="left")
-        ttk.Label(row, text="（详细日志见「日志」Tab）",
-                  foreground="#888").pack(side="left", padx=8)
-
-        # 托盘 / 快捷键
-        row = ttk.Frame(page); row.pack(fill="x", **pad)
+        row = ttk.Frame(sec_tray); row.pack(fill="x", **pad)
         ttk.Checkbutton(row, text="关闭时最小化到托盘",
                         variable=self._minimize_to_tray_var).pack(side="left")
         ttk.Label(row, text="   快捷键：").pack(side="left", padx=(12, 2))
