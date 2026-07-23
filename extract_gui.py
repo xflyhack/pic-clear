@@ -43,7 +43,8 @@ except Exception as e:
 import pipe_gui as _pg  # noqa: E402
 import pipeline  # noqa: E402
 from gui_log_util import GuiLogController  # noqa: E402
-from tray_util import TrayController, TOOLTIP_EXTRACT  # noqa: E402
+from tray_util import TrayController
+from extract_gui_fps_rules import FpsRulesFrame, TOOLTIP_EXTRACT  # noqa: E402
 
 # stats_db 可选; 主流程不能因为落库失败中断
 try:
@@ -206,6 +207,13 @@ class ExtractGUI:
         self._src_var = tk.StringVar(value=self._cfg.get("src", ""))
         self._out_var = tk.StringVar(value=self._cfg.get("out_root", ""))
         self._fps_var = tk.DoubleVar(value=float(self._cfg.get("fps", 1.0)))
+        # v0.4.102: 差异化 fps 规则. 初始 state 从 cfg 读出, UI 组件在 _build_basic_tab 里创建
+        self._fps_rules_state_initial = self._cfg.get("fps_rules") or {
+            "enabled": bool(self._cfg.get("fps_rules_enabled", False)),
+            "camera_regex": r"camera(\d+)",
+            "rules": [],
+        }
+        self._fps_rules_frame: FpsRulesFrame | None = None
         self._extract_jobs_var = tk.IntVar(value=int(self._cfg.get("extract_jobs", 1)))
         self._lock_ttl_var = tk.IntVar(value=int(self._cfg.get("lock_ttl", 900)))
         self._markers_root_var = tk.StringVar(value=self._cfg.get("markers_root", ""))
@@ -380,8 +388,14 @@ class ExtractGUI:
         ttk.Label(row, text="抽帧率(fps)：", width=12).pack(side="left")
         ttk.Spinbox(row, from_=0.1, to=60.0, increment=0.5, width=8,
                     textvariable=self._fps_var).pack(side="left")
-        ttk.Label(row, text="  默认 1 = 每秒 1 帧",
+        ttk.Label(row, text="  默认 1 = 每秒 1 帧 (未命中任何规则的视频会用它)",
                   foreground="#666").pack(side="left", padx=8)
+
+        # v0.4.102: 差异化 fps 规则表 (可选)
+        self._fps_rules_frame = FpsRulesFrame(
+            page, initial_state=self._fps_rules_state_initial,
+        )
+        self._fps_rules_frame.pack(fill="x", padx=6, pady=4)
 
         # 抽帧并发数
         row = ttk.Frame(page); row.pack(fill="x", **pad)
@@ -833,6 +847,24 @@ class ExtractGUI:
                        "--jobs", str(int(self._extract_jobs_var.get())),
                        "--lock-ttl", str(int(self._lock_ttl_var.get())),
                        "--markers-root", str(sub_mr)]
+                # v0.4.102: 差异化 fps 规则. 勾选启用 + 至少 1 条 rule 才写文件传给 exe.
+                if (self._fps_rules_frame is not None
+                        and self._fps_rules_frame.get_enabled()
+                        and self._fps_rules_frame.has_any_active_rule()):
+                    try:
+                        rules_path = sub_mr / "_fps_rules.json"
+                        wrote = self._fps_rules_frame.dump_cli_json(
+                            str(rules_path),
+                            default_fps=float(self._fps_var.get()),
+                        )
+                        if wrote:
+                            cmd += ["--fps-rules", str(rules_path)]
+                            self._log(f"[fps 规则] 启用, 已写入 {rules_path}")
+                        else:
+                            self._log("[fps 规则] 启用但无 active rule, 走默认 fps")
+                    except Exception as _e:
+                        self._log(f"[fps 规则] 写入失败, 走默认 fps: "
+                                  f"{type(_e).__name__}: {_e}")
                 # 命名规则参数（GUI 全局配置，对所有子目录任务生效）
                 name_style, name_template, name_digits = self._current_name_params()
                 cmd += ["--name-style", name_style,
@@ -1022,6 +1054,10 @@ class ExtractGUI:
             "name_template": self._name_template_var.get(),
             "name_digits": int(self._name_digits_var.get() or 4),
         }
+        # v0.4.102: fps 规则
+        if self._fps_rules_frame is not None:
+            cfg["fps_rules_enabled"] = self._fps_rules_frame.get_enabled()
+            cfg["fps_rules"] = self._fps_rules_frame.get_state()
         try:
             geo = self.root.winfo_geometry()
             if geo:

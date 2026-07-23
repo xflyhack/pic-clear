@@ -55,6 +55,8 @@ jobs:
           copy _version.py build_extract_gui\
           copy gui_log_util.py     build_extract_gui\
           copy tray_util.py         build_extract_gui\
+          copy fps_rules.py         build_extract_gui\
+          copy extract_gui_fps_rules.py build_extract_gui\
         shell: cmd
 
       - name: Obfuscate with PyArmor
@@ -66,12 +68,16 @@ jobs:
           pyarmor gen --output dist_obf extract_gui.py
           pyarmor gen --output dist_obf licensing.py
           pyarmor gen --output dist_obf otp_utils.py
+          pyarmor gen --output dist_obf fps_rules.py
+          pyarmor gen --output dist_obf extract_gui_fps_rules.py
           dir dist_obf
           copy /Y dist_obf\pipeline.py pipeline.py
           copy /Y dist_obf\pipe_gui.py pipe_gui.py
           copy /Y dist_obf\extract_gui.py extract_gui.py
           copy /Y dist_obf\licensing.py licensing.py
           copy /Y dist_obf\otp_utils.py otp_utils.py
+          copy /Y dist_obf\fps_rules.py fps_rules.py
+          copy /Y dist_obf\extract_gui_fps_rules.py extract_gui_fps_rules.py
           cd ..
         shell: cmd
 
@@ -90,6 +96,8 @@ jobs:
             --hidden-import winpath_util ^
             --hidden-import env_probe ^
             --hidden-import child_exe_ver ^
+            --hidden-import fps_rules ^
+            --hidden-import extract_gui_fps_rules ^
             --hidden-import json ^
             --hidden-import base64 ^
             --hidden-import hashlib ^
