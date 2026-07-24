@@ -43,8 +43,21 @@ jobs:
           TAG: ${{ steps.tag.outputs.value }}
         run: |
           set -e
-          # 所有以 build- 开头的 workflow 文件名 (排除本 workflow 自己 + release notes)
+          # 所有以 build- 开头的 workflow 文件名 (排除本 workflow 自己 + release notes).
+          # v0.4.141: 显式排除已改成手动触发的 workflow (pipe-gui / pipeline /
+          # summary-stats-gui), 它们不会被 tag 触发, 监控它们永远等不到.
+          MANUAL_ONLY_WFS='build-pipe-gui-exe.yml build-pipeline-exe.yml build-summary-stats-gui-exe.yml'
           BUILD_WFS=$(gh workflow list --repo "${{ github.repository }}" --all --json path --jq '.[].path | split("/") | .[-1]' | grep -E '^build-.*\.yml$' || true)
+          # 从清单里剔除 MANUAL_ONLY_WFS
+          FILTERED=""
+          for WF in $BUILD_WFS; do
+            SKIP=0
+            for M in $MANUAL_ONLY_WFS; do
+              if [ "$WF" = "$M" ]; then SKIP=1; break; fi
+            done
+            if [ "$SKIP" -eq 0 ]; then FILTERED="$FILTERED $WF"; fi
+          done
+          BUILD_WFS="$FILTERED"
           echo "监控以下 build workflow:"
           echo "$BUILD_WFS"
           echo "---"
@@ -59,11 +72,19 @@ jobs:
             fi
             PENDING=0
             for WF in $BUILD_WFS; do
-              # 找该 workflow 在本 tag 下最近一次 run 的状态
-              STATE=$(gh run list --repo "${{ github.repository }}"                 --workflow "$WF" --branch "$TAG" --limit 1                 --json status,conclusion --jq '.[0] // {} | .status + "/" + (.conclusion//"null")' 2>/dev/null || echo "not_found/null")
+              # 找该 workflow 在本 tag 下最近一次 run 的状态.
+              # v0.4.141: 原 jq 表达式 (.status + "/" + (.conclusion//"null")) 在
+              # workflow 没被 tag 触发时, .status 是 null, jq 里 null+string = null,
+              # 返回空字符串, case 分支永远走 * → PENDING 死等. 现在改成默认值 "empty"
+              # 显式标注 "没找到 run", 归入"算完成"分支.
+              STATE=$(gh run list --repo "${{ github.repository }}" \
+                --workflow "$WF" --branch "$TAG" --limit 1 \
+                --json status,conclusion \
+                --jq '.[0] // {} | ((.status // "empty") + "/" + (.conclusion // "null"))' \
+                2>/dev/null || echo "error/null")
+              # empty/null = 该 workflow 没被本 tag 触发过 (被 paths 过滤 / 已手动化 / 尚未启动)
               case "$STATE" in
-                completed/*|not_found/null)
-                  # not_found: 该 workflow 没被这个 tag 触发 (可能被 paths 过滤了), 也算完成
+                completed/*|empty/null|error/null)
                   ;;
                 *)
                   PENDING=$((PENDING+1))
