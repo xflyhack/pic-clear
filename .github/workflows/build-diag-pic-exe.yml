@@ -82,7 +82,7 @@ jobs:
       - name: Build single-file exe (windowed)
         run: |
           cd build_diag_pic
-          pyinstaller --onefile --windowed --name diag_pic ^
+          pyinstaller --onefile --windowed --name diagPicCheck ^
             --icon "..\icon.ico" ^
             --add-data "..\icon.ico;." ^
             --add-binary "..\ffmpeg.exe;." ^
@@ -113,13 +113,13 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: diag-pic-windows-exe
-          path: build_diag_pic/dist/diag_pic.exe
+          name: diag-pic-check-windows-exe
+          path: build_diag_pic/dist/diagPicCheck.exe
           if-no-files-found: error
 
       - name: Attach exe to GitHub Release (only on tag push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build_diag_pic/dist/diag_pic.exe
+          files: build_diag_pic/dist/diagPicCheck.exe
           fail_on_unmatched_files: true

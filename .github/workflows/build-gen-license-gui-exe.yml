@@ -58,7 +58,7 @@ jobs:
       - name: Build single-file exe (windowed，无控制台黑窗)
         run: |
           cd build_gen_license_gui
-          pyinstaller --onefile --windowed --name gen_license_gui ^
+          pyinstaller --onefile --windowed --name genLicGui ^
             --icon "..\icon.ico" ^
             --add-data "..\icon.ico;." ^
             --add-data "..\icon.png;." ^
@@ -86,13 +86,13 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gen-license-gui-windows-exe
-          path: build_gen_license_gui/dist/gen_license_gui.exe
+          name: gen-lic-gui-windows-exe
+          path: build_gen_license_gui/dist/genLicGui.exe
           if-no-files-found: error
 
       - name: Attach exe to GitHub Release (only on tag push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: build_gen_license_gui/dist/gen_license_gui.exe
+          files: build_gen_license_gui/dist/genLicGui.exe
           fail_on_unmatched_files: true

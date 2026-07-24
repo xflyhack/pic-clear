@@ -77,15 +77,15 @@ jobs:
             | `sqDedupeGui.exe` | 数旗_图片去重工具 **GUI**：单目录/一级/递归+强制重跑 | ~20-30 MB |
             | `sqClassifyGui.exe` | 数旗_图片分类工具 **GUI**：二次分类 | ~70 MB |
             | `sqStatsViewerGui.exe` | 数旗_数据分析工具 **GUI**：每机每天统计汇总，磁盘/目录钻取 + 导 CSV | ~40 MB |
-            | `diag_pic.exe` | 长路径诊断工具：6 种打开方式一次摸清，堡垒机排障必备 | ~120 MB |
-            | `gen_license_gui.exe` | 图形版 license 签发工具（内置私钥），⚠ 作者用 | ~15 MB |
+            | `diagPicCheck.exe` | 长路径诊断工具：6 种打开方式一次摸清，堡垒机排障必备 | ~120 MB |
+            | `genLicGui.exe` | 图形版 license 签发工具（内置私钥），⚠ 作者用 | ~15 MB |
 
             ---
 
             ### 使用说明
 
             - 首次使用需要 license：先跑一次 `sqDedupe.exe --fingerprint` 拿指纹，
-              找作者用 `gen_license_gui.exe` 生成 `license.lic`，放到 exe 同目录
+              找作者用 `genLicGui.exe` 生成 `license.lic`，放到 exe 同目录
             - 所有 `sq*` exe 共用同一份 `license.lic`
             - 详细说明看仓库 [`README.md`](../../blob/main/README.md) 和 [`docs/`](../../tree/main/docs)
 

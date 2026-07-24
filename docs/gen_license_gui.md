@@ -1,4 +1,4 @@
-# gen_license_gui.exe 使用说明
+# genLicGui.exe 使用说明
 
 license.lic 签发工具的**图形版**，双击运行即可。
 
@@ -13,11 +13,11 @@ license.lic 签发工具的**图形版**，双击运行即可。
 
 1. GitHub 仓库 `Actions` 页面找 `Build Gen License GUI EXE` workflow
 2. 最新一次成功构建 → `Artifacts` 下载 `gen-license-gui-windows-exe`
-3. 解压得到 `gen_license_gui.exe`
+3. 解压得到 `genLicGui.exe`
 
 ## 使用步骤
 
-1. **双击 `gen_license_gui.exe`**
+1. **双击 `genLicGui.exe`**
 2. 顶部会提示"内置私钥: xxx"（绿色文字），表示 exe 里私钥已就绪
 3. **填指纹**：`XXXX-XXXX-XXXX-XXXX`（会自动大写）
 4. **发放给**：写用户名或工号（会写进 license，用于追溯）

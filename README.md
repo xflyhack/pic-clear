@@ -23,7 +23,7 @@
 - 数旗品牌 GUI（4）：`sqFrameGrabGui.exe` / `sqDedupeGui.exe` / `sqClassifyGui.exe` / `sqStatsViewerGui.exe`
 - CLI 内核（2）：`sqFrameGrab.exe` / `sqDedupe.exe`
 - 老编排层（2，慢慢不用）：`pipeline.exe` / `pipe_gui.exe`
-- 签发工具（1，作者用）：`gen_license_gui.exe`
+- 签发工具（1，作者用）：`genLicGui.exe`
 
 点每个 exe 后面的 ⬇ 图标就能下载。
 
@@ -74,7 +74,7 @@
 
 | exe | 作用 | 体积 |
 |---|---|---|
-| **`gen_license_gui.exe`** | 图形版 license 签发工具，双击运行，内置签发私钥。⚠ 仅限作者/内部使用，不要外发。 | ~15-25 MB |
+| **`genLicGui.exe`** | 图形版 license 签发工具，双击运行，内置签发私钥。⚠ 仅限作者/内部使用，不要外发。 | ~15-25 MB |
 
 签发工具本身**不需要 license**。命令行版是 `gen_license.py`（`python gen_license.py <指纹>`）。
 
@@ -147,7 +147,7 @@ Z:\pic-clear-markers\<src_name>\<sub>\<video_stem>\
 - **想极简（老派）→ `scripts_bat/*.bat`**：把 exe 放到 `C:\Windows\System32`，双击 bat 一键跑。详见 [`scripts_bat/README.md`](scripts_bat/README.md)。
 - **想单独抽帧 / 单独去重（命令行）**：直接调 `sqFrameGrab.exe` / `sqDedupe.exe`，见下面的分节说明。
 - **老编排层（慢慢不用，保留兼容）**：`pipeline.exe`（CLI，见 [`docs/pipeline_exe.md`](docs/pipeline_exe.md)）/ `pipe_gui.exe`（GUI，见 [`docs/pipe_gui_exe.md`](docs/pipe_gui_exe.md)），一键跑抽帧 + 去重。新用户请直接用上面 4 个数旗 GUI。
-- **作者要签发 license.lic**：命令行版 `python gen_license.py`（见"作者签发流程"章节），或图形版 `gen_license_gui.exe`（见 [`docs/gen_license_gui.md`](docs/gen_license_gui.md)）。
+- **作者要签发 license.lic**：命令行版 `python gen_license.py`（见"作者签发流程"章节），或图形版 `genLicGui.exe`（见 [`docs/gen_license_gui.md`](docs/gen_license_gui.md)）。
 
 ## 场景
 
@@ -307,7 +307,7 @@ sqDedupe.exe --fingerprint
 
 **已签发指纹**在 `AGENTS.md` 里维护。
 
-**图形版签发工具（`gen_license_gui.exe`）**：不想敲命令行、想直接双击？CI 会自动构建 Windows 版：
+**图形版签发工具（`genLicGui.exe`）**：不想敲命令行、想直接双击？CI 会自动构建 Windows 版：
 
 - artifact 名：`gen-license-gui-windows-exe`
 - 双击运行，表单里填指纹 / 发放对象 / 到期日 / 备注 / 输出路径，点『生成 license.lic』

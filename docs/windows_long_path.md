@@ -233,7 +233,7 @@ if rc == 0 and done_marker is not None:
 
 ---
 
-## §6 诊断利器：`diag_pic.exe`（v0.4.33 新增）
+## §6 诊断利器：`diagPicCheck.exe`（v0.4.33 新增）
 
 **长路径问题很多年前就见过一次，然后忘了**。为了不再靠"改代码 → 出 tag → 堡垒机验证 → 反复"这个 O(30min) 循环，做了独立诊断 exe：
 
@@ -243,7 +243,7 @@ if rc == 0 and done_marker is not None:
 - 附加：`os.stat` / `WNetGetConnectionW` / `net use` / 文件头 hex dump
 - 全部塞进大文本框，一键复制
 
-**使用姿势**：以后新工具在堡垒机上报"某种路径打不开"，先让用户跑 `diag_pic.exe` 选一张问题图片，贴报告过来。**5 分钟能定位到底是 6 种打开方式的哪一种能开、哪种不能开**。
+**使用姿势**：以后新工具在堡垒机上报"某种路径打不开"，先让用户跑 `diagPicCheck.exe` 选一张问题图片，贴报告过来。**5 分钟能定位到底是 6 种打开方式的哪一种能开、哪种不能开**。
 
 **位置**：仓库根目录 `diag_pic.py`，CI workflow `.github/workflows/build-diag-pic-exe.yml`。
 
@@ -276,20 +276,20 @@ if rc == 0 and done_marker is not None:
 | v0.4.28 | PIL Image.open 加 `\\?\` helper | 修本地 D: 长路径, 堡垒机 Z: 还挂 |
 | v0.4.31 | 加 `WNetGetConnectionW` 展开 UNC | ❌ 弯路, `\\?\UNC\` 反而打不开 |
 | v0.4.32 | 撤 UNC 展开 + BytesIO 兜底 + PIL 诊断 | 还挂, 但日志更详细 |
-| v0.4.33 | 新增 `diag_pic.exe` + 失败日志分类 | 诊断利器就位, 日志能看到"stat 挂了" |
+| v0.4.33 | 新增 `diagPicCheck.exe` + 失败日志分类 | 诊断利器就位, 日志能看到"stat 挂了" |
 | v0.4.34 | `_normalize_windows_path` 修 `//?/` 混斜杠 | diag_pic 能开图, dedupe 还挂 stat |
 | **v0.4.35** | `_safe_stat/unlink/exists/is_file/move` + marker 写失败打日志 | ✅ **通了** |
 | **v0.4.61** | 抽公共模块 `winpath_util.py` + `extract_frames.py` 接入 `safe_mkdir/glob/read_text/write_text/os_open` | ✅ **抽帧长路径通了** |
 | **v0.4.62** | ffmpeg image2 muxer + `\\?\` 输出 pattern 的新坑 → 走本地 temp 中转 + 完整 stderr 日志 | ✅ **抽帧真正通了** |
 | v0.4.63 | *(不是长路径坑, 顺带记一下)* ffmpeg 7.x mjpeg encoder 拒 full-range YUV → 加 `-strict unofficial` + `-pix_fmt yuvj420p`; 主日志摘要改成 `_pick_key_error_line` | ✅ DMS/OMS 视频通了 |
 | **v0.4.65** | `safe_is_file` 加 `_impl` 版返回诊断; extract_frames marker miss 打 `[MARKER_MISS]` 完整段; GUI `_count_done_markers` 走 `\\?\` 长路径 rglob | ✅ **诊断 SMB `\\?\UNC\` marker 撒谎; GUI 进度数稳定** |
-| v0.4.66 | `diag_pic.exe` 加 Marker 诊断 tab (全根 rglob 对比 + safe_is_file 四分支命中率) | 🔍 诊断工具 |
+| v0.4.66 | `diagPicCheck.exe` 加 Marker 诊断 tab (全根 rglob 对比 + safe_is_file 四分支命中率) | 🔍 诊断工具 |
 | v0.4.67 | 修 CI: `build-extract-gui-exe.yml` 补 `winpath_util` copy + hidden-import | 🐛 打包漏 |
-| v0.4.68 | `diag_pic.exe` Marker Tab 加**单条 marker 深度诊断** (8 种查询) | 🔍 抓到 268 字符 marker 单文件 stat 撒谎 |
+| v0.4.68 | `diagPicCheck.exe` Marker Tab 加**单条 marker 深度诊断** (8 种查询) | 🔍 抓到 268 字符 marker 单文件 stat 撒谎 |
 | **v0.4.69** | `safe_is_file` 加**父目录 listdir 兜底**; `[MARKER_MISS]` 日志加 `parent_listdir` 一行 | ✅ **深路径 marker skip 彻底稳** |
 | **v0.4.64** | `safe_mkdir` 加建后验证 + 新增 `safe_isdir` + `[MKDIR_QUIRK]` 日志; `extract_frames` 搬迁前再 mkdir 一次 safety net | ✅ **修 SMB `\\?\UNC\` makedirs 撒谎导致 [MOVE_FAIL] 138/138 全挂** |
 
-**关键教训**：改一个 helper 影响面看似小，实际打包成 exe 分发要 20 分钟 CI + 5 分钟堡垒机验证。**能提前用 `diag_pic.exe` 摊事实的场景，永远不要靠 tag 迭代猜方向**。
+**关键教训**：改一个 helper 影响面看似小，实际打包成 exe 分发要 20 分钟 CI + 5 分钟堡垒机验证。**能提前用 `diagPicCheck.exe` 摊事实的场景，永远不要靠 tag 迭代猜方向**。
 
 ---
 
@@ -582,7 +582,7 @@ findstr /c:"[MARKER_MISS]" C:\path\to\extract_gui_*.log > marker_miss.txt
 
 用户资源管理器**亲眼看到 marker 存在**，但 Python 三条查询全说不在。
 
-### 用 `diag_pic.exe` 单条深度诊断抓到的关键实证 (v0.4.68)
+### 用 `diagPicCheck.exe` 单条深度诊断抓到的关键实证 (v0.4.68)
 
 对 `\\filestor01...\camera09` 这条 marker 完整路径（268 字符）跑单条深度诊断：
 
@@ -657,7 +657,7 @@ findstr /c:"[MARKER_MISS]" C:\path\to\extract_gui_*.log > marker_miss.txt
 
 ### 顺手看 diag_pic 的 §6 章节
 
-**任何 marker / 长路径可疑现象，先跑一次 `diag_pic.exe` 单条深度诊断**，10 秒能定位到
+**任何 marker / 长路径可疑现象，先跑一次 `diagPicCheck.exe` 单条深度诊断**，10 秒能定位到
 底是哪一层 API 挂了。比出 exe 迭代猜快 O(10min)。这条从 v0.4.33 就写在文档里，但
 v0.4.65-v0.4.68 我自己还是走了迭代猜的弯路，**贴出来自省**。
 
