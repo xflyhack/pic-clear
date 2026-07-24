@@ -8,7 +8,7 @@
   TAG                  版本号, 例如 v0.4.119
   FILES_TXT            一个纯文本文件, 每行: "filename  size_bytes  sha256"
                        (workflow 里跑 sha256sum + stat 生成)
-  DOWNLOAD_BASE        下载中心根 URL, 例如 http://download.ixweb.cc
+  DOWNLOAD_BASE        下载中心根 URL, 例如 http://download.shuqiit.com
   GITHUB_REPO          "USER/REPO", 用来拼 GitHub Release 链接
 
 可选 env:

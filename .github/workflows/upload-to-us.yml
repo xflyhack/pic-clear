@@ -185,6 +185,6 @@ jobs:
           FEISHU_SECRET: ${{ secrets.FEISHU_BOT_SECRET }}
           TAG: ${{ steps.tag.outputs.value }}
           FILES_TXT: /tmp/files.txt
-          DOWNLOAD_BASE: http://download.ixweb.cc
+          DOWNLOAD_BASE: http://download.shuqiit.com
           GITHUB_REPO: ${{ github.repository }}
         run: python3 scripts/send_feishu.py
