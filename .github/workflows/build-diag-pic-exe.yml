@@ -52,18 +52,15 @@ jobs:
           python -c "from ultralytics import YOLO; YOLO('yolov8n.pt').export(format='onnx', imgsz=640, opset=12, simplify=True, dynamic=False)"
           dir yolov8n.onnx
 
-      - name: Download ffmpeg + ffprobe (static build for Windows)
+      - name: Download ffprobe only (static build for Windows)
         # v0.4.100: diag_pic '视频时长诊断' tab 需要 ffprobe.exe.
-        # 直接从 BtbN 静态包里挑出来, 用 --add-binary 打进 exe,
-        # 用户在堡垒机上开 diag_pic 就有内置 ffprobe, 不依赖机器 PATH.
+        # v0.4.141: 只留 ffprobe.exe, 去掉 ffmpeg.exe (~80MB, diagPicCheck 用不上,
+        # 只有 sqFrameGrab 真正做抽帧才需要). 单这一项 exe 就能从 155MB 缩到 ~75MB.
         run: |
           Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_dl
-          $ff = Get-ChildItem -Recurse ffmpeg_dl -Filter ffmpeg.exe  | Select-Object -First 1
           $fp = Get-ChildItem -Recurse ffmpeg_dl -Filter ffprobe.exe | Select-Object -First 1
-          Copy-Item $ff.FullName -Destination ffmpeg.exe
           Copy-Item $fp.FullName -Destination ffprobe.exe
-          Get-Item ffmpeg.exe  | Select-Object Name, Length
           Get-Item ffprobe.exe | Select-Object Name, Length
         shell: pwsh
 
@@ -85,7 +82,6 @@ jobs:
           pyinstaller --onefile --windowed --name diagPicCheck ^
             --icon "..\icon.ico" ^
             --add-data "..\icon.ico;." ^
-            --add-binary "..\ffmpeg.exe;." ^
             --add-binary "..\ffprobe.exe;." ^
             --add-data "..\yolov8n.onnx;." ^
             --hidden-import _version ^
