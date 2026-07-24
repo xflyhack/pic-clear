@@ -488,6 +488,13 @@ def main() -> int:
             root = tk.Tk()
     else:
         root = tk.Tk()
+    # v0.4.131: 启动时先藏起来, 等 UI 构造 + 尺寸就位再显示,
+    # 避免用户看到 "先弹小空窗口 -> 再变成完整窗口" 的两段跳变
+    # (tb.Window / tk.Tk 一创建就会立刻显示一个默认 200x200 空窗).
+    try:
+        root.withdraw()
+    except Exception:
+        pass
     try:
         if os.name == "nt":
             try:
@@ -496,6 +503,12 @@ def main() -> int:
             except Exception:
                 pass
         GenLicenseGUI(root)
+        # UI 已 pack 完, 尺寸已 geometry 设过, 现在显示成品
+        try:
+            root.update_idletasks()
+            root.deiconify()
+        except Exception:
+            pass
         root.mainloop()
     except Exception as e:
         try:
