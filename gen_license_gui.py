@@ -41,11 +41,18 @@ except Exception as e:
 
 # --- ttkbootstrap (可选, 装了就用, 没装 fallback 到原生 ttk) ---
 # v0.4.127: 引入现代化主题. 保持"没装也能跑"以便本地 dev 无需强装.
+# v0.4.129 修复: 光 import ttkbootstrap 不够, 必须把 ttk 别名重定向到 ttkbootstrap,
+# 否则 ttk.LabelFrame(...) 依然走原生 tkinter.ttk, 不认识 bootstyle=... 会报
+# TclError: unknown option "-bootstyle". ttkbootstrap 顶层 re-export 了
+# LabelFrame / Button / Frame / Entry / Label / Radiobutton / Checkbutton /
+# Combobox / Progressbar / Notebook / Scrollbar / Style / Treeview 等类,
+# 都支持 bootstyle 参数.
 try:
     import ttkbootstrap as tb  # type: ignore
     from ttkbootstrap.constants import (  # type: ignore
         PRIMARY, SUCCESS, INFO, WARNING, DANGER, SECONDARY, LIGHT, DARK, OUTLINE,
     )
+    ttk = tb  # type: ignore  # 关键: 后续 ttk.XXX 都走 ttkbootstrap 的类
     TTKB_AVAILABLE = True
 except Exception:
     tb = None  # type: ignore
