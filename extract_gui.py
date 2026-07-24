@@ -404,8 +404,59 @@ class ExtractGUI:
                    command=lambda: self._toggle_all(True)).pack(
             side="right", padx=4)
 
-        self._sub_frame = ttk.LabelFrame(page, text="一级子目录")
-        self._sub_frame.pack(fill="both", expand=True, padx=6, pady=4)
+        # v0.4.128: 子目录列表加滚动条, 默认显示 ~5 行, 多了滚轮/滚动条查看.
+        # 结构: 外层 LabelFrame -> Canvas + Scrollbar -> inner Frame (真正装 Checkbutton).
+        # self._sub_frame 仍指向 inner Frame, 其他 _rescan_subs/_populate 代码零改动.
+        self._sub_frame_outer = ttk.LabelFrame(page, text="一级子目录")
+        self._sub_frame_outer.pack(fill="x", padx=6, pady=4)
+        # ~5 行 Checkbutton 的高度 (每行约 26px + 上下 padding)
+        self._sub_canvas = tk.Canvas(
+            self._sub_frame_outer, height=140, highlightthickness=0,
+            borderwidth=0,
+        )
+        self._sub_scroll = ttk.Scrollbar(
+            self._sub_frame_outer, orient="vertical",
+            command=self._sub_canvas.yview,
+        )
+        self._sub_canvas.configure(yscrollcommand=self._sub_scroll.set)
+        self._sub_scroll.pack(side="right", fill="y")
+        self._sub_canvas.pack(side="left", fill="both", expand=True)
+        self._sub_frame = ttk.Frame(self._sub_canvas)
+        self._sub_frame_win = self._sub_canvas.create_window(
+            (0, 0), window=self._sub_frame, anchor="nw",
+        )
+        # inner 尺寸变了 -> 更新 scrollregion; canvas 宽度变了 -> 让 inner 跟随
+        self._sub_frame.bind(
+            "<Configure>",
+            lambda _e: self._sub_canvas.configure(
+                scrollregion=self._sub_canvas.bbox("all")),
+        )
+        self._sub_canvas.bind(
+            "<Configure>",
+            lambda e: self._sub_canvas.itemconfigure(
+                self._sub_frame_win, width=e.width),
+        )
+        # 鼠标进入子目录区域时启用滚轮 (避免全局绑定干扰其他滚动区)
+        def _on_mousewheel(event):
+            # Windows / Mac 上 event.delta 方向相反, 统一成 -1/+1 步
+            if event.delta:
+                step = -1 if event.delta > 0 else 1
+            else:
+                step = 0
+            self._sub_canvas.yview_scroll(step, "units")
+        def _bind_wheel(_e):
+            self._sub_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            # Linux (X11) 用 Button-4/5
+            self._sub_canvas.bind_all(
+                "<Button-4>", lambda _e: self._sub_canvas.yview_scroll(-1, "units"))
+            self._sub_canvas.bind_all(
+                "<Button-5>", lambda _e: self._sub_canvas.yview_scroll(1, "units"))
+        def _unbind_wheel(_e):
+            self._sub_canvas.unbind_all("<MouseWheel>")
+            self._sub_canvas.unbind_all("<Button-4>")
+            self._sub_canvas.unbind_all("<Button-5>")
+        self._sub_frame_outer.bind("<Enter>", _bind_wheel)
+        self._sub_frame_outer.bind("<Leave>", _unbind_wheel)
 
         # 进度（日志区已挪到独立 Tab）
         row = ttk.Frame(page); row.pack(fill="x", **pad)
@@ -634,6 +685,11 @@ class ExtractGUI:
         for w in self._sub_frame.winfo_children():
             w.destroy()
         self._sub_vars.clear()
+        # v0.4.128: 重扫时把可滚动区滚回顶部, 并强制刷 scrollregion
+        try:
+            self._sub_canvas.yview_moveto(0.0)
+        except Exception:
+            pass
         src = self._src_var.get().strip()
         if not src or not Path(src).is_dir():
             ttk.Label(self._sub_frame, text="  （请先选择有效的源目录）",
