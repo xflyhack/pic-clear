@@ -22,6 +22,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, ttk
 
+# --- ttkbootstrap (可选, 装了就用, 没装 fallback 到原生 ttk) ---
+# v0.4.144: 引入现代化主题, 跟 genLicGui / sqFrameGrabGui / sqDedupeGui 一致.
+# 只用主题引擎, 不用 bootstyle= 参数 (避免 1.x monkey-patch 兜底不稳).
+try:
+    import ttkbootstrap as tb  # type: ignore
+    TTKB_AVAILABLE = True
+except Exception:
+    tb = None  # type: ignore
+    TTKB_AVAILABLE = False
+
 try:
     import stats_db as _stats_db  # type: ignore
 except Exception as e:  # pragma: no cover
@@ -1429,7 +1439,19 @@ def _map_final_rows(rows: list[dict], kind: str) -> list[dict]:
 
 
 def main() -> int:
-    root = tk.Tk()
+    # v0.4.144: 有 ttkbootstrap 时用 Window(themename=...) 拿现代化主题.
+    if TTKB_AVAILABLE:
+        try:
+            root = tb.Window(themename="cosmo")  # type: ignore[attr-defined]
+        except Exception:
+            root = tk.Tk()
+    else:
+        root = tk.Tk()
+    # 先隐藏, 等 UI 构造完再显示, 避免小窗口闪现变大
+    try:
+        root.withdraw()
+    except Exception:
+        pass
     app = StatsViewerApp(root)
 
     # v0.4.94: range 变更走 App 方法 (要拦截 "自定义…" 弹对话框)
@@ -1439,6 +1461,12 @@ def main() -> int:
     # v0.4.89: 切换 "最终/流水" 视图直接触发重新查表
     app.view_mode_var.trace_add("write", lambda *_: app.refresh_async())
 
+    # UI 已构造完, 显示成品
+    try:
+        root.update_idletasks()
+        root.deiconify()
+    except Exception:
+        pass
     root.mainloop()
     return 0
 

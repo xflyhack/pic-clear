@@ -35,6 +35,16 @@ except Exception as e:
     print(f"[FATAL] 缺少 tkinter：{e}", file=sys.stderr)
     sys.exit(1)
 
+# --- ttkbootstrap (可选, 装了就用, 没装 fallback 到原生 ttk) ---
+# v0.4.144: 引入现代化主题, 跟 genLicGui / sqFrameGrabGui 一致.
+# 只用主题引擎, 不用 bootstyle= 参数 (避免 1.x monkey-patch 兜底不稳).
+try:
+    import ttkbootstrap as tb  # type: ignore
+    TTKB_AVAILABLE = True
+except Exception:
+    tb = None  # type: ignore
+    TTKB_AVAILABLE = False
+
 import pipe_gui as _pg  # noqa: E402
 import pipeline  # noqa: E402
 from gui_log_util import GuiLogController  # noqa: E402
@@ -1452,7 +1462,14 @@ def main() -> int:
 
     # v0.4.105: 动态口令改成"常驻守护": 启动不校验, 24h 过期后运行时弹 Toplevel;
     # 输错/取消都不 sys.exit; 三个 GUI 抢锁避免多弹. 睡觉场景友好.
-    root = tk.Tk()
+    # v0.4.144: 有 ttkbootstrap 时用 Window(themename=...) 拿现代化主题.
+    if TTKB_AVAILABLE:
+        try:
+            root = tb.Window(themename="cosmo")  # type: ignore[attr-defined]
+        except Exception:
+            root = tk.Tk()
+    else:
+        root = tk.Tk()
     # 先隐藏窗口，等 UI 全部构造完再一次性 deiconify，避免"小窗口闪现→变大"
     root.withdraw()
     try:

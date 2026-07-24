@@ -26,6 +26,16 @@ from tkinter import (
 )
 from tkinter import ttk
 
+# --- ttkbootstrap (可选, 装了就用, 没装 fallback 到原生 ttk) ---
+# v0.4.144: 引入现代化主题, 跟 genLicGui / sqFrameGrabGui / sqDedupeGui 一致.
+# 只用主题引擎, 不用 bootstyle= 参数 (避免 1.x monkey-patch 兜底不稳).
+try:
+    import ttkbootstrap as tb  # type: ignore
+    TTKB_AVAILABLE = True
+except Exception:
+    tb = None  # type: ignore
+    TTKB_AVAILABLE = False
+
 import classify_pic
 import pipe_gui as _pg  # noqa: E402
 from gui_log_util import GuiLogController  # noqa: E402
@@ -990,7 +1000,19 @@ def main() -> int:
     # 支持 --skip-license 调试
     if "--skip-license" not in sys.argv:
         _check_license_or_die_gui()
-    root = Tk()
+    # v0.4.144: 有 ttkbootstrap 时用 Window(themename=...) 拿现代化主题.
+    if TTKB_AVAILABLE:
+        try:
+            root = tb.Window(themename="cosmo")  # type: ignore[attr-defined]
+        except Exception:
+            root = Tk()
+    else:
+        root = Tk()
+    # 先隐藏, 等 UI 构造 + 尺寸就位再显示, 避免小窗口闪现变大
+    try:
+        root.withdraw()
+    except Exception:
+        pass
     # v0.4.105: 动态口令改成"常驻守护"; 跟另外 3 个数旗 GUI 一致.
     # classify_gui 之前没接 OTP, 这次一起补上 (行为跟 dedupe / extract 完全一致).
     try:
@@ -999,6 +1021,12 @@ def main() -> int:
     except Exception as _otp_e:
         print(f"[OTP] install_otp_daemon 失败: {_otp_e}", file=sys.stderr)
     ClassifyApp(root)
+    # UI 已构造完, 显示成品
+    try:
+        root.update_idletasks()
+        root.deiconify()
+    except Exception:
+        pass
     root.mainloop()
     return 0
 

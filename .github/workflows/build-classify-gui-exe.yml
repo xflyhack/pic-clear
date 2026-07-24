@@ -26,6 +26,7 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller pyarmor
           pip install pystray>=0.19.5 keyboard>=0.13.5
+          pip install "ttkbootstrap>=1.10,<2.0"
 
       # ------------------------------------------------------------------
       # 导出 3 个 onnx（yolov8n / yolov8n-pose / mobilenetv3_embed）
@@ -97,12 +98,14 @@ jobs:
             --add-data "yolov8n-pose.onnx;." ^
             --add-data "mobilenetv3_embed.onnx;." ^
             --add-data "dist_obf\pyarmor_runtime_000000;pyarmor_runtime_000000" ^
+            --collect-all ttkbootstrap ^
             --hidden-import _version ^
             --hidden-import gui_log_util ^
             --hidden-import tray_util ^
             --hidden-import pystray ^
             --hidden-import pystray._win32 ^
             --hidden-import keyboard ^
+            --hidden-import ttkbootstrap ^
             --hidden-import env_probe ^
             --hidden-import winpath_util ^
             --hidden-import onnxruntime ^
