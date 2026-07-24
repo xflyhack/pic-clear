@@ -183,19 +183,23 @@ class ExtractGUI:
         saved_geo = self._cfg.get("window_geometry")
         if saved_geo:
             saved_geo = _pg._sanitize_saved_geometry(self.root, saved_geo)
-        # extract_gui 主页内容较多，额外要求高度 >= 560, 否则回退默认
-        # 避免历史保存的过矮窗口导致底部"开始抽帧"按钮被挤出可视区
+        # v0.4.142: 配置项挪到"配置"tab 后, 抽帧 tab 内容大幅收缩,
+        # 默认高度从 740 -> 500, 最小高度 620 -> 440. 保存过老窗口配置
+        # 高度阈值 560 -> 440, 老尺寸判定"过矮"也回退到新默认 (不然会残留 700px 大窗).
         if saved_geo:
             parsed = _pg._parse_geometry_str(saved_geo)
-            if parsed and parsed[1] < int(560 * self._ui_scale):
+            if parsed and parsed[1] < int(440 * self._ui_scale):
+                saved_geo = None
+            # v0.4.142: 老窗口保存过 > 620px 的高度, 主动缩到 500 (让用户看到新布局)
+            elif parsed and parsed[1] > int(620 * self._ui_scale):
                 saved_geo = None
         if saved_geo:
             self.root.geometry(saved_geo)
         else:
             self.root.geometry(_pg._compute_default_geometry(
                 self.root, self._ui_scale,
-                base_w=800, base_h=740, min_w=720, min_h=620))
-        self.root.minsize(int(720 * self._ui_scale), int(620 * self._ui_scale))
+                base_w=800, base_h=500, min_w=720, min_h=440))
+        self.root.minsize(int(720 * self._ui_scale), int(440 * self._ui_scale))
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         try:
