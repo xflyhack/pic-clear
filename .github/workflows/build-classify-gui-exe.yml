@@ -1,11 +1,11 @@
 name: Build Classify GUI EXE
 
 on:
+  # v0.4.132: 关闭 push main 自动触发, 避免每次改 py 都跑 30 分钟 CI + 撞 API 限流.
+  # 保留 tag 触发 (稳定版 -> Release) + workflow_dispatch (开发测试版 -> Artifacts).
   push:
-    branches: [main, master]
     tags: ['v*']
   workflow_dispatch:
-
 permissions:
   contents: write   # softprops/action-gh-release 需要写权限
 
