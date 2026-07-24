@@ -39,6 +39,26 @@ except Exception as e:
     print(f"[FATAL] 缺少 tkinter: {e}", file=sys.stderr)
     sys.exit(1)
 
+# --- ttkbootstrap (可选, 装了就用, 没装 fallback 到原生 ttk) ---
+# v0.4.127: 引入现代化主题. 保持"没装也能跑"以便本地 dev 无需强装.
+try:
+    import ttkbootstrap as tb  # type: ignore
+    from ttkbootstrap.constants import (  # type: ignore
+        PRIMARY, SUCCESS, INFO, WARNING, DANGER, SECONDARY, LIGHT, DARK, OUTLINE,
+    )
+    TTKB_AVAILABLE = True
+except Exception:
+    tb = None  # type: ignore
+    TTKB_AVAILABLE = False
+
+
+def _bstyle(**kwargs):
+    """辅助: 有 ttkbootstrap 时返回 bootstyle=..., 没有则返回空 dict.
+    这样每个控件的 style 参数都能安全传递, 原生 ttk 不认 bootstyle 会报错."""
+    if TTKB_AVAILABLE:
+        return kwargs
+    return {}
+
 # --- cryptography ---
 try:
     from cryptography.hazmat.primitives import hashes, serialization
@@ -193,23 +213,37 @@ class GenLicenseGUI:
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
 
-        # 顶部警告
-        warn = tk.Label(
-            self.root,
-            text="⚠ 此工具内置签发私钥，仅限内部使用，请勿外发。",
-            fg="red", font=("Microsoft YaHei", 10, "bold"),
-            anchor="w",
-        )
-        warn.pack(fill="x", padx=8, pady=(8, 0))
-
-        # 版权行（红色）
-        copyright_label = tk.Label(
-            self.root,
-            text=COPYRIGHT_TEXT,
-            fg="red", font=("Microsoft YaHei", 10, "bold"),
-            anchor="w",
-        )
-        copyright_label.pack(fill="x", padx=8, pady=(0, 0))
+        # 顶部警告 (ttkbootstrap 时用 danger inverse 底色, 原生 ttk 时用 fg="red")
+        if TTKB_AVAILABLE:
+            warn_box = ttk.Frame(self.root, **_bstyle(bootstyle="danger"))
+            warn_box.pack(fill="x", padx=8, pady=(8, 0))
+            ttk.Label(
+                warn_box,
+                text="⚠ 此工具内置签发私钥，仅限内部使用，请勿外发。",
+                **_bstyle(bootstyle="inverse-danger"),
+                font=("Microsoft YaHei", 10, "bold"),
+                anchor="w",
+            ).pack(fill="x", padx=6, pady=4)
+            ttk.Label(
+                self.root,
+                text=COPYRIGHT_TEXT,
+                **_bstyle(bootstyle="danger"),
+                font=("Microsoft YaHei", 10, "bold"),
+                anchor="w",
+            ).pack(fill="x", padx=8, pady=(4, 0))
+        else:
+            tk.Label(
+                self.root,
+                text="⚠ 此工具内置签发私钥，仅限内部使用，请勿外发。",
+                fg="red", font=("Microsoft YaHei", 10, "bold"),
+                anchor="w",
+            ).pack(fill="x", padx=8, pady=(8, 0))
+            tk.Label(
+                self.root,
+                text=COPYRIGHT_TEXT,
+                fg="red", font=("Microsoft YaHei", 10, "bold"),
+                anchor="w",
+            ).pack(fill="x", padx=8, pady=(0, 0))
 
         # 内置私钥状态
         key_hint_frame = tk.Frame(self.root)
@@ -228,17 +262,18 @@ class GenLicenseGUI:
             ).pack(fill="x")
 
         # ---- 指纹 ----
-        f_fp = ttk.LabelFrame(self.root, text="▶ 机器指纹")
+        f_fp = ttk.LabelFrame(self.root, text="▶ 机器指纹", **_bstyle(bootstyle="info"))
         f_fp.pack(fill="x", **pad)
         row = ttk.Frame(f_fp); row.pack(fill="x", padx=6, pady=6)
         ttk.Label(row, text="指纹:", width=8).pack(side="left")
-        entry_fp = ttk.Entry(row, textvariable=self._fp_var, width=40, font=("Consolas", 11))
+        entry_fp = ttk.Entry(row, textvariable=self._fp_var, width=40, font=("Consolas", 11),
+                             **_bstyle(bootstyle="info"))
         entry_fp.pack(side="left", fill="x", expand=True)
         entry_fp.focus_set()
         ttk.Label(f_fp, text="  形如 XXXX-XXXX-XXXX-XXXX，会自动大写", foreground="gray").pack(anchor="w", padx=6)
 
         # ---- 授权信息 ----
-        f_info = ttk.LabelFrame(self.root, text="▶ 授权信息")
+        f_info = ttk.LabelFrame(self.root, text="▶ 授权信息", **_bstyle(bootstyle="info"))
         f_info.pack(fill="x", **pad)
 
         row = ttk.Frame(f_info); row.pack(fill="x", padx=6, pady=3)
@@ -259,7 +294,7 @@ class GenLicenseGUI:
         ttk.Entry(row, textvariable=self._note_var, width=48).pack(side="left", fill="x", expand=True)
 
         # ---- 私钥来源 ----
-        f_key = ttk.LabelFrame(self.root, text="▶ 私钥来源")
+        f_key = ttk.LabelFrame(self.root, text="▶ 私钥来源", **_bstyle(bootstyle="info"))
         f_key.pack(fill="x", **pad)
         row = ttk.Frame(f_key); row.pack(fill="x", padx=6, pady=3)
         ttk.Radiobutton(row, text="使用内置私钥", variable=self._key_source_var,
@@ -267,15 +302,17 @@ class GenLicenseGUI:
         ttk.Radiobutton(row, text="外部文件:", variable=self._key_source_var,
                         value="external").pack(side="left", padx=(12, 4))
         ttk.Entry(row, textvariable=self._external_key_var, width=32).pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="浏览...", command=self._browse_key).pack(side="left", padx=4)
+        ttk.Button(row, text="浏览...", command=self._browse_key,
+                   **_bstyle(bootstyle="secondary-outline")).pack(side="left", padx=4)
 
         # ---- 输出 ----
-        f_out = ttk.LabelFrame(self.root, text="▶ 输出")
+        f_out = ttk.LabelFrame(self.root, text="▶ 输出", **_bstyle(bootstyle="info"))
         f_out.pack(fill="x", **pad)
         row = ttk.Frame(f_out); row.pack(fill="x", padx=6, pady=6)
         ttk.Label(row, text="保存到:", width=8).pack(side="left")
         ttk.Entry(row, textvariable=self._out_var, width=48).pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="浏览...", command=self._browse_out).pack(side="left", padx=4)
+        ttk.Button(row, text="浏览...", command=self._browse_out,
+                   **_bstyle(bootstyle="secondary-outline")).pack(side="left", padx=4)
 
         # 输出路径默认值：当前工作目录/license.lic
         self._out_var.set(str(Path.cwd() / "license.lic"))
@@ -283,11 +320,11 @@ class GenLicenseGUI:
         # ---- 底部按钮 ----
         f_btn = ttk.Frame(self.root); f_btn.pack(fill="x", pady=8)
         ttk.Button(f_btn, text="生成 license.lic", command=self._on_generate,
-                   width=20).pack(side="left", padx=10)
+                   width=20, **_bstyle(bootstyle="success")).pack(side="left", padx=10)
         ttk.Button(f_btn, text="填示例", command=self._fill_example,
-                   width=10).pack(side="left")
+                   width=10, **_bstyle(bootstyle="info-outline")).pack(side="left")
         ttk.Button(f_btn, text="退出", command=self.root.destroy,
-                   width=10).pack(side="right", padx=10)
+                   width=10, **_bstyle(bootstyle="secondary")).pack(side="right", padx=10)
 
         # ---- 底部 status bar：版权 + 版本 ----
         # 注意：必须先 pack 到 bottom，再 pack 结果 Text，否则 Text 的 expand=True
@@ -461,7 +498,15 @@ class GenLicenseGUI:
 # =========================================================================
 
 def main() -> int:
-    root = tk.Tk()
+    # v0.4.127: 有 ttkbootstrap 时用 Window(themename=...) 拿现代化主题;
+    # 没装 (本地 dev 或降级环境) 回退到 tk.Tk() 原生外观, 功能等价.
+    if TTKB_AVAILABLE:
+        try:
+            root = tb.Window(themename="cosmo")  # type: ignore[attr-defined]
+        except Exception:
+            root = tk.Tk()
+    else:
+        root = tk.Tk()
     try:
         if os.name == "nt":
             try:
