@@ -38,6 +38,18 @@ except Exception as e:
     print(f"[FATAL] 缺少 tkinter：{e}", file=sys.stderr)
     sys.exit(1)
 
+# --- ttkbootstrap (可选, 装了就用, 没装 fallback 到原生 ttk) ---
+# v0.4.143: 引入现代化主题. 只用主题引擎, 不用 bootstyle=... 参数 (gen_license
+# v0.4.127/129 的教训: 1.x 靠 monkey-patch 让原生 ttk 认 bootstyle, Windows 打包
+# 环境下对 LabelFrame 静默失败, 传 bootstyle 会 TclError). 主题引擎会自动给所有
+# ttk 控件 flat/modern 样式, 观感已经很现代化.
+try:
+    import ttkbootstrap as tb  # type: ignore
+    TTKB_AVAILABLE = True
+except Exception:
+    tb = None  # type: ignore
+    TTKB_AVAILABLE = False
+
 # 复用 pipe_gui 里的工具函数（DPI / 授权 / 图标 / 配置 / 托盘辅助）
 # pipe_gui.py 会跟这个 GUI 一起被 PyInstaller 打包
 import pipe_gui as _pg  # noqa: E402
@@ -1273,7 +1285,15 @@ def main() -> int:
             sys.exit(3)
 
     # v0.4.105: 动态口令改成"常驻守护"; 详见 pipe_gui.install_otp_daemon.
-    root = tk.Tk()
+    # v0.4.143: 有 ttkbootstrap 时用 Window(themename=...) 拿现代化主题;
+    # 没装 (本地 dev 或降级环境) 回退到 tk.Tk() 原生外观, 功能等价.
+    if TTKB_AVAILABLE:
+        try:
+            root = tb.Window(themename="cosmo")  # type: ignore[attr-defined]
+        except Exception:
+            root = tk.Tk()
+    else:
+        root = tk.Tk()
     # 先隐藏窗口，等 UI 全部构造完再一次性 deiconify，避免"小窗口闪现→变大"
     root.withdraw()
     try:
